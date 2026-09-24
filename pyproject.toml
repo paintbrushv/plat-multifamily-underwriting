@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multifamily-underwriting"
+version = "0.1.0"
+description = "Deterministic multifamily underwriting engine with schema-validated, statute-cited property tax logic"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "jsonschema>=4.0",
+    "openpyxl>=3.1",
+    "pdfplumber>=0.10",
+    "matplotlib>=3.7",
+    "xlrd>=2.0",
+    "python-pptx>=0.6",
+    "reportlab>=4.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+# Opt-in OM extraction via a hosted LLM (needs ANTHROPIC_API_KEY at runtime).
+# The core engine, parsers, validator, and tax logic never import these.
+om-llm = [
+    "anthropic>=0.25",
+    "langextract>=1.0.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "integration: tests that hit live external services (excluded from CI)",
+    "slow: long-running tests excluded from the default fast loop",
+]

@@ -1,0 +1,27 @@
+account_code,description,ptd_actual,ptd_budget,ptd_variance,ptd_variance_pct,ytd_actual,ytd_budget,ytd_variance,ytd_variance_pct,annual_budget,period,property_id,ptd_variance_type,ytd_variance_type,ptd_is_major,ytd_is_major
+5012-0010,Market Rent,80000,85000,-5000,-5.88,240000,255000,-15000,-5.88,340000,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+5012-0200,Concessions,-2000,-3000,1000,33.33,-6000,-9000,3000,33.33,-12000,Mar 2026,t001,Favorable,Favorable,True,True
+5012-0700,Vacancy Loss,-4000,-3000,-1000,-33.33,-12000,-9000,-3000,-33.33,-12000,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+5012-9999,NET RENTAL INCOME,74000,79000,-5000,-6.33,222000,237000,-15000,-6.33,316000,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+5041-0001,Water/Sewer RUBS,3000,2800,200,7.14,9000,8400,600,7.14,11200,Mar 2026,t001,Favorable,Favorable,False,False
+5041-9999,TOTAL RUBS INCOME,3000,2800,200,7.14,9000,8400,600,7.14,11200,Mar 2026,t001,Favorable,Favorable,False,False
+5051-0050,Package Locker Income,500,600,-100,-16.67,1500,1800,-300,-16.67,2400,Mar 2026,t001,Unfavorable,Unfavorable,False,False
+5051-9999,OTHER INCOME,500,600,-100,-16.67,1500,1800,-300,-16.67,2400,Mar 2026,t001,Unfavorable,Unfavorable,False,False
+5053-0001,Bad Debt,-1500,-1000,-500,-50.0,-4500,-3000,-1500,-50.0,-4000,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+5053-9999,TOTAL BAD DEBT EXPENSE,-1500,-1000,-500,-50.0,-4500,-3000,-1500,-50.0,-4000,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+5990-9999,EFFECTIVE GROSS INCOME,76000,81400,-5400,-6.63,228000,244200,-16200,-6.63,325600,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+6050-0010,Advertising,800,1000,-200,-20.0,2400,3000,-600,-20.0,4000,Mar 2026,t001,Favorable,Favorable,False,False
+6050-9999,TOTAL MARKETING EXPENSES,800,1000,-200,-20.0,2400,3000,-600,-20.0,4000,Mar 2026,t001,Favorable,Favorable,False,False
+6100-0010,Maintenance Salaries,5000,4000,1000,25.0,15000,12000,3000,25.0,16000,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+6100-0020,Office Salaries,3000,3500,-500,-14.29,9000,10500,-1500,-14.29,14000,Mar 2026,t001,Favorable,Favorable,False,False
+6100-9999,TOTAL PAYROLL EXPENSE,8000,7500,500,6.67,24000,22500,1500,6.67,30000,Mar 2026,t001,Unfavorable,Unfavorable,False,False
+6200-9999,TOTAL GENERAL & ADMINISTRATIVE EXPENSE,1200,1000,200,20.0,3600,3000,600,20.0,4000,Mar 2026,t001,Unfavorable,Unfavorable,False,False
+6250-0100,Electric,2000,1800,200,11.11,6000,5400,600,11.11,7200,Mar 2026,t001,Unfavorable,Unfavorable,False,False
+6250-0200,Water & Sewer,1500,1200,300,25.0,4500,3600,900,25.0,4800,Mar 2026,t001,Unfavorable,Unfavorable,False,False
+6250-9999,TOTAL UTILITY EXPENSES,3500,3000,500,16.67,10500,9000,1500,16.67,12000,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+6300-9999,TOTAL SERVICE CONTRACTS,2000,2200,-200,-9.09,6000,6600,-600,-9.09,8800,Mar 2026,t001,Favorable,Favorable,False,False
+6490-9999,TOTAL REPAIRS & MAINTENANCE EXPENSES,3000,2500,500,20.0,9000,7500,1500,20.0,10000,Mar 2026,t001,Unfavorable,Unfavorable,True,True
+6500-9999,TOTAL MANAGEMENT FEES,3800,4070,-270,-6.63,11400,12210,-810,-6.63,16280,Mar 2026,t001,Favorable,Favorable,False,False
+6551-9999,TOTAL TAXES & INSURANCE,8000,8200,-200,-2.44,24000,24600,-600,-2.44,32800,Mar 2026,t001,Favorable,Favorable,False,False
+6990-9999,TOTAL OPERATING EXPENSES,30300,29470,830,2.82,90900,88410,2490,2.82,117880,Mar 2026,t001,Unfavorable,Unfavorable,False,False
+6999-9999,NET OPERATING INCOME,45700,51930,-6230,-12.0,137100,155790,-18690,-12.0,207720,Mar 2026,t001,Unfavorable,Unfavorable,True,True

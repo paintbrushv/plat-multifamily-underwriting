@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.pytest-tmp/
+output/
+runs/deals/
+runs/staged_data_rooms/
+.env
+.env.*
