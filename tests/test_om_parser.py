@@ -1,6 +1,7 @@
 """Tests for OmData model, to_partial_deal(), and parse_om()."""
 import json
 import pytest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from engine.ingest.om_parser import OmData, OmUnitType
 
@@ -211,7 +212,13 @@ class TestParseOm:
         assert result.property_name == "Cedar Ridge Apartments"
 
     # ── use_langextract opt-in path ───────────────────────────────────────
+    # The extraction stack ships as the optional `om-llm` extra; when it is
+    # absent these tests cannot run and skip with the reason.
 
+    @pytest.mark.skipif(
+        not (Path(__file__).resolve().parents[1] / "engine" / "extraction").is_dir(),
+        reason="om-llm extra not installed: engine/extraction absent",
+    )
     def test_use_langextract_calls_new_extractor(self, tmp_path):
         from engine.ingest.om_parser import parse_om
         from engine.extraction.schemas import ExtractedDeal, ExtractedField
@@ -244,6 +251,10 @@ class TestParseOm:
         old_call.assert_called_once()
         new_call.assert_not_called()
 
+    @pytest.mark.skipif(
+        not (Path(__file__).resolve().parents[1] / "engine" / "extraction").is_dir(),
+        reason="om-llm extra not installed: engine/extraction absent",
+    )
     def test_use_langextract_partial_deal_carries_provenance(self, tmp_path):
         from engine.ingest.om_parser import parse_om
         from engine.extraction.schemas import ExtractedDeal, ExtractedField
