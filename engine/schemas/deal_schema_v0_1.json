@@ -1,0 +1,954 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "deal_schema_v0_1.json",
+  "title": "Canonical Deal Schema v0.1 (with v0.2 extensions)",
+  "_uniqueness_policy": {
+    "$comment": "Layered uniqueness enforcement (Wave 1a). JSON Schema's uniqueItems:true catches WHOLE-RECORD duplicates (every property identical) — see https://json-schema.org/understanding-json-schema/reference/array#uniqueItems. SUB-PROPERTY uniqueness (e.g., two unit_cohorts sharing cohort_id but differing in unit_count) is enforced by engine.validator cross-section checks. Future maintainers: add new uniqueness invariants to whichever layer matches the semantics.",
+    "schema_uniqueItems_whole_record": [
+      "unit_cohorts",
+      "revenue_programs",
+      "renovation_programs",
+      "market_rent_curve",
+      "loss_to_lease",
+      "physical_vacancy_curve",
+      "collection_loss_curve",
+      "program_adoption_curve",
+      "concession_schedule",
+      "replacement_reserves",
+      "capex_schedule",
+      "capex_upfront_funded",
+      "opex_table"
+    ],
+    "validator_cross_section_subproperty": {
+      "unit_cohorts": ["cohort_id (unique)"],
+      "revenue_programs": ["program_id (unique)"],
+      "renovation_programs": [
+        "program_id (unique)",
+        "target_cohort REF -> unit_cohorts.cohort_id",
+        "output_cohort NOT IN unit_cohorts.cohort_id (collision check)"
+      ],
+      "program_adoption_curve": ["program_id REF -> revenue_programs.program_id or renovation_programs.program_id"]
+    },
+    "intentionally_NOT_unique": {
+      "capital_stack": "Debt/equity layers may legitimately share rate/coupon/commitment values across tranches.",
+      "additional_debt_terms": "Multiple parallel debt facilities may share most fields."
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "metadata",
+    "time_grid",
+    "unit_cohorts",
+    "market_rent_curve",
+    "loss_to_lease",
+    "physical_vacancy_curve",
+    "collection_loss_curve",
+    "revenue_programs",
+    "program_adoption_curve"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "0.1" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deal_id", "run_id", "as_of_date", "analyst", "purpose"],
+      "properties": {
+        "deal_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "as_of_date": { "type": "string", "format": "date" },
+        "analyst": { "type": "string", "minLength": 1 },
+        "purpose": { "type": "string", "minLength": 1 },
+        "notes": { "type": "string" },
+        "property_summary": { "$ref": "#/$defs/property_summary" },
+        "address": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "object" }
+          ],
+          "description": "Subject property address, usually sourced from the OM or rent roll."
+        },
+        "market": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Subject market or metro slug/display label used for comps and memo routing."
+        },
+        "year_built": {
+          "type": ["integer", "null"],
+          "minimum": 1800,
+          "maximum": 2100,
+          "description": "Subject year built when source evidence supports it."
+        },
+        "om_extraction_confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+        "intake_sanity_flags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "V1.2 — sanity flags surfaced by intake (e.g. rent_roll_parser sanity flags such as target_monthly_rent_missing_for_cohort_<id>). Non-blocking; analyst review surface."
+        },
+        "purchase_assumptions_source": {
+          "type": "string",
+          "enum": ["om_haiku_extraction", "cli_flags", "analyst_override"],
+          "description": "V1.2 — provenance of purchase_assumptions when auto-populated by intake."
+        },
+        "analyst_review_required": {
+          "type": "boolean",
+          "description": "V1.2 — set when intake auto-populated fields that the analyst should sanity-check (e.g. OM-extracted purchase price)."
+        }
+      }
+    },
+    "time_grid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analysis_start_date", "analysis_end_date"],
+      "properties": {
+        "analysis_start_date": {
+          "anyOf": [
+            { "type": "string", "format": "date" },
+            { "type": "string", "pattern": "^\\d{4}-\\d{2}$" }
+          ]
+        },
+        "analysis_end_date": {
+          "anyOf": [
+            { "type": "string", "format": "date" },
+            { "type": "string", "pattern": "^\\d{4}-\\d{2}$" }
+          ]
+        }
+      }
+    },
+    "unit_cohorts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cohort_id", "unit_type", "unit_count", "initial_inplace_rent"],
+        "properties": {
+          "cohort_id": { "type": "string", "minLength": 1 },
+          "unit_type": { "type": "string", "minLength": 1 },
+          "unit_count": { "type": "integer", "minimum": 0 },
+          "sqft": { "type": "number", "minimum": 0 },
+          "initial_inplace_rent": { "type": "number", "minimum": 0 },
+          "bedrooms": { "type": "integer", "minimum": 0 },
+          "bathrooms": { "type": "number", "minimum": 0 },
+          "target_monthly_rent": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "V1.2 — default target monthly rent for the cohort, auto-derived from rent roll average market rent. Null when no rent data is available (sanity flag emitted). Analyst may override; intake records provenance via target_monthly_rent_source."
+          },
+          "target_monthly_rent_source": {
+            "type": "string",
+            "enum": ["rent_roll_avg", "missing", "analyst_override"],
+            "description": "V1.2 — provenance of target_monthly_rent. 'rent_roll_avg' = auto-defaulted from rent roll average. 'missing' = no rent data; analyst must supply. 'analyst_override' = manually edited."
+          }
+        }
+      }
+    },
+    "market_rent_curve": { "$ref": "#/$defs/cohort_curve_market_rent" },
+    "loss_to_lease": { "$ref": "#/$defs/cohort_curve_ltl" },
+    "physical_vacancy_curve": { "$ref": "#/$defs/cohort_curve_vacancy" },
+    "collection_loss_curve": { "$ref": "#/$defs/collection_loss_curve" },
+    "revenue_programs": { "$ref": "#/$defs/revenue_programs" },
+    "program_adoption_curve": { "$ref": "#/$defs/program_adoption_curve" },
+    "program_capacity": { "$ref": "#/$defs/program_capacity" },
+    "program_costs": { "$ref": "#/$defs/program_costs" },
+    "utility_recovery_rules": { "$ref": "#/$defs/utility_recovery_rules" },
+    "opex_table": { "$ref": "#/$defs/opex_table" },
+    "turnover_assumptions": { "$ref": "#/$defs/turnover_assumptions" },
+    "capex_schedule": { "$ref": "#/$defs/capex_schedule" },
+    "debt_terms": { "$ref": "#/$defs/debt_terms" },
+    "additional_debt_terms": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/debt_terms" }
+    },
+    "capital_stack": {
+      "type": "array",
+      "description": "Capital stack layers ordered by priority. When present, overrides debt_terms/additional_debt_terms.",
+      "items": { "$ref": "#/$defs/capital_stack_layer" }
+    },
+    "debt_draw_schedule": { "$ref": "#/$defs/debt_draw_schedule" },
+    "exit_assumptions": { "$ref": "#/$defs/exit_assumptions" },
+    "purchase_assumptions": { "$ref": "#/$defs/purchase_assumptions" },
+    "pricing_provenance": { "$ref": "#/$defs/pricing_provenance" },
+    "renovation_programs": { "$ref": "#/$defs/renovation_programs" },
+    "unit_renovations": {
+      "type": "array",
+      "description": "Per-unit renovation overrides. Units listed here are subtracted from cohort pools before program scheduling runs.",
+      "items": { "$ref": "#/$defs/unit_renovation" }
+    },
+    "renovation_detail": {
+      "type": "object",
+      "description": "Sidecar for rich per-unit renovation metadata from plat-costmodel. Engine ignores this; output formatters may render it.",
+      "additionalProperties": true
+    },
+    "growth_assumptions": { "$ref": "#/$defs/growth_assumptions" },
+    "ltl_decay_assumptions": { "$ref": "#/$defs/ltl_decay_assumptions" },
+    "fund_assumptions": { "$ref": "#/$defs/fund_assumptions" },
+    "replacement_reserves": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["start_period", "end_period", "annual_amount"],
+        "properties": {
+          "start_period": { "$ref": "#/$defs/month" },
+          "end_period": { "$ref": "#/$defs/month" },
+          "annual_amount": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "capex_upfront_funded": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["start_period", "end_period", "amount"],
+        "properties": {
+          "start_period": { "$ref": "#/$defs/month" },
+          "end_period": { "$ref": "#/$defs/month" },
+          "amount": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "refi_event": { "$ref": "#/$defs/refi_event" },
+    "concession_schedule": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Lease-up concessions that reduce effective revenue during specified periods. Concessions burn off when the schedule expires.",
+      "items": { "$ref": "#/$defs/concession_entry" }
+    },
+    "trade_out_assumptions": { "$ref": "#/$defs/trade_out_assumptions" },
+    "options": {
+      "type": "object",
+      "description": "Engine run options. Controls market automation, output toggles, etc.",
+      "additionalProperties": false,
+      "properties": {
+        "market_automation_level": {
+          "type": "string",
+          "enum": ["auto", "suggest", "off"],
+          "default": "off",
+          "description": "auto: apply market adjustments with confidence scoring. suggest: compute and report but don't apply. off: no market adjustments."
+        },
+        "market_intel_path": {
+          "type": "string",
+          "description": "Override path to market intel JSON. Defaults to data/market_intel/{metro_slug}.json derived from deal metro."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "property_summary": {
+      "type": "object",
+      "properties": {
+        "property_tax_policy": { "$ref": "#/$defs/property_tax_policy" }
+      }
+    },
+    "property_tax_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "millage_rate_mills",
+        "assessment_ratio",
+        "source",
+        "source_locator",
+        "analyst_override"
+      ],
+      "properties": {
+        "millage_rate_mills": { "type": "number", "exclusiveMinimum": 0 },
+        "assessment_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "source": { "type": "string", "minLength": 1 },
+        "source_locator": { "type": "string", "minLength": 1 },
+        "analyst_override": { "type": "boolean" }
+      }
+    },
+    "month": {
+      "description": "Month identifier; accepts YYYY-MM or YYYY-MM-01 (date format) and normalizes internally to the first day of the month.",
+      "anyOf": [
+        { "type": "string", "pattern": "^\\d{4}-\\d{2}$" },
+        { "type": "string", "format": "date" }
+      ]
+    },
+    "cohort_curve_market_rent": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cohort_id", "start_period", "end_period", "market_rent"],
+        "properties": {
+          "cohort_id": { "type": "string", "minLength": 1 },
+          "start_period": { "$ref": "#/$defs/month" },
+          "end_period": { "$ref": "#/$defs/month" },
+          "market_rent": { "type": "number", "minimum": 0 },
+          "target_monthly_rent_source": {
+            "type": "string",
+            "enum": ["rent_roll_market", "in_place_fallback"],
+            "description": "Provenance of the market_rent value (Bug 1.12). 'rent_roll_market' = explicit market rent from rent roll; 'in_place_fallback' = synthesized from initial_inplace_rent because no market rent was on file. Wave 1 validator may flag deals where every cohort uses the fallback."
+          }
+        }
+      }
+    },
+    "cohort_curve_ltl": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cohort_id", "start_period", "end_period", "ltl_percent"],
+        "properties": {
+          "cohort_id": { "type": "string", "minLength": 1 },
+          "start_period": { "$ref": "#/$defs/month" },
+          "end_period": { "$ref": "#/$defs/month" },
+          "ltl_percent": { "type": "number", "minimum": -1, "maximum": 1 }
+        }
+      }
+    },
+    "cohort_curve_vacancy": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cohort_id", "start_period", "end_period", "vacancy_rate"],
+        "properties": {
+          "cohort_id": { "type": "string", "minLength": 1 },
+          "start_period": { "$ref": "#/$defs/month" },
+          "end_period": { "$ref": "#/$defs/month" },
+          "vacancy_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "collection_loss_curve": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["applies_to", "start_period", "end_period", "loss_rate"],
+        "properties": {
+          "applies_to": { "type": "string", "enum": ["Rent", "Programs", "ALL"] },
+          "start_period": { "$ref": "#/$defs/month" },
+          "end_period": { "$ref": "#/$defs/month" },
+          "loss_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "revenue_programs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["program_id", "program_name", "program_type", "pricing_type", "price_value", "eligible_units", "start_period"],
+        "properties": {
+          "program_id": { "type": "string", "minLength": 1 },
+          "program_name": { "type": "string", "minLength": 1 },
+          "program_type": { "type": "string", "enum": ["tenant-based", "asset-based", "recovery"] },
+          "pricing_type": { "type": "string", "enum": ["$/unit", "% rent", "$/asset", "$/occupied_unit"] },
+          "price_value": { "type": "number", "minimum": 0 },
+          "eligible_units": { "type": "string", "minLength": 1 },
+          "start_period": { "$ref": "#/$defs/month" },
+          "end_period": { "$ref": "#/$defs/month" }
+        }
+      }
+    },
+    "program_adoption_curve": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["program_id", "start_period", "end_period", "adoption_rate"],
+        "properties": {
+          "program_id": { "type": "string", "minLength": 1 },
+          "start_period": { "$ref": "#/$defs/month" },
+          "end_period": { "$ref": "#/$defs/month" },
+          "adoption_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "program_capacity": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["program_id", "total_capacity"],
+        "properties": {
+          "program_id": { "type": "string", "minLength": 1 },
+          "total_capacity": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "program_costs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["program_id", "cost_type", "cost_value"],
+        "properties": {
+          "program_id": { "type": "string", "minLength": 1 },
+          "cost_type": { "type": "string", "enum": ["fixed", "% revenue", "$/unit"] },
+          "cost_value": { "type": "number" }
+        }
+      }
+    },
+    "utility_recovery_rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["utility_category", "recovery_basis", "recovery_rate"],
+        "properties": {
+          "utility_category": { "type": "string", "minLength": 1 },
+          "recovery_basis": { "type": "string", "minLength": 1 },
+          "recovery_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "lag_months": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "opex_table": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category_name", "calculation_type", "base_value", "recoverable_flag"],
+        "properties": {
+          "category_name": { "type": "string", "minLength": 1 },
+          "calculation_type": { "type": "string", "enum": ["fixed_annual", "fixed_monthly", "per_unit", "per_unit_monthly", "percent_egr", "percent_rent", "per_sqft"] },
+          "base_value": { "type": "number" },
+          "growth_rate": { "type": "number" },
+          "growth_start_year": { "type": "integer", "minimum": 0 },
+          "recoverable_flag": { "type": "boolean" },
+          "source_rows": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Raw category labels that mapped into this canonical category (Bug 1.6 provenance — Wave 3 Task 3.2)."
+          }
+        }
+      }
+    },
+    "turnover_assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cohort_id", "renewal_rate", "turnover_cost", "downtime_months"],
+        "properties": {
+          "cohort_id": { "type": "string", "minLength": 1 },
+          "renewal_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "turnover_cost": { "type": "number", "minimum": 0 },
+          "downtime_months": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "capex_schedule": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "capex_type"],
+        "properties": {
+          "category": { "type": "string", "minLength": 1 },
+          "capex_type": { "type": "string", "enum": ["one_time", "renovation", "reserve", "recurring"] },
+          "month": { "$ref": "#/$defs/month" },
+          "amount": { "type": "number" },
+          "amount_per_unit": { "type": "number" },
+          "amount_per_unit_monthly": { "type": "number" },
+          "timing": { "type": "string", "enum": ["monthly", "annual"] },
+          "units_affected": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "debt_terms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commitment", "rate", "amort_years"],
+      "properties": {
+        "commitment": { "type": "number", "minimum": 0 },
+        "rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "amort_years": { "type": "integer", "minimum": 1 },
+        "io_months": { "type": "integer", "minimum": 0 },
+        "term_months": { "type": "integer", "minimum": 1 },
+        "loan_start_month": { "$ref": "#/$defs/month" },
+        "is_assumable": { "type": "boolean" },
+        "loan_closing_costs": { "type": "number", "minimum": 0 },
+        "fixed_monthly_payment": { "type": "number", "minimum": 0 },
+        "staged_draws": { "type": "boolean" },
+        "skip_maturity_ds": { "type": "boolean" },
+        "rate_type": { "type": "string", "enum": ["fixed", "variable"], "default": "fixed" },
+        "base_spread": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rate_cap": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rate_floor": { "type": "number", "minimum": 0, "maximum": 1 },
+        "cap_cost": { "type": "number", "minimum": 0 },
+        "rate_curve": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["start_month", "rate"],
+            "properties": {
+              "start_month": { "$ref": "#/$defs/month" },
+              "rate": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
+        "rate_cap_expiry_month": {
+          "$ref": "#/$defs/month",
+          "description": "Month when rate cap expires. After this, rate floats uncapped (or at renewal_cap)."
+        },
+        "rate_cap_renewal_cost": {
+          "type": "number", "minimum": 0,
+          "description": "One-time cost for rate cap renewal, modeled as expense in expiry month."
+        },
+        "rate_cap_renewal_rate": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "New cap rate after renewal. If absent, cap is removed entirely."
+        },
+        "prepayment_type": {
+          "type": "string",
+          "enum": ["none", "defeasance", "yield_maintenance", "percentage"],
+          "default": "none",
+          "description": "Prepayment penalty type applied on early payoff."
+        },
+        "prepayment_lockout_months": {
+          "type": "integer", "minimum": 0,
+          "description": "Number of months from loan start during which prepayment is not allowed."
+        },
+        "prepayment_penalty_pct": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "For percentage type: penalty as % of outstanding balance."
+        },
+        "treasury_rate": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Treasury rate used for defeasance/yield maintenance PV calculations."
+        }
+      }
+    },
+    "capital_stack_layer": {
+      "type": "object",
+      "description": "A single layer in the capital stack. Extends debt_terms with layer_type and priority. Preferred equity uses pref_return_rate instead of amortization.",
+      "additionalProperties": false,
+      "required": ["layer_type", "priority", "commitment", "rate"],
+      "properties": {
+        "layer_type": { "type": "string", "enum": ["senior", "mezzanine", "preferred_equity"] },
+        "priority": { "type": "integer", "minimum": 1, "description": "Payment priority (1 = most senior)" },
+        "label": { "type": "string", "description": "Display name (e.g., 'Senior Bridge', 'Mezz Tranche A')" },
+        "commitment": { "type": "number", "minimum": 0 },
+        "rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "amort_years": { "type": "integer", "minimum": 1 },
+        "io_months": { "type": "integer", "minimum": 0 },
+        "term_months": { "type": "integer", "minimum": 1 },
+        "loan_start_month": { "$ref": "#/$defs/month" },
+        "is_assumable": { "type": "boolean" },
+        "loan_closing_costs": { "type": "number", "minimum": 0 },
+        "fixed_monthly_payment": { "type": "number", "minimum": 0 },
+        "staged_draws": { "type": "boolean" },
+        "skip_maturity_ds": { "type": "boolean" },
+        "rate_type": { "type": "string", "enum": ["fixed", "variable"], "default": "fixed" },
+        "base_spread": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rate_cap": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rate_floor": { "type": "number", "minimum": 0, "maximum": 1 },
+        "cap_cost": { "type": "number", "minimum": 0 },
+        "rate_curve": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["start_month", "rate"],
+            "properties": {
+              "start_month": { "$ref": "#/$defs/month" },
+              "rate": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
+        "pref_return_rate": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Annual preferred return rate (for preferred_equity layers only). Return is accrued monthly on outstanding balance."
+        },
+        "pref_accrual": {
+          "type": "string", "enum": ["current_pay", "accruing"],
+          "default": "current_pay",
+          "description": "current_pay: paid monthly from CF. accruing: compounds if CF insufficient."
+        }
+      }
+    },
+    "debt_draw_schedule": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["month", "draw_amount"],
+        "properties": {
+          "month": { "$ref": "#/$defs/month" },
+          "draw_amount": { "type": "number" }
+        }
+      }
+    },
+    "refi_event": {
+      "type": "object",
+      "description": "Dynamic refinance event. Sizes a permanent loan from stabilized NOI at the trigger month, replaces the bridge loan, and computes refi proceeds/shortfall.",
+      "additionalProperties": false,
+      "required": ["trigger_month", "sizing_method"],
+      "properties": {
+        "trigger_month": {
+          "$ref": "#/$defs/month",
+          "description": "Month when the refi closes and perm loan originates"
+        },
+        "sizing_method": {
+          "type": "string",
+          "enum": ["dscr", "ltv"],
+          "description": "How to size the perm loan: 'dscr' from stabilized NOI, 'ltv' from property value"
+        },
+        "target_dscr": {
+          "type": "number",
+          "minimum": 1,
+          "description": "Target DSCR for perm loan sizing (required when sizing_method=dscr)"
+        },
+        "target_ltv": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Target LTV for perm loan sizing (required when sizing_method=ltv)"
+        },
+        "perm_loan_terms": {
+          "type": "object",
+          "description": "Terms for the dynamically sized perm loan (commitment is computed, not required here)",
+          "additionalProperties": false,
+          "required": ["rate", "amort_years"],
+          "properties": {
+            "rate": { "type": "number", "minimum": 0, "maximum": 1 },
+            "amort_years": { "type": "integer", "minimum": 1 },
+            "io_months": { "type": "integer", "minimum": 0 },
+            "term_months": { "type": "integer", "minimum": 1 },
+            "rate_type": { "type": "string", "enum": ["fixed", "variable"], "default": "fixed" },
+            "base_spread": { "type": "number", "minimum": 0, "maximum": 1 },
+            "rate_cap": { "type": "number", "minimum": 0, "maximum": 1 },
+            "rate_floor": { "type": "number", "minimum": 0, "maximum": 1 },
+            "rate_curve": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["start_month", "rate"],
+                "properties": {
+                  "start_month": { "$ref": "#/$defs/month" },
+                  "rate": { "type": "number", "minimum": 0, "maximum": 1 }
+                }
+              }
+            }
+          }
+        },
+        "refi_costs_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.1,
+          "description": "Refi closing costs as % of new loan amount (default 0.01 = 1%)"
+        },
+        "noi_months": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 24,
+          "description": "Trailing months of NOI to annualize for sizing (default 12)"
+        },
+        "exit_cap_for_ltv": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Cap rate to value property for LTV sizing (defaults to exit_assumptions.exit_cap_rate)"
+        }
+      }
+    },
+    "exit_assumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exit_cap_rate", "exit_month"],
+      "properties": {
+        "exit_cap_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "sale_cost_percent": { "type": "number", "minimum": 0, "maximum": 1 },
+        "exit_month": { "$ref": "#/$defs/month" },
+        "forward_noi_override": { "type": "number", "minimum": 0 }
+      }
+    },
+    "purchase_assumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["purchase_price", "equity_contribution"],
+      "properties": {
+        "purchase_price": { "type": "number", "exclusiveMinimum": 0 },
+        "closing_costs": { "type": "number", "minimum": 0 },
+        "equity_contribution": { "type": "number", "minimum": 0 },
+        "total_equity_basis": { "type": "number", "minimum": 0 },
+        "total_unlevered_basis": { "type": "number", "minimum": 0 },
+        "closing_date": { "$ref": "#/$defs/month" }
+      }
+    },
+    "pricing_provenance": {
+      "type": "object",
+      "description": "Captures the OM-vs-whisper-vs-strike pricing context for this deal. Optional; when present, strike_price MUST equal purchase_assumptions.purchase_price (cross-section validator).",
+      "additionalProperties": false,
+      "required": ["strike_price", "strike_price_basis", "strike_price_derivation", "as_of_date"],
+      "properties": {
+        "published_om_price": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Listed asking price from the OM. null when offering is unpriced."
+        },
+        "broker_whisper_price": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Verbal guidance / whisper from broker. null when no whisper communicated."
+        },
+        "strike_price": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The price the analyst is underwriting. MUST equal purchase_assumptions.purchase_price."
+        },
+        "strike_price_basis": {
+          "type": "string",
+          "enum": [
+            "om_published",
+            "broker_whisper",
+            "broker_whisper_minus_5pct",
+            "broker_whisper_minus_10pct",
+            "cap_rate_derived",
+            "analyst_target",
+            "other"
+          ],
+          "description": "Categorical label for how the strike was set."
+        },
+        "strike_price_derivation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Free-text recipe-style explanation (e.g., '76M whisper × 0.95 ≈ 72.2M; cross-validates 6.50% cap on T12 NOI')."
+        },
+        "om_pricing_process": {
+          "type": "string",
+          "enum": [
+            "published_asking_price",
+            "best_offers_loi_unpriced",
+            "call_for_offers",
+            "unknown"
+          ],
+          "description": "Marketing process the broker is running."
+        },
+        "as_of_date": {
+          "type": "string",
+          "format": "date",
+          "description": "When this provenance snapshot was recorded (YYYY-MM-DD)."
+        }
+      }
+    },
+    "renovation_programs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["program_id", "program_name", "target_cohort", "output_cohort", "renovation_cost_per_unit", "rent_premium_monthly", "downtime_days", "strategy", "start_month", "monthly_pace"],
+        "properties": {
+          "program_id": { "type": "string", "minLength": 1 },
+          "program_name": { "type": "string", "minLength": 1 },
+          "target_cohort": { "type": "string", "minLength": 1 },
+          "output_cohort": { "type": "string", "minLength": 1 },
+          "renovation_cost_per_unit": { "type": "number", "minimum": 0 },
+          "rent_premium_monthly": { "type": "number" },
+          "downtime_days": { "type": "integer", "minimum": 0 },
+          "strategy": { "type": "string", "enum": ["on_turnover", "proactive"] },
+          "start_month": { "$ref": "#/$defs/month" },
+          "end_month": { "$ref": "#/$defs/month" },
+          "monthly_pace": { "type": "integer", "minimum": 0 },
+          "min_monthly_pace": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Optional analyst override for on_turnover programs. Defaults to 0 so natural-turnover renovation volume is not forced when monthly turnover is below one unit."
+          },
+          "max_units": { "type": "integer", "minimum": 0 },
+          "post_renovation_market_rent": { "type": "number", "minimum": 0 },
+          "seasonal_downtime_multipliers": {
+            "type": "object",
+            "description": "Monthly multipliers for downtime_days. Keys are zero-padded month numbers 01-12. Missing months default to 1.0.",
+            "additionalProperties": false,
+            "patternProperties": {
+              "^(0[1-9]|1[0-2])$": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "growth_assumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["growth_type", "annual_growth_rate"],
+      "properties": {
+        "growth_type": { "type": "string", "enum": ["annual_compound", "monthly_compound", "step_only"] },
+        "annual_growth_rate": { "type": "number" },
+        "growth_start_month": { "$ref": "#/$defs/month" }
+      }
+    },
+    "ltl_decay_assumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decay_type", "initial_ltl_percent"],
+      "properties": {
+        "decay_type": { "type": "string", "enum": ["annual_step", "monthly_linear", "none"] },
+        "initial_ltl_percent": { "type": "number", "minimum": 0, "maximum": 1 },
+        "annual_decay_rate": { "type": "number", "minimum": 0 },
+        "minimum_ltl_percent": { "type": "number", "minimum": 0, "maximum": 1 },
+        "decay_start_month": { "$ref": "#/$defs/month" }
+      }
+    },
+    "concession_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["concession_id", "start_month", "end_month", "concession_type", "amount", "applies_to_cohort"],
+      "properties": {
+        "concession_id": { "type": "string", "minLength": 1 },
+        "start_month": { "$ref": "#/$defs/month" },
+        "end_month": { "$ref": "#/$defs/month" },
+        "concession_type": {
+          "type": "string",
+          "enum": ["free_months", "fixed_dollar", "pct_rent"],
+          "description": "free_months: amount = free months on 12-mo lease (1 = 8.33% reduction). fixed_dollar: $/occupied unit/month. pct_rent: decimal fraction of billed rent."
+        },
+        "amount": { "type": "number", "minimum": 0 },
+        "applies_to_cohort": {
+          "type": "string", "minLength": 1,
+          "description": "Cohort ID or 'ALL' for all cohorts."
+        }
+      }
+    },
+    "trade_out_assumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["annual_turnover_pct", "expected_trade_out_pct"],
+      "properties": {
+        "annual_turnover_pct": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Fraction of units turning over annually."
+        },
+        "expected_trade_out_pct": {
+          "type": "number",
+          "description": "Expected rent increase on new leases vs expiring (e.g. 0.03 = 3%)."
+        }
+      }
+    },
+    "unit_renovation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit_id", "cohort_id", "renovation_month", "scope", "cost", "expected_premium"],
+      "properties": {
+        "unit_id": { "type": "string", "minLength": 1 },
+        "cohort_id": { "type": "string", "minLength": 1 },
+        "renovation_month": { "$ref": "#/$defs/month" },
+        "scope": { "type": "string", "minLength": 1 },
+        "cost": { "type": "number", "minimum": 0 },
+        "expected_premium": { "type": "number" },
+        "downtime_days": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fund_assumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sponsor_equity_pct": { "type": "number", "minimum": 0, "maximum": 1 },
+        "lp_equity_pct": { "type": "number", "minimum": 0, "maximum": 1 },
+        "preferred_return": { "type": "number", "minimum": 0 },
+        "promote_splits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tier", "hurdle_irr", "lp_share", "gp_share"],
+            "properties": {
+              "tier": { "type": "string" },
+              "hurdle_irr": { "type": "number", "minimum": 0 },
+              "lp_share": { "type": "number", "minimum": 0, "maximum": 1 },
+              "gp_share": { "type": "number", "minimum": 0, "maximum": 1 },
+              "initial_balance_source": { "type": "string", "enum": ["lp_equity", "gp_equity", "total_equity"] }
+            }
+          }
+        },
+        "promote_tiers": {
+          "type": "array",
+          "description": "Multi-tier waterfall. If present, overrides promote_splits.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tier", "hurdle_irr", "lp_share", "gp_share"],
+            "properties": {
+              "tier": { "type": "string" },
+              "hurdle_irr": { "type": "number", "minimum": 0 },
+              "lp_share": { "type": "number", "minimum": 0, "maximum": 1 },
+              "gp_share": { "type": "number", "minimum": 0, "maximum": 1 },
+              "catch_up": { "type": "boolean", "default": false },
+              "catch_up_target_pct": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
+        "clawback_enabled": { "type": "boolean", "default": false },
+        "gp_coinvest_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "GP co-invest as % of total equity. Co-invest capital earns pari passu pref with LP capital."
+        },
+        "partners": {
+          "type": "array",
+          "description": "JV mode: each partner runs an independent waterfall on their equity share. When present, overrides sponsor_equity_pct/lp_equity_pct.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "equity_pct"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "equity_pct": { "type": "number", "minimum": 0, "maximum": 1 },
+              "role": { "type": "string", "enum": ["lp", "gp"], "default": "lp" },
+              "pref_rate": { "type": "number", "minimum": 0 },
+              "promote_tiers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["tier", "hurdle_irr", "lp_share", "gp_share"],
+                  "properties": {
+                    "tier": { "type": "string" },
+                    "hurdle_irr": { "type": "number", "minimum": 0 },
+                    "lp_share": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "gp_share": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "catch_up": { "type": "boolean", "default": false },
+                    "catch_up_target_pct": { "type": "number", "minimum": 0, "maximum": 1 }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "acquisition_fee_pct": { "type": "number", "minimum": 0 },
+        "asset_management_fee_pct": { "type": "number", "minimum": 0 },
+        "disposition_fee_pct": { "type": "number", "minimum": 0 },
+        "annual_partnership_expenses": { "type": "number", "minimum": 0 },
+        "partnership_closing_costs": { "type": "number", "minimum": 0 },
+        "growing_equity_basis": { "type": "boolean", "default": false },
+        "jv_partner_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "JV partner name for co-branded outputs (PDF, PPTX, Excel headers)."
+        },
+        "jv_partner_logo_path": {
+          "type": "string",
+          "description": "Path to partner logo (PNG/SVG) for co-branded outputs."
+        },
+        "am_fee_schedule": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0 }
+        }
+      }
+    }
+  }
+}
