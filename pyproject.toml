@@ -3,7 +3,7 @@ requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "multifamily-underwriting"
+name = "plat-multifamily-underwriting"
 version = "0.1.0"
 description = "Deterministic multifamily underwriting engine: rent roll and T12 ingestion, schema-validated deals, monthly cashflow and waterfall math, and statute-cited property tax regimes"
 readme = "README.md"
