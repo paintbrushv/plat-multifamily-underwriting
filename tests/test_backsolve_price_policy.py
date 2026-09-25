@@ -5,14 +5,14 @@ import json
 from pathlib import Path
 import sys
 
-import runs.backsolve_price_for_target_coc as backsolve
-import runs.backsolve_price_for_target_coc as backsolve_module
+import engine.backsolve as backsolve
+import engine.backsolve as backsolve_module
 
 import pytest
 
 from engine.property_tax import PropertyTaxPolicyError
 
-from runs.backsolve_price_for_target_coc import (
+from engine.backsolve import (
     _apply_house_revenue_policy,
     _apply_revenue_quality_bridge,
     _build_price_case,
@@ -133,7 +133,7 @@ def test_preview_projected_noi_supplies_required_pricing_provenance(monkeypatch)
         return {"cashflow": {"by_year": [{"net_operating_income": 1_000_000}]}}
 
     monkeypatch.setattr(
-        "runs.backsolve_price_for_target_coc.run_underwriting",
+        "engine.backsolve.run_underwriting",
         fake_run_underwriting,
     )
     canonical = {
