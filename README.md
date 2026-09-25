@@ -1,4 +1,4 @@
-# multifamily-underwriting
+# plat-multifamily-underwriting
 
 Deterministic multifamily underwriting engine: rent roll / T12 ingestion,
 a schema-validated canonical deal format, monthly cashflow + waterfall math,
