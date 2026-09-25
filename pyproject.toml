@@ -1,24 +1,64 @@
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "multifamily-underwriting"
 version = "0.1.0"
-description = "Deterministic multifamily underwriting engine with schema-validated, statute-cited property tax logic"
+description = "Deterministic multifamily underwriting engine: rent roll and T12 ingestion, schema-validated deals, monthly cashflow and waterfall math, and statute-cited property tax regimes"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    {name = "paintbrush"}
+]
+keywords = [
+    "multifamily",
+    "real-estate",
+    "underwriting",
+    "cashflow",
+    "rent-roll",
+    "t12",
+    "property-tax",
+    "proptech",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Real Estate",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+# Dep audit (module-level imports only; everything else is lazy and guarded):
+# jsonschema (validator), lxml (xlsx_writer), matplotlib (pdf_onepager,
+# portfolio_pdf, pptx_generator), openpyxl (excel_io, excel_output,
+# xlsx_helpers, portfolio_xlsx, modules/yardi_etl), pptx (pptx_generator),
+# reportlab (pdf_onepager, portfolio_pdf), python-dateutil (rediq_bridge).
+# Lazy/optional: pandas (legacy .xls rent rolls; dev extra), pdfplumber
+# (om_parser), pyyaml (market_integration config loads; own ImportError
+# guard), anthropic+langextract (om-llm extra only).
 dependencies = [
     "jsonschema>=4.0",
-    "openpyxl>=3.1",
-    "pdfplumber>=0.10",
+    "lxml>=4.9",
     "matplotlib>=3.7",
-    "xlrd>=2.0",
+    "openpyxl>=3.1",
+    "python-dateutil>=2.8",
     "python-pptx>=0.6",
     "reportlab>=4.0",
-    "pyyaml>=6.0",
+    "xlrd>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/paintbrushv/plat-multifamily-underwriting"
+Repository = "https://github.com/paintbrushv/plat-multifamily-underwriting"
+Issues = "https://github.com/paintbrushv/plat-multifamily-underwriting/issues"
+Changelog = "https://github.com/paintbrushv/plat-multifamily-underwriting/blob/main/README.md"
 
 [project.optional-dependencies]
 dev = [
@@ -37,6 +77,10 @@ om-llm = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["engine*"]
+
+[tool.setuptools.package-data]
+engine = ["schemas/*.json"]
+"engine.schemas" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

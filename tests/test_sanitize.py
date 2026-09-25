@@ -69,10 +69,24 @@ _GUIDE_RE = re.compile(
 )
 
 _SKIP_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", ".pytest-tmp"}
+# The public GitHub org handle is intentional public metadata in pyproject
+# [project.urls] (all five sibling releases carry it); it is a private
+# literal everywhere else in the tree.
+_ORG_URL_PREFIXES = (
+    "https://github.com/paintbrushv/",
+    "git+https://github.com/paintbrushv/",
+)
 _TEXT_SUFFIXES = {
     ".py", ".json", ".md", ".toml", ".txt", ".yml", ".yaml", ".cfg",
     ".ini", ".csv", ".html", ".css", ".js", ".sh", ".example", "",
 }
+
+
+def _strip_org_urls(text: str) -> str:
+    """Remove the intentional public org URLs before literal scanning."""
+    for prefix in _ORG_URL_PREFIXES:
+        text = text.replace(prefix, "https://github.com/<org>/")
+    return text
 
 
 def _iter_text_files() -> list[Path]:
@@ -84,6 +98,8 @@ def _iter_text_files() -> list[Path]:
             continue
         if path.suffix.lower() not in _TEXT_SUFFIXES:
             continue
+        if path.name.endswith(".egg-info") or ".egg-info" in path.parts:
+            continue
         files.append(path)
     return files
 
@@ -94,7 +110,7 @@ def test_no_private_literals_in_tree() -> None:
         if path.resolve() == _SELF:
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        lowered = text.lower()
+        lowered = _strip_org_urls(text).lower()
         for snippet, why in _FORBIDDEN.items():
             if snippet in lowered:
                 hits.append(f"{path.relative_to(REPO)}: {snippet!r} ({why})")
