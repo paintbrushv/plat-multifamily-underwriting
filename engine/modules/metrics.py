@@ -298,6 +298,22 @@ def find_stabilized_year(
     return max(2, min_year)
 
 
+def _full_year_unlevered_noi(
+    surface: Optional[Dict[str, Any]],
+    months_in_year: Optional[int],
+) -> Optional[float]:
+    """NOI before debt on one complete 12-month projection year.
+
+    ``net_operating_income`` is the unlevered line. A partial year, or a row
+    without that line, stays missing rather than becoming zero.
+    """
+    if not isinstance(surface, dict) or "net_operating_income" not in surface:
+        return None
+    if months_in_year != 12:
+        return None
+    return float(round2(dec(surface["net_operating_income"])))
+
+
 def compute_metrics(
     time_grid: TimeGrid,
     cashflow_by_month: List[Dict[str, Any]],
@@ -472,7 +488,11 @@ def compute_metrics(
     unlev_em = _em_rediq(-float(total_unlevered_basis), unlev_annual)
     lev_em = _em_rediq(-float(total_equity_basis), lev_annual)
 
-    # Calculate yields
+    # Calculate yields.
+    # Year-2 unlevered NOI is the second 12-month projection year, the same
+    # surface as year-1 NOI. It is not the stabilized calendar-year row.
+    year_2_surface = None
+    year_2_months = None
     if (
         cashflow_by_month
         and time_grid.month_ids
@@ -480,9 +500,22 @@ def compute_metrics(
     ):
         analysis_years = aggregate_analysis_years(cashflow_by_month, time_grid.month_ids[0])
         year_1_surface = analysis_years[0] if analysis_years else (cashflow_by_year[0] if cashflow_by_year else {})
+        if len(analysis_years) > 1:
+            year_2_surface = analysis_years[1]
+            year_2_months = year_2_surface.get("months_in_year")
     else:
         year_1_surface = cashflow_by_year[0] if cashflow_by_year else {}
+        if len(cashflow_by_year) > 1:
+            year_2_surface = cashflow_by_year[1]
+            year_label = str(year_2_surface.get("year", ""))
+            if cashflow_by_month and year_label:
+                year_2_months = sum(
+                    1
+                    for row in cashflow_by_month
+                    if str(row.get("month", ""))[:4] == year_label
+                )
     year_1_noi = dec(year_1_surface.get("net_operating_income", 0))
+    year_2_unlevered_noi = _full_year_unlevered_noi(year_2_surface, year_2_months)
     # Cap = NOI / price. A missing or non-positive price is undefined, not 0%.
     going_in_cap = year_1_noi / purchase_price if purchase_price > 0 else None
     yield_on_cost = year_1_noi / total_investment if total_investment > 0 else Decimal("0")
@@ -584,6 +617,7 @@ def compute_metrics(
         "exit": exit_result,
         "noi": {
             "year_1_noi": float(round2(year_1_noi)),
+            "year_2_unlevered_noi": year_2_unlevered_noi,
             "stabilized_year_noi": float(round2(stab_noi)),
             "stabilized_year": stabilized_year,
         },
