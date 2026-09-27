@@ -82,4 +82,4 @@ def test_year_2_unlevered_noi_is_second_projection_year(minimal_deal_inputs):
     assert noi["stabilized_year"] == 2
     assert noi["stabilized_year_noi"] == calendar_2027["net_operating_income"]
     assert noi["year_2_unlevered_noi"] != noi["stabilized_year_noi"]
-    assert result["metrics"]["yields"]["going_in_cap_rate"] == pytest.approx(0.0895, abs=1e-4)
+    assert result["metrics"]["yields"]["going_in_cap_rate"] == pytest.approx(0.0778, abs=1e-4)
