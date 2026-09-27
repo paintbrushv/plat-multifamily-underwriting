@@ -329,7 +329,13 @@ def compute_metrics(
             "equity_contribution": 0,
         }
 
-    purchase_price = dec(purchase_assumptions.get("purchase_price", 0))
+    # Absent or null price stays a zero basis for the other metrics, which
+    # already treat a missing price as no investment. The cap rate below
+    # must not turn that stand-in into a published 0% cap.
+    raw_purchase_price = purchase_assumptions.get("purchase_price")
+    purchase_price = (
+        dec(raw_purchase_price) if raw_purchase_price is not None else Decimal("0")
+    )
     closing_costs = dec(purchase_assumptions.get("closing_costs", 0))
     equity_contribution = dec(purchase_assumptions.get("equity_contribution", 0))
     # total_equity_basis = actual Day 0 cash outlay (equity + closing costs +
@@ -477,7 +483,8 @@ def compute_metrics(
     else:
         year_1_surface = cashflow_by_year[0] if cashflow_by_year else {}
     year_1_noi = dec(year_1_surface.get("net_operating_income", 0))
-    going_in_cap = year_1_noi / purchase_price if purchase_price > 0 else Decimal("0")
+    # Cap = NOI / price. A missing or non-positive price is undefined, not 0%.
+    going_in_cap = year_1_noi / purchase_price if purchase_price > 0 else None
     yield_on_cost = year_1_noi / total_investment if total_investment > 0 else Decimal("0")
 
     # V1.5 policy: Year-1 Cash-on-Cash net of capex, AM fees, partnership
@@ -581,7 +588,7 @@ def compute_metrics(
             "stabilized_year": stabilized_year,
         },
         "yields": {
-            "going_in_cap_rate": round4(going_in_cap),
+            "going_in_cap_rate": None if going_in_cap is None else round4(going_in_cap),
             "exit_cap_rate": round4(dec(exit_assumptions.get("exit_cap_rate", 0))) if exit_assumptions else 0.0,
             "going_in_yield_on_cost": round4(yield_on_cost),
             "stabilized_yield_on_cost": round4(dec(stab_yoc)) if stab_yoc else stab_yoc,
