@@ -231,6 +231,41 @@ class TestMetricsYields(unittest.TestCase):
         # Cap rate = 100000 / 2000000 = 0.05 = 5%
         self.assertAlmostEqual(result["yields"]["going_in_cap_rate"], 0.05, places=2)
 
+    def test_missing_purchase_price_does_not_publish_zero_cap(self):
+        """A missing purchase price stays missing; it must not publish a 0 cap."""
+        time_grid = TimeGrid.build("2026-01", "2026-12")
+        cashflow_by_month = [
+            {"month": f"2026-{m:02d}", "unleveraged_cash_flow": 8000, "leveraged_cash_flow": 3000}
+            for m in range(1, 13)
+        ]
+        cashflow_by_year = [{
+            "year": "2026",
+            "net_operating_income": 100000,
+            "debt_service": 60000,
+            "unleveraged_cash_flow": 96000,
+            "leveraged_cash_flow": 36000,
+        }]
+        debt_by_month = [{"month": f"2026-{m:02d}", "ending_balance": 1000000} for m in range(1, 13)]
+
+        missing_prices = (
+            None,
+            {},
+            {"closing_costs": 0, "equity_contribution": 500000},
+            {"purchase_price": None, "equity_contribution": 500000},
+            {"purchase_price": 0, "equity_contribution": 500000},
+        )
+        for purchase_assumptions in missing_prices:
+            result = compute_metrics(
+                time_grid, cashflow_by_month, cashflow_by_year, debt_by_month,
+                purchase_assumptions=purchase_assumptions,
+            )
+            cap = result["yields"]["going_in_cap_rate"]
+            self.assertIsNone(cap)
+            self.assertNotEqual(cap, 0)
+            self.assertNotEqual(cap, 0.0)
+            # NOI is unchanged; only the unpublished cap stays missing.
+            self.assertEqual(result["noi"]["year_1_noi"], 100000.0)
+
 
 class TestMetricsMissingInputs(unittest.TestCase):
     """Test handling of missing inputs."""
