@@ -1,6 +1,7 @@
 import unittest
 
 from engine.engine import run_underwriting
+from tests.synthetic_tax_policy import with_synthetic_tax_policy
 
 
 class TestRevenueBaseRent(unittest.TestCase):
@@ -57,7 +58,7 @@ class TestRevenueBaseRent(unittest.TestCase):
             "program_adoption_curve": []
         }
 
-        outputs = run_underwriting(inputs)
+        outputs = run_underwriting(with_synthetic_tax_policy(inputs))
         row = outputs["revenue"]["base_rent"]["by_month"][0]
 
         self.assertAlmostEqual(row["market_rent"], 12000.00, places=2)  # 1200 * 10
@@ -79,12 +80,12 @@ class TestRevenueBaseRent(unittest.TestCase):
             }
         ]
 
-        outputs = run_underwriting(inputs)
+        outputs = run_underwriting(with_synthetic_tax_policy(inputs))
         row = outputs["cashflow"]["by_month"][0]
 
         self.assertAlmostEqual(row["utility_recovery"], 0.00, places=2)
         self.assertAlmostEqual(row["effective_gross_income"], 12000.00, places=2)
-        self.assertAlmostEqual(row["net_operating_income"], 11000.00, places=2)
+        self.assertAlmostEqual(row["net_operating_income"], 10999.00, places=2)
 
     def test_multiple_utility_recovery_rules_apply_by_category(self):
         inputs = self._base_inputs()
@@ -109,14 +110,13 @@ class TestRevenueBaseRent(unittest.TestCase):
             {"utility_category": "electric", "recovery_basis": "percent_of_expense", "recovery_rate": 0.25},
         ]
 
-        outputs = run_underwriting(inputs)
+        outputs = run_underwriting(with_synthetic_tax_policy(inputs))
         row = outputs["cashflow"]["by_month"][0]
 
         self.assertAlmostEqual(row["utility_recovery"], 1000.00, places=2)
         self.assertAlmostEqual(row["effective_gross_income"], 13000.00, places=2)
-        self.assertAlmostEqual(row["net_operating_income"], 10000.00, places=2)
+        self.assertAlmostEqual(row["net_operating_income"], 9999.00, places=2)
 
 
 if __name__ == "__main__":
     unittest.main()
-

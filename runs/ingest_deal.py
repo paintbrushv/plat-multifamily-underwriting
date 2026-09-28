@@ -276,7 +276,7 @@ def main() -> int:
         print(f"Ingesting documents for: {property_id}")
         print(f"  Rent roll: {rent_roll_path}")
         print(f"  T12:       {t12_path}")
-        print(f"  Period:    {args.start} → {args.end}")
+        print(f"  Period:    {args.start} to {args.end}")
 
         result = build_deal_from_documents(
             property_id=property_id,

@@ -14,6 +14,8 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
+from tests.synthetic_tax_policy import with_synthetic_tax_policy
+
 from engine.modules.debt import compute_debt, compute_preferred_equity
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, round2
@@ -219,7 +221,7 @@ class TestCapitalStackEngine(unittest.TestCase):
             "amort_years": 30,
             "io_months": 24,
         }
-        result = run_underwriting(inputs)
+        result = run_underwriting(with_synthetic_tax_policy(inputs))
         self.assertIn("debt", result)
         self.assertIn("cashflow", result)
         self.assertNotIn("capital_stack", result)
@@ -228,7 +230,7 @@ class TestCapitalStackEngine(unittest.TestCase):
         """3-layer capital stack produces correct output structure."""
         from engine.engine import run_underwriting
 
-        result = run_underwriting(self._base_inputs())
+        result = run_underwriting(with_synthetic_tax_policy(self._base_inputs()))
         self.assertIn("capital_stack", result)
         cs = result["capital_stack"]
         self.assertEqual(len(cs["layers"]), 3)
@@ -240,7 +242,7 @@ class TestCapitalStackEngine(unittest.TestCase):
         """Combined DSCR (senior + mezz) < senior-only DSCR."""
         from engine.engine import run_underwriting
 
-        result = run_underwriting(self._base_inputs())
+        result = run_underwriting(with_synthetic_tax_policy(self._base_inputs()))
         cs = result["capital_stack"]
         if cs["senior_dscr"] is not None and cs["combined_dscr"] is not None:
             self.assertGreater(cs["senior_dscr"], cs["combined_dscr"])
@@ -249,7 +251,7 @@ class TestCapitalStackEngine(unittest.TestCase):
         """Total debt service in cashflow includes all layers."""
         from engine.engine import run_underwriting
 
-        result = run_underwriting(self._base_inputs())
+        result = run_underwriting(with_synthetic_tax_policy(self._base_inputs()))
         # Sum all years for full-period comparison
         total_ds = sum(yr["debt_service"] for yr in result["cashflow"]["by_year"])
         # 5 years (60 months):
@@ -271,7 +273,7 @@ class TestCapitalStackEngine(unittest.TestCase):
             {"layer_type": "mezzanine", "priority": 2, "commitment": 3_000_000,
              "rate": 0.12, "amort_years": 25, "io_months": 60},
         ]
-        result = run_underwriting(inputs)
+        result = run_underwriting(with_synthetic_tax_policy(inputs))
         cs = result["capital_stack"]
         self.assertEqual(len(cs["layers"]), 2)
         self.assertIsNotNone(cs["combined_dscr"])
