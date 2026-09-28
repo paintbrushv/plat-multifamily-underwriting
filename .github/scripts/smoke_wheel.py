@@ -41,7 +41,7 @@ def main() -> int:
         py = str(venv_dir / "bin" / "python")
 
         run([py, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
-        run([py, "-m", "pip", "install", "--quiet", wheel])
+        run([py, "-m", "pip", "install", "--quiet", wheel + "[mcp]"])
 
         # Imports
         run([py, "-c",
@@ -74,6 +74,12 @@ def main() -> int:
              "assert report.status == 'FAIL', report.status; "
              "assert report.issues; "
              "print('validator-ok', len(report.issues), 'issues')"])
+
+        # The stdio adapter must be present in the installed wheel.
+        run([py, "-I", "-c",
+             "from engine.mcp_server import CONTRACT_VERSION, mcp; "
+             "assert CONTRACT_VERSION == 'plat.underwriting.mcp/1'; "
+             "assert mcp is not None; print('mcp-adapter-ok')"])
 
     print("SMOKE OK")
     return 0

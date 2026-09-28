@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plat-multifamily-underwriting"
-version = "0.1.0"
+version = "0.1.1"
 description = "Deterministic multifamily underwriting engine: rent roll and T12 ingestion, schema-validated deals, monthly cashflow and waterfall math, and statute-cited property tax regimes"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -65,8 +65,13 @@ Issues = "https://github.com/paintbrushv/plat-multifamily-underwriting/issues"
 Changelog = "https://github.com/paintbrushv/plat-multifamily-underwriting/blob/main/README.md"
 
 [project.optional-dependencies]
+mcp = [
+    "mcp>=1.23,<2",
+]
 dev = [
     "pytest>=7.0",
+    "mcp>=1.23,<2",
+    "pdfplumber>=0.10",
     # The legacy .xls rent-roll parser imports pandas lazily; the parser test
     # exercises that path. (xlrd is a core dependency.)
     "pandas>=2.0",

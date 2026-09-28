@@ -9,6 +9,8 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 
+from tests.synthetic_tax_policy import with_synthetic_tax_policy
+
 from engine.modules.revenue import compute_base_rent
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec
@@ -322,7 +324,7 @@ class TestTradeOutSpread(unittest.TestCase):
             "expected_trade_out_pct": 0.03,
         }
 
-        result = run_underwriting(inputs)
+        result = run_underwriting(with_synthetic_tax_policy(inputs))
         self.assertIn("trade_out", result)
         to = result["trade_out"]
         self.assertIn("by_month", to)
@@ -343,7 +345,7 @@ class TestTradeOutSpread(unittest.TestCase):
             "expected_trade_out_pct": 0.03,
         }
 
-        result = run_underwriting(inputs)
+        result = run_underwriting(with_synthetic_tax_policy(inputs))
         m1 = result["trade_out"]["by_month"][0]
         self.assertAlmostEqual(float(m1["trade_out_spread"]), 0.0, places=2)
 
@@ -455,8 +457,8 @@ class TestEngineIntegration(unittest.TestCase):
             "applies_to_cohort": "ALL",
         }]
 
-        result_with = run_underwriting(inputs)
-        result_without = run_underwriting(inputs_no_conc)
+        result_with = run_underwriting(with_synthetic_tax_policy(inputs))
+        result_without = run_underwriting(with_synthetic_tax_policy(inputs_no_conc))
 
         # Year 1 NOI should be lower with concessions
         yr1_with = result_with["cashflow"]["by_year"][0]
@@ -490,7 +492,7 @@ class TestEngineIntegration(unittest.TestCase):
             "applies_to_cohort": "ALL",
         }]
 
-        result = run_underwriting(inputs)
+        result = run_underwriting(with_synthetic_tax_policy(inputs))
         rent_m1 = result["revenue"]["base_rent"]["by_month"][0]
         self.assertIn("concession_amount", rent_m1)
         self.assertIn("billed_after_concessions", rent_m1)
@@ -522,7 +524,7 @@ class TestBackwardCompat(unittest.TestCase):
         from engine.engine import run_underwriting
 
         inputs = TestTradeOutSpread._base_inputs(TestTradeOutSpread())
-        result = run_underwriting(inputs)
+        result = run_underwriting(with_synthetic_tax_policy(inputs))
         self.assertNotIn("trade_out", result)
 
 

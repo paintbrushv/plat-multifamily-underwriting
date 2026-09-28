@@ -20,6 +20,7 @@ pytest
 | `engine/validator.py` | Schema v0.1 conformance + reference integrity + cohort-overlap gates. |
 | `engine/property_tax.py`, `engine/tax_regimes.py` | Millage-based property tax projection with per-regime statute citations. |
 | `engine/api.py` | Framework-free JSON request handlers (`handle_run_deal`, portfolio, refi-vs-sell). |
+| `engine/mcp_server.py` | Installed `plat.underwriting.mcp/1` stdio adapter for validation, small summary metrics, and feasibility. |
 | `runs/ingest_deal.py` | Canonical intake CLI: documents or agent-authored JSON -> validated deal JSON. |
 
 Quick start — run the intake CLI on the synthetic fixtures:
@@ -29,6 +30,14 @@ python runs/ingest_deal.py --rent-roll tests/fixtures/sample_rent_roll.csv \
   --t12 tests/fixtures/sample_t12.csv --start 2026-05 --end 2031-04 \
   --property-id "Sample Deal" --output output/sample.json --validate
 ```
+
+For the optional MCP adapter, install `plat-multifamily-underwriting[mcp]`
+and run `python -m engine.mcp_server` from any working directory. It exposes
+three read-only tools and does not persist a deal or emit workbook artifacts.
+Callers should pin the producer version and package contents before relying
+on its results. The feasibility response evaluates IRR, DSCR, and LTV; a
+missing purchase price or debt commitment leaves LTV unavailable and fails
+that gate.
 
 ## Honest limitations
 
