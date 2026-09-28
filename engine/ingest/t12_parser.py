@@ -607,6 +607,25 @@ def _resolve_groups(
         if _duplicates_prior_child_suffix(group, amount):
             continue
 
+        # A combined tax/insurance subtotal has no canonical combined
+        # category. Unlike "TOTAL UTILITIES", its two account categories
+        # must remain separate when they reconcile to the subtotal.
+        if (
+            group.subtotal_row and group.detail_rows
+            and "TAXES AND INSURANCE" in _normalize_statement_label(group.subtotal_row[0])
+        ):
+            detail_categories = {
+                match for detail_label, _ in group.detail_rows
+                if (match := _matches_category_map(detail_label)) is not None
+            }
+            detail_sum = sum(detail_amount for _, detail_amount in group.detail_rows)
+            if len(detail_categories) > 1 and abs(detail_sum - amount) <= 0.01:
+                for detail_label, detail_amount in group.detail_rows:
+                    match = _matches_category_map(detail_label)
+                    rows.append((match or detail_label.strip().title(), [detail_amount]))
+                    row_indent_levels.append(group.indent_level)
+                continue
+
         canonical: str | None = None
         if group.subtotal_row:
             canonical = _normalize_subtotal_category(group.subtotal_row[0])

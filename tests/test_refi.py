@@ -14,6 +14,8 @@ Tests cover:
 import unittest
 from decimal import Decimal
 
+from tests.synthetic_tax_policy import with_synthetic_tax_policy
+
 from engine.modules.debt import (
     _annual_debt_constant,
     _calculate_amortizing_payment,
@@ -469,7 +471,7 @@ class TestEngineIntegration(unittest.TestCase):
         from engine.engine import run_underwriting
 
         inputs = self._make_minimal_inputs()
-        result = run_underwriting(inputs, skip_validation=True)
+        result = run_underwriting(with_synthetic_tax_policy(inputs), skip_validation=True)
         self.assertNotIn("refi", result)
 
     def test_with_refi_event_produces_refi_section(self):
@@ -483,7 +485,7 @@ class TestEngineIntegration(unittest.TestCase):
             "perm_loan_terms": {"rate": 0.055, "amort_years": 30, "io_months": 12},
         }
         inputs = self._make_minimal_inputs(refi_event)
-        result = run_underwriting(inputs, skip_validation=True)
+        result = run_underwriting(with_synthetic_tax_policy(inputs), skip_validation=True)
 
         self.assertIn("refi", result)
         refi = result["refi"]
@@ -504,7 +506,7 @@ class TestEngineIntegration(unittest.TestCase):
             "perm_loan_terms": {"rate": 0.055, "amort_years": 30, "io_months": 12},
         }
         inputs = self._make_minimal_inputs(refi_event)
-        result = run_underwriting(inputs, skip_validation=True)
+        result = run_underwriting(with_synthetic_tax_policy(inputs), skip_validation=True)
 
         # Every month should have some cashflow activity
         for m in result["cashflow"]["by_month"]:

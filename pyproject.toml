@@ -71,6 +71,7 @@ mcp = [
 dev = [
     "pytest>=7.0",
     "mcp>=1.23,<2",
+    "pdfplumber>=0.10",
     # The legacy .xls rent-roll parser imports pandas lazily; the parser test
     # exercises that path. (xlrd is a core dependency.)
     "pandas>=2.0",

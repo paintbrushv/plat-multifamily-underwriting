@@ -12,6 +12,7 @@ import pytest
 
 from engine.engine import run_underwriting
 from engine.modules.revenue import _find_curve_value
+from tests.synthetic_tax_policy import with_synthetic_tax_policy
 
 
 def _base_inputs():
@@ -59,7 +60,7 @@ def test_cohort_ids_dedupe_preserves_order():
         {"cohort_id": "c1", "unit_type": "1B", "unit_count": 10, "initial_inplace_rent": 1000}
     )
 
-    outputs = run_underwriting(inputs, skip_validation=True)
+    outputs = run_underwriting(with_synthetic_tax_policy(inputs), skip_validation=True)
     row = outputs["revenue"]["base_rent"]["by_month"][0]
 
     # Without dedup, market_rent would be 12000 * 2 = 24000; with dedup it stays at 12000.
@@ -92,7 +93,7 @@ def test_cohort_ids_order_preserved_with_three_cohorts():
     inputs["loss_to_lease"] = [r for r in inputs["loss_to_lease"] if r["cohort_id"] != "c1"]
     inputs["physical_vacancy_curve"] = [r for r in inputs["physical_vacancy_curve"] if r["cohort_id"] != "c1"]
 
-    outputs = run_underwriting(inputs, skip_validation=True)
+    outputs = run_underwriting(with_synthetic_tax_policy(inputs), skip_validation=True)
     row = outputs["revenue"]["base_rent"]["by_month"][0]
     # 3 unique cohorts × $100 each = $300. With double-count of `a`, would be $400.
     assert row["market_rent"] == pytest.approx(300.00, abs=0.01)

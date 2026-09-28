@@ -1,6 +1,7 @@
 import unittest
 
 from engine.engine import run_underwriting
+from tests.synthetic_tax_policy import with_synthetic_tax_policy
 
 
 class TestRevenuePrograms(unittest.TestCase):
@@ -43,7 +44,7 @@ class TestRevenuePrograms(unittest.TestCase):
             "program_adoption_curve": [{"program_id": "p1", "start_period": "2026-01", "end_period": "2026-02", "adoption_rate": 1.0}],
         }
 
-        outputs = run_underwriting(inputs)
+        outputs = run_underwriting(with_synthetic_tax_policy(inputs))
         by_month = outputs["revenue"]["programs"]["by_month"]
 
         self.assertAlmostEqual(by_month[0]["billed_programs"], 1000.00, places=2)
@@ -97,7 +98,7 @@ class TestRevenuePrograms(unittest.TestCase):
             "program_adoption_curve": [{"program_id": "p1", "start_period": "2026-01", "end_period": "2026-01", "adoption_rate": 1.0}],
         }
 
-        outputs = run_underwriting(inputs)
+        outputs = run_underwriting(with_synthetic_tax_policy(inputs))
         by_program = outputs["revenue"]["programs"]["by_program_by_month"]
 
         self.assertEqual(by_program[0]["billable_units"], 5.0)
@@ -138,7 +139,7 @@ class TestRevenuePrograms(unittest.TestCase):
             "program_capacity": [{"program_id": "p1", "total_capacity": 6}]
         }
 
-        outputs = run_underwriting(inputs)
+        outputs = run_underwriting(with_synthetic_tax_policy(inputs))
         by_month = outputs["revenue"]["programs"]["by_month"]
         self.assertEqual(len(by_month), 2)
         self.assertAlmostEqual(by_month[0]["billed_programs"], 300.00, places=2)  # min(10*0.9,6)*50
