@@ -1,7 +1,6 @@
 """Tests for the ingestion pipeline: T12 + rent roll → canonical deal JSON."""
 import hashlib
 import json
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -439,12 +438,18 @@ def test_broker_tax_locator_is_stable_across_temporary_om_paths():
 
 
 def test_local_om_relative_and_absolute_paths_produce_identical_canonical(
-    tmp_path,
+    tmp_path, monkeypatch,
 ):
     absolute_om = tmp_path / "deal" / "raw_inputs" / "Local OM.pdf"
     absolute_om.parent.mkdir(parents=True)
     absolute_om.write_bytes(b"fixture")
-    relative_om = Path(os.path.relpath(absolute_om, Path.cwd()))
+    # A Windows CI checkout and its temporary directory can be on different
+    # drives, where os.path.relpath is undefined. Compare both forms from
+    # the temporary directory while keeping fixture paths absolute.
+    relative_om = absolute_om.relative_to(tmp_path)
+    roll = (Path(__file__).resolve().parents[1] / ROLL).resolve()
+    t12 = (Path(__file__).resolve().parents[1] / T12).resolve()
+    monkeypatch.chdir(tmp_path)
 
     parser_patches = (
         patch(
@@ -478,16 +483,16 @@ def test_local_om_relative_and_absolute_paths_produce_identical_canonical(
     ), parser_patches[4]:
         relative_result = build_deal_from_documents(
             property_id="Cedar Ridge",
-            rent_roll_path=ROLL,
-            t12_path=T12,
+            rent_roll_path=roll,
+            t12_path=t12,
             analysis_start="2026-05",
             analysis_end="2031-04",
             om_path=relative_om,
         )
         absolute_result = build_deal_from_documents(
             property_id="Cedar Ridge",
-            rent_roll_path=ROLL,
-            t12_path=T12,
+            rent_roll_path=roll,
+            t12_path=t12,
             analysis_start="2026-05",
             analysis_end="2031-04",
             om_path=absolute_om,
