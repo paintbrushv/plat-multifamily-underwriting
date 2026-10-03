@@ -301,6 +301,8 @@ def test_main_missing_millage_precedes_ancillary_bridge_economics(
             "canonical.json",
             "--output-dir",
             str(tmp_path),
+            "--policy-version", "plat.backsolve-policy/1",
+            "--benchmark-as-of", "2026-10-03", "--benchmark-source", "synthetic:test",
             "--benchmark-5yr-treasury",
             "0.04",
             "--exit-cap-rate",
@@ -1402,6 +1404,8 @@ def _run_stubbed_backsolve_main(
             str(canonical_path),
             "--output-dir",
             str(output_dir),
+            "--policy-version", "plat.backsolve-policy/1",
+            "--benchmark-as-of", "2026-10-03", "--benchmark-source", "synthetic:test",
             "--benchmark-5yr-treasury",
             "0.04",
             "--exit-cap-rate",
@@ -1411,7 +1415,7 @@ def _run_stubbed_backsolve_main(
             "--max-price",
             str(max_price),
             "--max-iterations",
-            "8",
+            "20",
         ],
     )
 
