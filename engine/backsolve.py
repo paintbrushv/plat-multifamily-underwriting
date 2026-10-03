@@ -156,7 +156,7 @@ def _costar_exit_cap_rate_for_case(
     }
 
 
-def _costar_market_vacancy_for_case(
+def _market_vacancy_for_case(
     canonical: dict[str, Any],
     broker_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -783,10 +783,10 @@ def _vacancy_anchor_summary(
     t12_vacancy = _extract_t12_vacancy_rate(trailing_actuals)
     broker_table_vacancy = _extract_broker_vacancy_rate(broker_snapshot)
     broker_anchor = broker_vacancy if broker_vacancy is not None else broker_table_vacancy
-    costar = _costar_market_vacancy_for_case(canonical, broker_snapshot)
-    costar_vacancy = (
-        Decimal(str(costar["vacancy_rate"]))
-        if costar and costar.get("vacancy_rate") is not None
+    market = _market_vacancy_for_case(canonical, broker_snapshot)
+    market_vacancy = (
+        Decimal(str(market["vacancy_rate"]))
+        if market and market.get("vacancy_rate") is not None
         else None
     )
     cohort_rates = [
@@ -800,14 +800,14 @@ def _vacancy_anchor_summary(
         "rent_roll_vacant": rent_roll_vacant,
         "t12_vacancy_gpr": t12_vacancy,
         "vintage_house_floor": default_vacancy,
-        "costar_market_current_quarter": costar_vacancy,
+        "supplied_market_benchmark": market_vacancy,
     }
     conservative_candidates = {
         "broker_om": broker_anchor,
         "rent_roll_vacant_plus_notice": vacant_plus_notice,
         "t12_vacancy_gpr": t12_vacancy,
         "vintage_house_floor": default_vacancy,
-        "costar_market_current_quarter": costar_vacancy,
+        "supplied_market_benchmark": market_vacancy,
     }
     usable_base = {k: v for k, v in base_candidates.items() if v is not None}
     usable_conservative = {k: v for k, v in conservative_candidates.items() if v is not None}
@@ -835,7 +835,7 @@ def _vacancy_anchor_summary(
             "applied property-wide unless explicitly selected."
         ),
         "observed_status_counts": status_counts,
-        "costar_market_vacancy_source": costar,
+        "market_vacancy_benchmark_source": market,
     }
 
 
