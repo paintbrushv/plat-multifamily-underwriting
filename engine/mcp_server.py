@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from engine.engine import run_underwriting
 from engine.validator import validate_deal
@@ -16,7 +16,7 @@ from engine.version import ENGINE_VERSION, SCHEMA_VERSION
 
 
 CONTRACT_VERSION = "plat.underwriting.mcp/1"
-mcp = FastMCP("multifamily-underwriting")
+mcp = MCPServer("multifamily-underwriting")
 
 
 def _identity() -> dict:

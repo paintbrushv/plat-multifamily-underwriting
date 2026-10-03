@@ -75,3 +75,9 @@ tenant IDs, or credentials. See [CONTRIBUTING.md](CONTRIBUTING.md) and
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## v0.1 packaging candidate
+
+The MCP adapter uses MCP 2.3–2.x. Install the `[mcp]` extra and run `plat-underwriting-mcp` (stdio).
+
+CI builds wheel/source archives, tests a fresh wheel environment, and validates runtime/package versions. A release tag must match `pyproject.toml`, use an unused PyPI version, and pass the full CI workflow before the tested artifacts can be uploaded. Candidate versions are not published by this change.
