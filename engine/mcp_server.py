@@ -28,6 +28,28 @@ def _identity() -> dict:
 
 
 @mcp.tool()
+def backsolve_deal_price(inputs: dict, target_coc: str, policy: dict, benchmark: dict,
+                        min_price: str = "1000000.00", max_price: str = "100000000.00",
+                        max_iterations: int = 40) -> dict:
+    """Find a price using an explicit versioned policy and dated benchmark.
+
+    Rates use fractional decimal strings. Return assumptions, tested bounds,
+    and honest convergence status without writing artifacts or cashflow arrays.
+    """
+    from engine.backsolve import backsolve_price
+
+    try:
+        result = backsolve_price(inputs, target_coc=target_coc, policy=policy,
+                                benchmark=benchmark, min_price=min_price, max_price=max_price,
+                                max_iterations=max_iterations)
+    except (ValueError, RuntimeError, KeyError, TypeError) as exc:
+        return {**_identity(), "status": "refused", "error": {
+            "code": getattr(exc, "code", "ENGINE_REFUSAL"), "message": str(exc)}}
+    return {**_identity(), **{key: result[key] for key in (
+        "contract_version", "status", "summary", "effective_assumptions", "bracket")}}
+
+
+@mcp.tool()
 def validate_deal_inputs(inputs: dict) -> dict:
     """Validate canonical deal inputs without running or persisting a deal."""
     return {**_identity(), **validate_deal(inputs).to_dict()}
