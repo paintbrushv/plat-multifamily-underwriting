@@ -70,3 +70,7 @@ The engine MCP tool `backsolve_deal_price` returns the same summary and
 assumptions, excluding large cashflow arrays. The Platworks tool
 `underwrite_backsolve` calls this public API and carries its status and summary.
 The core result does not grant human approval or certify the source inputs.
+
+Price bounds are limited to $1 trillion because the existing canonical case
+serializes prices as JSON numbers. This limit keeps cent identities intact
+through that boundary; operating money uses the separate string/cents contract.

@@ -90,6 +90,7 @@ def test_iteration_limit_keeps_feasible_candidate_but_does_not_claim_convergence
     {"benchmark": {**BENCHMARK, "rate": "Infinity"}},
     {"target_coc": True}, {"target_coc": "NaN"},
     {"min_price": "1.001"}, {"min_price": "101"},
+    {"max_price": "1000000000000.01"},
     {"max_iterations": 0}, {"max_iterations": True},
 ])
 def test_invalid_inputs_fail_before_calculation(monkeypatch, overrides):
