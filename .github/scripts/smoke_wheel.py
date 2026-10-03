@@ -5,9 +5,7 @@ Run from the repo root after `python -m build`; expects exactly one wheel in
 dist/. Verifies: clean-venv install resolves, the engine package imports,
 the JSON deal schema ships inside the wheel, the deterministic parsers
 produce identical output on a synthetic fixture, the schema validator gates
-a bad deal, and the api layer answers with certified metrics. No CLI entry
-points ship (the engine is a library; run it via `python -m engine...` or
-the documented intake scripts).
+a bad deal, and the api layer answers with certified metrics. The MCP entry point and schema must load from the installed wheel.
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ DIST = REPO / "dist"
 
 def run(cmd: list[str], **kw) -> None:
     print("+", " ".join(cmd))
+    kw.setdefault("cwd", tempfile.gettempdir())
     subprocess.run(cmd, check=True, **kw)
 
 
@@ -37,14 +36,15 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="mfu-smoke-") as tmp:
         venv_dir = Path(tmp) / "venv"
-        venv.create(venv_dir, with_pip=True)
-        py = str(venv_dir / "bin" / "python")
+        venv.create(venv_dir, with_pip=True, symlinks=sys.platform != "win32")
+        bin_dir = venv_dir / ("Scripts" if sys.platform == "win32" else "bin")
+        py = str(bin_dir / ("python.exe" if sys.platform == "win32" else "python"))
 
         run([py, "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
         run([py, "-m", "pip", "install", "--quiet", wheel + "[mcp]"])
 
         # Imports
-        run([py, "-c",
+        run([py, "-I", "-c",
              "import engine; from engine.api import handle_run_deal; "
              "from engine.validator import validate_deal; "
              "from engine.ingest.rent_roll_parser import parse_rent_roll; "
@@ -52,15 +52,18 @@ def main() -> int:
              "print('import-ok')"])
 
         # Deal schema ships in the wheel and the validator reads it
-        run([py, "-c",
+        run([py, "-I", "-c",
              "from engine.validator import _schema_path; "
              "p = _schema_path(); assert p.exists(), f'missing {p}'; "
              "print('schema-ok', p.name)"])
 
-        # Deterministic parse: synthetic CSV fixture → canonical cohorts
-        run([py, "-c",
+        fixture = Path(tmp) / "sample_rent_roll.csv"
+        fixture.write_bytes((REPO / "tests/fixtures/sample_rent_roll.csv").read_bytes())
+
+        # Deterministic parse of copied public synthetic CSV, outside the checkout
+        run([py, "-I", "-c",
              "from engine.ingest.rent_roll_parser import parse_rent_roll; "
-             "rr = parse_rent_roll('tests/fixtures/sample_rent_roll.csv'); "
+             f"rr = parse_rent_roll({str(fixture)!r}); "
              "assert rr['total_units'] > 0; "
              "assert rr['unit_cohorts']; "
              "first = rr['unit_cohorts'][0]; "
@@ -68,7 +71,7 @@ def main() -> int:
              "print('rentroll-ok', rr['total_units'])"])
 
         # Refusal is a feature: an empty deal must fail validation
-        run([py, "-c",
+        run([py, "-I", "-c",
              "from engine.validator import validate_deal; "
              "report = validate_deal({}); "
              "assert report.status == 'FAIL', report.status; "
