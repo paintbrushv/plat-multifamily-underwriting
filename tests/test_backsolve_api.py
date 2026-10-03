@@ -127,3 +127,17 @@ def test_engine_mcp_uses_public_api(economy):
     refused = backsolve_deal_price(INPUTS, "0.07", POLICY, {})
     assert refused["status"] == "refused"
     assert refused["error"]["code"] == "INVALID_BACKSOLVE_INPUT"
+
+
+def test_supplied_market_vacancy_keeps_source_and_observation_date():
+    canonical = deepcopy(INPUTS)
+    canonical["metadata"]["property_summary"]["market_vacancy_benchmark"] = {
+        "rate": "0.17", "as_of": "2026-09-30", "source": "synthetic:analyst estimate"}
+    _, summary = backsolve._vacancy_anchor_summary(
+        canonical, default_vacancy=Decimal("0.05"), broker_vacancy=None,
+        trailing_actuals=None, broker_snapshot=None)
+    encoded = json.dumps(summary)
+    assert "costar" not in encoded.lower()
+    assert summary["market_vacancy_benchmark_source"]["source"] == "synthetic:analyst estimate"
+    assert summary["market_vacancy_benchmark_source"]["as_of"] == "2026-09-30"
+    assert "supplied_market_benchmark" in encoded
