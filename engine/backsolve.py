@@ -1659,6 +1659,10 @@ def backsolve_price(
     target = decimal_value(target_coc, "target_coc", positive=True, rate=True)
     lo = decimal_value(min_price, "min_price", positive=True, cents=True)
     hi = decimal_value(max_price, "max_price", positive=True, cents=True)
+    # The legacy canonical case serializes prices through JSON numbers. Keep
+    # this interface below the magnitude where cent values lose identity.
+    if hi > Decimal("1000000000000.00"):
+        raise BacksolveInputError("max_price exceeds the supported one-trillion-dollar bound")
     if lo >= hi:
         raise BacksolveInputError("min_price must be below max_price")
     if type(max_iterations) is not int or not 1 <= max_iterations <= 60:
