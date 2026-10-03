@@ -11,6 +11,10 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from engine.backsolve_policy import (
+    CONTRACT_VERSION, POLICY_VERSION, BacksolveInputError, decimal_value,
+    describe_policy, resolve_policy, validate_benchmark,
+)
 from engine.engine import run_underwriting
 from engine.modules.debt import compute_agency_loan_terms
 from engine.modules.util import dec
@@ -156,15 +160,11 @@ def _costar_market_vacancy_for_case(
     canonical: dict[str, Any],
     broker_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    metro = _infer_costar_metro(canonical, broker_snapshot)
-    if not metro:
+    benchmark = ((canonical.get("metadata") or {}).get("property_summary") or {}).get("market_vacancy_benchmark")
+    if benchmark is None:
         return None
-    try:
-        from engine.market_data.costar_cap_rates import get_current_market_vacancy_rate
-
-        return get_current_market_vacancy_rate(metro)
-    except Exception:
-        return None
+    checked = validate_benchmark(benchmark)
+    return {**checked, "vacancy_rate": checked["rate"]}
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -1616,7 +1616,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--year-built", type=int)
     parser.add_argument("--strategy", default="cashflow", choices=["cashflow", "value_add"])
     parser.add_argument("--target-coc", type=Decimal, default=PRIMARY_COC_TARGET_PCT)
+    parser.add_argument("--policy-version", required=True, choices=[POLICY_VERSION])
+    parser.add_argument("--policy-json", help="Explicit overrides for the selected policy version")
     parser.add_argument("--benchmark-5yr-treasury", type=Decimal, required=True)
+    parser.add_argument("--benchmark-as-of", required=True)
+    parser.add_argument("--benchmark-source", required=True)
     parser.add_argument("--agency-spread", type=Decimal, default=DEFAULT_AGENCY_SPREAD_PCT)
     parser.add_argument("--broker-json")
     parser.add_argument("--grouped-comps-json")
@@ -1638,165 +1642,98 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = _parse_args()
-    canonical = _load_json(Path(args.canonical_json))
-    if args.patch_json:
-        canonical = _deep_merge(canonical, _load_json(Path(args.patch_json)))
-    require_property_tax_policy(canonical)
-    broker_snapshot = _load_json(Path(args.broker_json)) if args.broker_json else None
-    if broker_snapshot is not None and args.broker_json:
-        broker_snapshot, _ = enrich_broker_snapshot_from_om(
-            broker_snapshot,
-            broker_json_path=Path(args.broker_json),
-        )
-    grouped_comps = _load_json(Path(args.grouped_comps_json)) if args.grouped_comps_json else None
-    revenue_quality_bridge = _load_bridge_if_available(
-        args.revenue_quality_bridge_json,
-        Path(args.output_dir),
-    )
-    trailing_actuals = _load_trailing_actuals(
-        Path(args.trailing_actuals_json) if args.trailing_actuals_json else None
-    )
-    costar_exit_cap = None
-    costar_exit_cap_summary = None
-    if args.exit_cap_rate is None:
-        costar_exit_cap, costar_exit_cap_summary = _costar_exit_cap_rate_for_case(
-            canonical,
-            broker_snapshot,
-        )
-    selected_exit_cap_rate = (
-        args.exit_cap_rate if args.exit_cap_rate is not None else costar_exit_cap
-    )
+def backsolve_price(
+    canonical: dict[str, Any], *, target_coc, policy, benchmark,
+    min_price="1000000.00", max_price="100000000.00", max_iterations=40,
+    broker_snapshot=None, grouped_comps=None, revenue_quality_bridge=None, trailing_actuals=None,
+) -> dict[str, Any]:
+    """Find the highest feasible cent within explicit bounds and assumptions.
 
+    Rates are fractions (0.07 is 7%). The search assumes CoC decreases with
+    price; observed violations refuse. An exhausted search returns a feasible
+    candidate with iteration_limit status, never a claim of convergence.
+    This API performs no artifact writes and reads no neighboring data files.
+    """
+    if not isinstance(canonical, dict):
+        raise BacksolveInputError("canonical must be an object")
+    target = decimal_value(target_coc, "target_coc", positive=True, rate=True)
+    lo = decimal_value(min_price, "min_price", positive=True, cents=True)
+    hi = decimal_value(max_price, "max_price", positive=True, cents=True)
+    # The legacy canonical case serializes prices through JSON numbers. Keep
+    # this interface below the magnitude where cent values lose identity.
+    if hi > Decimal("1000000000000.00"):
+        raise BacksolveInputError("max_price exceeds the supported one-trillion-dollar bound")
+    if lo >= hi:
+        raise BacksolveInputError("min_price must be below max_price")
+    if type(max_iterations) is not int or not 1 <= max_iterations <= 60:
+        raise BacksolveInputError("max_iterations must be an integer from 1 to 60")
+    checked_benchmark = validate_benchmark(benchmark)
+    values = resolve_policy(policy, canonical)
+    require_property_tax_policy(canonical)
+    treasury = Decimal(checked_benchmark["rate"])
     prepared, policy_summary = _prepare_house_assumptions(
-        canonical,
-        year_built=args.year_built,
-        strategy=args.strategy,
-        target_coc=args.target_coc,
-        benchmark_treasury=args.benchmark_5yr_treasury,
-        agency_spread=args.agency_spread,
-        exit_cap_rate=selected_exit_cap_rate,
-        sale_cost_percent=args.sale_cost_percent,
-        purchase_closing_cost_pct=args.purchase_closing_cost_pct,
-        partnership_closing_costs=args.partnership_closing_costs,
-        acquisition_fee_pct=args.acquisition_fee_pct,
-        asset_management_fee_pct=args.asset_management_fee_pct,
-        annual_partnership_expenses=args.annual_partnership_expenses,
-        disposition_fee_pct=args.disposition_fee_pct,
-        loan_closing_costs=args.loan_closing_costs,
-        insurance_per_unit_override=args.insurance_per_unit_override,
-        broker_snapshot=broker_snapshot,
-        grouped_comps=grouped_comps,
-        revenue_quality_bridge=revenue_quality_bridge,
-        trailing_actuals=trailing_actuals,
+        canonical, target_coc=target, benchmark_treasury=treasury, **values,
+        broker_snapshot=broker_snapshot, grouped_comps=grouped_comps,
+        revenue_quality_bridge=revenue_quality_bridge, trailing_actuals=trailing_actuals,
     )
-    if costar_exit_cap_summary is not None:
-        policy_summary["exit_cap_rate_source"] = costar_exit_cap_summary
-    target = dec(args.target_coc)
+    values["year_built"] = policy_summary.get("year_built", values["year_built"])
+    effective = {"policy": describe_policy(values), "benchmark": checked_benchmark,
+                 "target_coc": str(target), "house_adjustments": policy_summary,
+                 "property_tax_policy": deepcopy(require_property_tax_policy(canonical))}
     projected_noi = _preview_projected_noi(prepared)
 
-    lo = normalize_property_tax_purchase_price(args.min_price)
-    hi = normalize_property_tax_purchase_price(args.max_price)
-    lo_case = _build_price_case(
-        prepared,
-        price=lo,
-        target_coc=target,
-        year_built=args.year_built,
-        benchmark_treasury=args.benchmark_5yr_treasury,
-        agency_spread=args.agency_spread,
-        purchase_closing_cost_pct=args.purchase_closing_cost_pct,
-        partnership_closing_costs=args.partnership_closing_costs,
-        acquisition_fee_pct=args.acquisition_fee_pct,
-        loan_closing_costs=args.loan_closing_costs,
-        projected_noi=projected_noi,
-    )
-    hi_case = _build_price_case(
-        prepared,
-        price=hi,
-        target_coc=target,
-        year_built=args.year_built,
-        benchmark_treasury=args.benchmark_5yr_treasury,
-        agency_spread=args.agency_spread,
-        purchase_closing_cost_pct=args.purchase_closing_cost_pct,
-        partnership_closing_costs=args.partnership_closing_costs,
-        acquisition_fee_pct=args.acquisition_fee_pct,
-        loan_closing_costs=args.loan_closing_costs,
-        projected_noi=projected_noi,
-    )
-    lo_results, lo_coc = _evaluate_case(lo_case)
-    hi_results, hi_coc = _evaluate_case(hi_case)
-    if not (lo_coc >= target and hi_coc <= target):
-        raise RuntimeError(
-            f"Price bracket does not contain target CoC. "
-            f"low={float(lo)} -> {float(lo_coc):.4f}, high={float(hi)} -> {float(hi_coc):.4f}"
-        )
-
-    search_ceiling_reached = hi_coc == target
-    if search_ceiling_reached:
-        solved_case = hi_case
-        solved_results = hi_results
-        solved_coc = hi_coc
-        infeasible_case = None
-        infeasible_coc = None
-    else:
-        solved_case = lo_case
-        solved_results = lo_results
-        solved_coc = lo_coc
-        infeasible_case = hi_case
-        infeasible_coc = hi_coc
-    iterations_run = 0
-    iterations_requested = 0 if search_ceiling_reached else args.max_iterations
-    for iteration in range(iterations_requested):
-        iterations_run = iteration + 1
-        mid = ((lo + hi) / Decimal("2")).quantize(
-            _PRICE_CENT,
-            rounding=ROUND_HALF_UP,
-        )
-        mid = normalize_property_tax_purchase_price(mid)
+    def evaluate(price):
         case = _build_price_case(
-            prepared,
-            price=mid,
-            target_coc=target,
-            year_built=args.year_built,
-            benchmark_treasury=args.benchmark_5yr_treasury,
-            agency_spread=args.agency_spread,
-            purchase_closing_cost_pct=args.purchase_closing_cost_pct,
-            partnership_closing_costs=args.partnership_closing_costs,
-            acquisition_fee_pct=args.acquisition_fee_pct,
-            loan_closing_costs=args.loan_closing_costs,
+            prepared, price=price, target_coc=target, benchmark_treasury=treasury,
             projected_noi=projected_noi,
+            **{key: values[key] for key in (
+                "year_built", "agency_spread", "purchase_closing_cost_pct",
+                "partnership_closing_costs", "acquisition_fee_pct", "loan_closing_costs")},
         )
+        case.setdefault("pricing_provenance", {})["as_of_date"] = checked_benchmark["as_of"]
         results, coc = _evaluate_case(case)
+        if not coc.is_finite():
+            raise BacksolveInputError("engine produced a non-finite cash-on-cash return")
+        return case, results, coc
+
+    lo_case, lo_results, lo_coc = evaluate(lo)
+    hi_case, hi_results, hi_coc = evaluate(hi)
+    bracket = {"min_price": f"{lo:.2f}", "max_price": f"{hi:.2f}",
+               "min_price_coc": str(lo_coc), "max_price_coc": str(hi_coc),
+               "search_assumption": "cash_on_cash_nonincreasing_with_price"}
+    if hi_coc > lo_coc:
+        raise BacksolveInputError("cash-on-cash is not decreasing across the price bracket")
+    base = {"contract_version": CONTRACT_VERSION, "effective_assumptions": effective, "bracket": bracket}
+    if lo_coc < target:
+        summary = {**base, "status": "infeasible", "solved_purchase_price": None}
+        return {**base, "status": "infeasible", "case": None, "results": None, "summary": summary}
+    search_ceiling_reached = hi_coc >= target
+    if search_ceiling_reached:
+        solved_case, solved_results, solved_coc = hi_case, hi_results, hi_coc
+        infeasible_case = infeasible_coc = None
+    else:
+        solved_case, solved_results, solved_coc = lo_case, lo_results, lo_coc
+        infeasible_case, infeasible_coc = hi_case, hi_coc
+    iterations_run = 0
+    while not search_ceiling_reached and hi - lo > _PRICE_CENT and iterations_run < max_iterations:
+        mid = ((lo + hi) / Decimal("2")).quantize(_PRICE_CENT, rounding=ROUND_HALF_UP)
+        case, results, coc = evaluate(mid)
+        # Quantized engine cashflows can differ slightly at adjacent cents;
+        # the feasibility predicate remains authoritative at every candidate.
+        if coc > lo_coc + Decimal("0.000001") or coc < hi_coc - Decimal("0.000001"):
+            raise BacksolveInputError("cash-on-cash is not decreasing inside the price bracket")
+        iterations_run += 1
         if coc >= target:
-            solved_case = case
-            solved_results = results
-            solved_coc = coc
-            lo = mid
+            lo, lo_coc = mid, coc
+            solved_case, solved_results, solved_coc = case, results, coc
         else:
-            hi = mid
-            infeasible_case = case
-            infeasible_coc = coc
-
-    if solved_case is None or solved_results is None or solved_coc is None:
-        raise RuntimeError("Backsolve did not produce a solved case.")
-
-    output_dir = Path(args.output_dir)
-    solved_case_path = output_dir / "canonical_backsolved_target_coc.json"
-    summary_path = output_dir / "backsolve_summary.json"
-    underwriting_path = output_dir / "underwriting_backsolved_target_coc.json"
+            hi, hi_coc = mid, coc
+            infeasible_case, infeasible_coc = case, coc
+    status = "ceiling_feasible" if search_ceiling_reached else (
+        "converged" if hi - lo <= _PRICE_CENT else "iteration_limit")
     solved_by_year = solved_results["cashflow"]["by_year"]
-    solved_projected_noi = dec(
-        solved_by_year[1]["net_operating_income"]
-        if len(solved_by_year) >= 2
-        else solved_by_year[0]["net_operating_income"]
-    )
-
-    _write_json(solved_case_path, solved_case)
-    _write_json(underwriting_path, solved_results)
-    _write_json(
-        summary_path,
-        {
+    solved_projected_noi = dec(solved_by_year[1 if len(solved_by_year) >= 2 else 0]["net_operating_income"])
+    summary = {
             "target_cash_on_cash_pct": float(target),
             "solved_purchase_price": solved_case["purchase_assumptions"]["purchase_price"],
             "solved_total_equity_basis": solved_case["purchase_assumptions"]["total_equity_basis"],
@@ -1845,12 +1782,52 @@ def main() -> None:
             "going_in_cap_rate": solved_results["metrics"]["yields"]["going_in_cap_rate"],
             "exit_cap_rate": solved_results["metrics"]["yields"]["exit_cap_rate"],
             "policy_summary": policy_summary,
-            "artifacts": {
-                "canonical": str(solved_case_path),
-                "underwriting": str(underwriting_path),
-            },
-        },
+        }
+    summary.update(base, status=status, target_coc_pct=float(target * 100),
+                   achieved_coc_pct=float(solved_coc * 100))
+    return {**base, "status": status, "case": solved_case, "results": solved_results, "summary": summary}
+
+
+def main() -> None:
+    args = _parse_args()
+    canonical = _load_json(Path(args.canonical_json))
+    if args.patch_json:
+        canonical = _deep_merge(canonical, _load_json(Path(args.patch_json)))
+    # CLI-only file resolution; every interface uses the same pure solver.
+    broker = _load_json(Path(args.broker_json)) if args.broker_json else None
+    if broker is not None:
+        broker, _ = enrich_broker_snapshot_from_om(broker, broker_json_path=Path(args.broker_json))
+    policy = {"version": args.policy_version, **{name: getattr(args, name) for name in (
+        "strategy", "year_built", "agency_spread", "sale_cost_percent", "purchase_closing_cost_pct",
+        "partnership_closing_costs", "acquisition_fee_pct", "asset_management_fee_pct",
+        "annual_partnership_expenses", "disposition_fee_pct", "loan_closing_costs", "insurance_per_unit_override")}}
+    if args.exit_cap_rate is not None:
+        policy["exit_cap_rate"] = args.exit_cap_rate
+    if args.policy_json:
+        provided_policy = _load_json(Path(args.policy_json))
+        if not isinstance(provided_policy, dict) or provided_policy.get("version") != args.policy_version:
+            raise BacksolveInputError("policy JSON version differs from --policy-version")
+        policy.update(provided_policy)
+    result = backsolve_price(
+        canonical, target_coc=args.target_coc, policy=policy,
+        benchmark={"rate": args.benchmark_5yr_treasury, "as_of": args.benchmark_as_of, "source": args.benchmark_source},
+        min_price=args.min_price, max_price=args.max_price, max_iterations=args.max_iterations,
+        broker_snapshot=broker,
+        grouped_comps=_load_json(Path(args.grouped_comps_json)) if args.grouped_comps_json else None,
+        revenue_quality_bridge=_load_bridge_if_available(args.revenue_quality_bridge_json, Path(args.output_dir)),
+        trailing_actuals=_load_trailing_actuals(Path(args.trailing_actuals_json) if args.trailing_actuals_json else None),
     )
+    output_dir = Path(args.output_dir)
+    summary = deepcopy(result["summary"])
+    if result["case"] is not None:
+        case_path = output_dir / "canonical_backsolved_target_coc.json"
+        results_path = output_dir / "underwriting_backsolved_target_coc.json"
+        _write_json(case_path, result["case"])
+        _write_json(results_path, result["results"])
+        summary["artifacts"] = {"canonical": str(case_path), "underwriting": str(results_path)}
+    _write_json(output_dir / "backsolve_summary.json", summary)
+    if result["status"] not in {"converged", "ceiling_feasible"}:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
