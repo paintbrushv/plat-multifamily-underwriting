@@ -391,7 +391,12 @@ written by `engine.assumptions.resolve_assumptions`. The engine ignores both;
 the resolver writes resolved values into the canonical fields above. Each entry
 records `value`, `unit`, `source`, `basis`, `as_of`, `confidence`,
 `candidates`, `default_value`, `override`, `review_required`, and optional
-`cohort_overrides`. See `docs/adr/0003-assumption-layer.md`.
+`cohort_overrides` and `guardrail`. `guardrail` (`floor`, `floor_source`,
+`status: "below_floor"`, `action`, `original`, optional `applied`,
+`segments`, `basis`) is present when a value is below its house floor:
+`action: "warned"` in underwrite mode (validator `GUARDRAIL_BELOW_FLOOR`
+WARNING) and `"enforced"` in pricing mode. See
+`docs/adr/0003-assumption-layer.md`.
 
 `deal_type` supports `stabilized` and `value_add`; `lease_up` and `distressed`
 are reserved and rejected (validator `DEAL_TYPE_UNSUPPORTED`). Entries sourced
