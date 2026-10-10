@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed
+Accepted. Slices 1-8 are implemented; see "Implementation status" at the end
+for the decisions that remain open.
 
 ## Context
 
@@ -88,7 +89,7 @@ key:
       "basis": "dallas_tx metro forecast, vintage 2026-09-30, years 3+ glide to long-run",
       "as_of": "2026-09-30",
       "confidence": "medium",
-      "candidates": [{"source": "house:long_run", "value": 0.025}],
+      "candidates": [{"source": "house:long_run_rent_growth", "value": 0.025}],
       "default_value": [0.021, 0.028, 0.030, 0.030, 0.030],
       "override": null,
       "review_required": false
@@ -101,9 +102,49 @@ key:
   produced before any override. `override` is `{value, note}` when the analyst
   changed it.
 - `candidates` lists every source that was considered.
-- `source` uses one vocabulary: `analyst`, `deal:rent_roll`, `deal:t12`,
-  `market:<provider>`, `house:<rule>` (e.g. `house:vintage_1980s`), and
-  `engine_fallback`.
+- `source` uses one vocabulary (`engine/assumptions/registry.py`
+  `SOURCE_PATTERN`): `analyst`, `deal:<document>`, `market:<provider>`,
+  `house:<rule>` and `engine_fallback`. The values the code emits:
+
+| Source | Set by |
+|---|---|
+| `analyst` | An analyst override: `--assumption-overrides`, an edited sheet, a partial canonical patch, a value already in a hand-authored canonical, or backsolve's `insurance_per_unit_override` |
+| `deal:rent_roll` | Rent-roll evidence (current vacancy, loss to lease) |
+| `deal:t12` | T12 evidence (bad debt, concessions, opex lines, insurance, R&M) |
+| `deal:om` | The offering memorandum (exit cap) and broker notes that raise a floor |
+| `deal:comps` | Comp evidence (`renovation_premium`) |
+| `market:<provider>` | A market-data provider: `plat_market_study_agent`, `plat_supply_demand`, `user_file`, `costar`, `yardi_matrix`, `realpage`, `synthetic` (tests); `market:supplied_benchmark` is the analyst-supplied `market_vacancy_benchmark` |
+| `house:vintage_<bucket>` | `VINTAGE_FRAMEWORK_2026` for the year-built bucket (e.g. `house:vintage_1980s`) |
+| `house:long_run_rent_growth` | The house long-run rent growth after the forecast horizon |
+| `house:default_collection_loss` | The house default collection loss when the vintage is unknown |
+| `house:exit_cap_spread` | Going-in cap rate plus the house exit spread |
+| `house:opex_growth_table` | The house per-category opex growth table (also the 3% real estate tax growth) |
+| `house:property_tax_module` | `engine/property_tax.py`: the real estate tax line reassessed at the purchase price |
+| `house:management_fee_pct_egr` | The house management fee as a percent of EGR |
+| `house:year1_insurance_floor` | The $600/unit Year-1 insurance floor |
+| `house:vacancy_anchor` | The property-level vacancy anchor when no single anchor names the source |
+| `house:backsolve_policy` | `engine/backsolve_policy` values: fees, closing costs, sale cost, and in pricing any value the backsolve policy sets (an explicit exit cap) |
+| `house:pricing_normalization` | A backsolve pricing normalization (§5): loss to lease re-derived, concessions as one year-1 schedule, collection loss at the worst rate, reserves at the vintage reserve, the house box-score rebase |
+| `engine_fallback` | An engine default when nothing else applies |
+
+#### Overrides
+
+`resolve_assumptions(overrides={key: value | {"value", "note"[, "cohort_overrides"]} | None})`:
+
+- A value or `{"value", "note"}` sets the override; the entry keeps
+  `default_value`, records `override`, and its value wins. Overrides already
+  recorded in the canonical are kept on re-resolution.
+- `None` (JSON `null`) **clears** the key's override: the entry returns to its
+  resolver default. The assumptions sheet emits `{key: null}` when an analyst
+  blanks a row's Override (§8).
+- `cohort_overrides: {cohort_id: value}` is supported only for the cohort keys
+  `physical_vacancy` and `loss_to_lease`; any other key raises
+  `AssumptionOverrideError`.
+- `opex.<slug>.base` overrides rewrite the row's `base_value` in its own
+  `calculation_type`: annual dollars for dollar-based rows, the percent for
+  `percent_egr` / `percent_rent` rows. An override of `0` suppresses the line
+  (kept at $0 and never re-added). `opex.<slug>.growth` overrides set the
+  row's growth rate.
 
 **The engine stays deterministic and never reads providers.** The resolver
 runs at ingest or re-resolve time and writes resolved values into the
@@ -148,8 +189,10 @@ How each key combines sources:
   scalar shorthand (the resolver writes element 0 to it). The engine (UPL-44
   path) grows flat curves by the vector when it is present, else by the
   scalar; explicit time-varying curves stay authoritative.
-- Assumptions are property-level by default. An entry may carry
-  `cohort_overrides: {cohort_id: value}` for cohort-specific curves.
+- Assumptions are property-level by default. The cohort keys
+  `physical_vacancy` and `loss_to_lease` may carry
+  `cohort_overrides: {cohort_id: value}` for cohort-specific curves; no other
+  key supports them.
 
 ### 5. Gates and guardrails
 
@@ -177,8 +220,8 @@ reuses the `underwriting_policy` vintage functions:
 | `loss_to_lease` | max(vintage LTL floor, broker LTL) | each `loss_to_lease` segment whose cohort market rent exceeds in-place rent |
 | `collection_loss` | max(vintage floor, broker bad debt) | each `collection_loss_curve` segment (no curve counts as 0) |
 | `concessions` | max(vintage year-1 floor, broker concessions) | the year-1 rate (highest `pct_rent` / `free_months` row) |
-| `insurance_per_unit` | $600/unit (`DEFAULT_YEAR1_INSURANCE_PER_UNIT`); waived by an explicit analyst insurance override | the matched insurance line, annualized |
-| `r_and_m_per_unit` | vintage R&M per unit | the R&M bucket, annualized; a shortfall is one top-up line |
+| `insurance_per_unit` | $600/unit (`DEFAULT_YEAR1_INSURANCE_PER_UNIT`); waived by an explicit analyst insurance override, and the waiver is disclosed | the matched insurance line, annualized |
+| `r_and_m_per_unit` | vintage R&M per unit | the R&M bucket, annualized; a shortfall is one top-up line sized from the other R&M lines (an existing top-up line never counts toward the floor) |
 | `replacement_reserve_per_unit` | vintage reserve per unit | each `replacement_reserves` segment (none counts as 0) |
 
 Broker notes and trailing actuals are anchors a caller passes in `context`;
@@ -207,6 +250,31 @@ flattened to its worst rate, concessions as one year-1 schedule, reserves set
 to the vintage reserve), then enforces the shared floors. Its solved canonical
 is re-resolved in `mode="pricing"` so `assumptions` matches the priced values
 and lists the enforced floors.
+
+Every value backsolve's pricing sets outside the floors is labeled by who set
+it, never as an `analyst` edit: an override with a note naming the rule pins
+the priced value, and `restore_pricing_labels` keeps the label on
+re-resolution.
+
+| Set by | Entry source | Override note |
+|---|---|---|
+| The pricing policy: fees, purchase and partnership closing costs, loan closing costs, sale cost, an exit cap the policy carries | `house:backsolve_policy` | "set by the backsolve pricing policy" |
+| A pricing normalization (LTL, concessions, collection loss, reserves, the house box-score rebase) | `house:pricing_normalization` | "rewritten by a backsolve pricing normalization" |
+| The real estate tax reassessed at the priced price | `house:property_tax_module` | "reassessed by the property tax module at the priced purchase price" |
+| An opex line a floor raised (insurance line, R&M top-up) | the floor's source | "opex line set by a house floor the pricing guardrail enforced" |
+| The policy's `insurance_per_unit_override` | `analyst` | "analyst insurance_per_unit_override in the backsolve policy" |
+
+Each normalization that changes an input is listed in `policy_overrides` as
+`{input, normalization, source: "house:pricing_normalization", basis, original,
+applied}`. An entry the pricing guardrail enforced keeps its guardrail label.
+
+An explicit analyst insurance figure below the $600 floor is priced as given
+(no price change) and disclosed: `policy_overrides` gets
+`{input: "insurance_per_unit", action: "floor_waived_by_analyst_override",
+floor, floor_source, original, applied}`, and the entry a `guardrail` record
+with the same action. A later resolution honors a recorded waiver while the
+insurance line still carries the pinned figure; the validator does not warn on
+it.
 
 ### 6. Opex treatment
 
@@ -281,21 +349,38 @@ As implemented (slice 7, `engine/assumptions/sheet.py`):
   `guardrail_status`, and every field the sheet has no column for (for
   example `guardrail` or `per_unit_annual`) is kept in `extra`. `candidates`
   stays in the canonical.
-- The JSON sheet (`write_assumptions_json`) is
+- The JSON sheet (`write_assumptions_json`, sheet version
+  `plat.assumptions.sheet/2`) is
   `{sheet_version, resolver_version, mode, deal_id, instructions, columns, rows}`
   with no timestamps, so the same canonical always writes the same bytes.
+  Each written row adds a read-only `exported_override` (the row's override
+  value when the sheet was written) to the `sheet_rows` fields.
 - The Excel tab "Assumptions" holds an Excel table `tbl_assumptions` with
-  the same columns. Scalars are numbers (percent or dollar formats by unit),
-  and vectors and dicts are JSON text. The Override and Note columns are the
-  editable ones. `read_assumption_overrides_xlsx` reads the table through
-  `engine.excel_io`, and falls back to scanning the tab when an editor has
-  dropped the table. Override cells take numbers, `2.5%` text or JSON text.
+  the same columns (the last one is "Exported Override"). Scalars are numbers
+  (percent or dollar formats by unit), and vectors and dicts are JSON text.
+  The Value, Override and Note columns are the editable ones, for every row
+  including `opex.<slug>.base` (annual dollars, or the percent for a
+  percent-of-revenue row). `read_assumption_overrides_xlsx` reads the table
+  through `engine.excel_io`, and falls back to scanning the tab when an editor
+  has dropped the table. Override cells take numbers, `2.5%` text or JSON text.
 - Reading an edited sheet (`read_assumption_overrides` /
-  `read_assumption_overrides_xlsx`): a row with an override value becomes
-  `{key: {"value": override_value, "note": override_note}}`. A row without
-  one becomes an override when its value differs from `default_value`. The
-  override column wins when both are set. A plain
-  `{key: value | {"value", "note"}}` overrides file is passed through.
+  `read_assumption_overrides_xlsx`) compares each row with its
+  `exported_override`:
+  - an Override changed from the export becomes
+    `{key: {"value": override_value, "note": override_note}}`, and wins over
+    an edited Value;
+  - with the Override as exported, an edited Value (different from the
+    exported override, or from `default_value` when there was none) becomes
+    the override, so editing the Value column always works;
+  - a blanked Override on a row that had one becomes `{key: null}`, which
+    clears the override (§2), as does a Value set back to `default_value` with
+    the Override blank;
+  - an Override left as exported is passed on unchanged.
+
+  A version-1 sheet (no `exported_override`) is read as before: a set Override
+  wins, else a Value that differs from `default_value` becomes an override. A
+  plain `{key: value | {"value", "note"} | null}` overrides file is passed
+  through.
 - Artifacts: `runs/ingest_deal.py` writes `<output stem>.assumptions.json`
   next to the output JSON, and `--assumption-overrides` takes a plain
   overrides JSON, an edited sheet JSON or an `.xlsx`.
@@ -341,6 +426,32 @@ override round-trip, determinism, and a golden `expected_assumptions.json`
 6. Guardrail modes: warn in underwrite, enforce in pricing, disclose.
 7. Assumptions sheet export and import (JSON and Excel) with overrides.
 8. Synthetic deal library and expected-band tests.
+
+## Implementation status
+
+Slices 1-8 are implemented on the stacked PRs, and an independent audit's
+gaps were filled: the sheet clears overrides and honors Value edits, the
+override contract (null clears, cohort keys, opex base overrides) is in the
+resolver, the R&M top-up is sized from the analyst lines on re-pricing, and
+every value backsolve's pricing sets is labeled and disclosed. Known open
+decisions, each pending with the product owner:
+
+1. **Removing the pricing normalizations.** Backsolve still rewrites loss to
+   lease, concessions, collection loss and reserves before the floors (now
+   labeled `house:pricing_normalization` and listed in `policy_overrides`).
+   Whether pricing should keep the analyst's curves and apply only the shared
+   floors is undecided; removing them changes prices.
+2. **Value-add backsolve cash-on-cash basis.** Value-add deals are priced on
+   the same Year-1 post-debt cash-on-cash as stabilized deals; whether the
+   basis should be a stabilized-year or renovation-adjusted return is open.
+3. **Real estate tax growth after reassessment.** The property-tax module
+   reassesses the year-1 tax at the purchase price; the growth applied after
+   reassessment (house table rate vs the row's own rate vs none) needs a
+   decision.
+4. **Stabilized vacancy vs the vacancy floor.** A market or vintage-typical
+   stabilized vacancy can sit below the property-level vacancy anchor;
+   underwrite warns and pricing raises it. Whether the stabilized target
+   should be floored at resolution is open.
 
 ## Consequences
 

@@ -59,7 +59,21 @@ year-1 concession rate, insurance and R&M). Each raise appears in
 floors, backsolve applies its own pricing normalizations: loss to lease is
 re-derived from market vs in-place rent, collection loss becomes one row at
 the worst rate, concessions become one year-1 schedule, and reserves are set to
-the vintage reserve.
+the vintage reserve. Each normalization that changes an input is listed in
+`policy_overrides` as `{input, normalization, source:
+"house:pricing_normalization", basis, original, applied}`.
+
+The R&M floor tops the bucket up with one "Repairs & Maintenance Vintage Floor
+Top-Up" line sized from the other R&M lines; a top-up line left by an earlier
+pricing run never counts toward the floor, so re-pricing a priced canonical
+after lowering R&M lands exactly on the floor (`replaced_top_up_annual`
+reports the old line).
+
+An explicit `insurance_per_unit_override` waives the insurance floor and is
+priced as given. Below the floor, the waiver is disclosed: `policy_overrides`
+gets `{input: "insurance_per_unit", action: "floor_waived_by_analyst_override",
+floor, floor_source, original, applied}` and `house_adjustments.guardrails`
+the matching finding.
 
 The same floors in `mode="underwrite"` (ingest, `resolve_assumptions`) never
 change a value; they add a `guardrail` record with `action: "warned"` and a
@@ -70,6 +84,17 @@ holds the priced values, and each enforced floor is recorded on its entry
 (`guardrail.action: "enforced"`, `guardrail.original` the pre-floor value, and
 an `override` that pins the priced value). Only `assumptions` and
 `deal_profile` change; every priced number is unchanged.
+
+Values the pricing sets outside the floors are labeled by who set them, never
+as analyst edits: fees, closing costs, sale cost and a policy exit cap carry
+`source: "house:backsolve_policy"`; the normalized inputs carry
+`house:pricing_normalization`; the real estate tax line reassessed at the
+solved price carries `house:property_tax_module`; an opex line a floor raised
+carries the floor's source; and the policy's insurance override is `analyst`
+with a note naming the policy field. Each pins the priced value with an
+override whose note names the rule, and the labels survive a re-resolution.
+The insurance waiver is also recorded on the `insurance_per_unit` entry
+(`guardrail.action: "floor_waived_by_analyst_override"`).
 
 All fields in `DEFAULTS`, plus `year_built` and `exit_cap_rate`, can be explicitly
 overridden. Unknown keys, unsupported versions, non-finite values, invalid
