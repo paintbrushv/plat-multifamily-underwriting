@@ -28,6 +28,7 @@ from engine.assumptions.canonical_ops import (
     opex_bucket_for_policy,
     sum_opex_bucket,
 )
+from engine.assumptions.opex import t12_opex_line_evidence
 from engine.assumptions.profile import check_deal_type
 
 
@@ -381,7 +382,7 @@ def build_deal_from_documents(
             "annual_growth_rate": None,  # filled by the assumption resolver
         },
     }
-    _record_t12_opex_evidence(deal)
+    _record_t12_opex_evidence(deal, statement["provenance"])
 
     # Merge OM data if provided (before CLI overrides, so CLI wins).
     # V1.2 — when om_parser auto-populates purchase_assumptions or
@@ -697,9 +698,11 @@ def _rent_roll_evidence(
     return evidence
 
 
-def _record_t12_opex_evidence(deal: dict[str, Any]) -> None:
-    """T12 insurance and R&M annual dollars, annualized by calculation_type."""
+def _record_t12_opex_evidence(deal: dict[str, Any], provenance: Mapping[str, Any]) -> None:
+    """T12 insurance and R&M annual dollars, annualized by calculation_type, and
+    every T12 opex line with the raw source rows that fed it (ADR 0003 §6)."""
     evidence = deal["metadata"]["ingest_gate"]["evidence"]["t12"]
+    evidence["opex_lines"] = t12_opex_line_evidence(deal, provenance)
     insurance_rows = matching_opex_rows(deal, "insurance")
     if insurance_rows:
         evidence["insurance_annual"] = float(annual_opex_amount(deal, insurance_rows[0]))

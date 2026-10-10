@@ -382,6 +382,10 @@
         "cohort_overrides": {
           "type": "object",
           "description": "Optional cohort-specific values keyed by cohort_id."
+        },
+        "detail": {
+          "type": "object",
+          "description": "Display-only facts about the canonical field, e.g. an opex line's calculation_type, annual dollars and per-unit amount (ADR 0003 §6)."
         }
       }
     },
