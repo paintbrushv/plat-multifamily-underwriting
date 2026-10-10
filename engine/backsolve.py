@@ -977,6 +977,8 @@ def _prepare_house_assumptions(
     property_summary = metadata.get("property_summary") or {}
     if year_built is None:
         for candidate in (
+            # deal_profile drives the vintage, as in the resolver (ADR 0003 §1).
+            (prepared.get("deal_profile") or {}).get("year_built"),
             metadata.get("year_built"),
             property_summary.get("year_built"),
             (property_summary.get("broker_underwriting_snapshot") or {}).get("year_built"),

@@ -351,6 +351,20 @@ def test_backsolve_solved_canonical_carries_pricing_assumptions(pricing_deal):
     json.dumps(case)
 
 
+def test_backsolve_reads_the_vintage_from_the_deal_profile(pricing_deal):
+    """A year built carried only by deal_profile (an analyst ingest input) sets the
+    pricing vintage, as it does for the resolver and the shared guardrails."""
+    deal = copy.deepcopy(pricing_deal)
+    deal["metadata"].pop("year_built")
+    assert deal["deal_profile"]["year_built"] == YEAR
+    result = _solve(deal)
+    summary = result["summary"]["policy_summary"]
+    assert summary["year_built"] == YEAR
+    assert summary["guardrails"]["profile"]["year_built"] == YEAR
+    assert result["case"]["replacement_reserves"][0]["annual_amount"] == 100_000.0  # 1980s reserve x 100 units
+    assert result["case"] == _solve(pricing_deal)["case"]
+
+
 def test_backsolve_assumptions_refresh_changes_no_priced_number(pricing_deal):
     result = _solve(pricing_deal)
     case = result["case"]
