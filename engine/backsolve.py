@@ -1645,6 +1645,11 @@ def main() -> None:
         _write_json(case_path, result["case"])
         _write_json(results_path, result["results"])
         summary["artifacts"] = {"canonical": str(case_path), "underwriting": str(results_path)}
+        from engine.assumptions.sheet import has_assumptions, write_assumptions_json
+
+        if has_assumptions(result["case"]):
+            sheet_path = write_assumptions_json(result["case"], output_dir / "assumptions.json")
+            summary["artifacts"]["assumptions"] = str(sheet_path)
     _write_json(output_dir / "backsolve_summary.json", summary)
     if result["status"] not in {"converged", "ceiling_feasible"}:
         raise SystemExit(2)

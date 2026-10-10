@@ -62,6 +62,13 @@ def write_results_to_workbook(
 
     _write_model_health_sheet(wb, results, inputs)
 
+    # ADR 0003 §8: the editable assumptions sheet travels with every workbook
+    # whose canonical carries an ``assumptions`` section.
+    from engine.assumptions.sheet import add_assumptions_sheet, has_assumptions
+
+    if has_assumptions(inputs):
+        add_assumptions_sheet(wb, inputs)
+
     wb.save(output_path)
 
 

@@ -226,6 +226,47 @@ Providers:
   `default_value`, and records the override. An Excel tab edited and read back
   round-trips through `excel_io`.
 
+As implemented (slice 7, `engine/assumptions/sheet.py`):
+
+- `sheet_rows(canonical)` builds one row per entry: `key`, `value`, `unit`,
+  `source`, `basis`, `as_of`, `confidence`, `review_required`,
+  `default_value`, `delta`, `override_value`, `override_note`,
+  `override_cohorts`, `guardrail_status` and `extra`. Rows follow the
+  registry order (`ASSUMPTION_KEYS`), then any other key A→Z. `delta` is
+  `value − default_value` for numeric scalars, element-wise for numeric
+  vectors of the same length, and null otherwise. Rows are built from the
+  entry shape alone: vector and dict values are kept as is, an entry's
+  `guardrail` (an object with `status`, or a plain status) fills
+  `guardrail_status`, and every field the sheet has no column for (for
+  example `guardrail` or `per_unit_annual`) is kept in `extra`. `candidates`
+  stays in the canonical.
+- The JSON sheet (`write_assumptions_json`) is
+  `{sheet_version, resolver_version, mode, deal_id, instructions, columns, rows}`
+  with no timestamps, so the same canonical always writes the same bytes.
+- The Excel tab "Assumptions" holds an Excel table `tbl_assumptions` with
+  the same columns. Scalars are numbers (percent or dollar formats by unit),
+  and vectors and dicts are JSON text. The Override and Note columns are the
+  editable ones. `read_assumption_overrides_xlsx` reads the table through
+  `engine.excel_io`, and falls back to scanning the tab when an editor has
+  dropped the table. Override cells take numbers, `2.5%` text or JSON text.
+- Reading an edited sheet (`read_assumption_overrides` /
+  `read_assumption_overrides_xlsx`): a row with an override value becomes
+  `{key: {"value": override_value, "note": override_note}}`. A row without
+  one becomes an override when its value differs from `default_value`. The
+  override column wins when both are set. A plain
+  `{key: value | {"value", "note"}}` overrides file is passed through.
+- Artifacts: `runs/ingest_deal.py` writes `<output stem>.assumptions.json`
+  next to the output JSON, and `--assumption-overrides` takes a plain
+  overrides JSON, an edited sheet JSON or an `.xlsx`.
+  `engine.excel_output.write_results_to_workbook` adds the "Assumptions"
+  tab, `engine.engine.run_from_files` writes `<outputs stem>.assumptions.json`,
+  the backsolve CLI writes `assumptions.json` into its output folder, and
+  `engine.api.handle_run_deal` returns the same payload as
+  `assumptions_sheet`. Each happens only when the canonical has an
+  `assumptions` section.
+- `runs/assumptions_sheet.py export|apply` exports the sheet (JSON and/or
+  Excel) and re-resolves a canonical with an edited sheet as overrides.
+
 ### 9. Validation
 
 - A synthetic deal library covers at least two stabilized and two value-add
