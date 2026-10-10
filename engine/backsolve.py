@@ -45,6 +45,7 @@ from engine.underwriting_policy import (
 )
 from engine.ingest.om_parser import _normalize_year_built
 from engine.ingest.broker_om_snapshot import enrich_broker_snapshot_from_om
+from engine.ingest.ingestion_pipeline import T12_PROGRAM_PREFIX
 
 ALLOWED_METADATA_KEYS = {
     "deal_id",
@@ -1040,16 +1041,19 @@ def _apply_revenue_quality_bridge(
     start_period = str(canonical["time_grid"]["analysis_start_date"])[:7]
     end_period = str(canonical["time_grid"]["analysis_end_date"])[:7]
     program_prefix = "rq_bridge_"
+    # The bridge is the house view of other income, so it replaces the T12
+    # run-rate programs that ingestion created rather than stacking on them.
+    replaced_prefixes = (program_prefix, T12_PROGRAM_PREFIX)
 
     canonical["revenue_programs"] = [
         row
         for row in canonical.get("revenue_programs") or []
-        if not str(row.get("program_id", "")).startswith(program_prefix)
+        if not str(row.get("program_id", "")).startswith(replaced_prefixes)
     ]
     canonical["program_adoption_curve"] = [
         row
         for row in canonical.get("program_adoption_curve") or []
-        if not str(row.get("program_id", "")).startswith(program_prefix)
+        if not str(row.get("program_id", "")).startswith(replaced_prefixes)
     ]
 
     added_programs: list[dict[str, Any]] = []
