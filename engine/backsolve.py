@@ -1072,18 +1072,21 @@ def _prepare_house_assumptions(
     observed_r_and_m = _sum_opex_bucket(prepared, "repairs_maintenance")
     r_and_m_per_unit = guardrail_profile.r_and_m_per_unit()
     r_and_m_floor_annual = None
-    r_and_m_top_up = Decimal("0")
     if r_and_m_per_unit is not None and units:
         r_and_m_floor_annual = r_and_m_per_unit * Decimal(str(units))
-        if observed_r_and_m < r_and_m_floor_annual:
-            r_and_m_top_up = r_and_m_floor_annual - observed_r_and_m
-    # The R&M floor tops the bucket up with one line (shared guardrail).
-    guardrail_findings += guardrails.enforce_floors(
+    # The R&M floor tops the bucket up with one line (shared guardrail). The
+    # top-up is sized from the analyst's R&M lines, never from a top-up line an
+    # earlier pricing run left in the canonical.
+    r_and_m_findings = guardrails.enforce_floors(
         prepared,
         mode=guardrails.MODE_PRICING,
         profile=guardrail_profile,
         context={"policy_overrides": policy_overrides},
         keys=("r_and_m_per_unit",),
+    )
+    guardrail_findings += r_and_m_findings
+    r_and_m_top_up = sum(
+        (Decimal(str(f.get("top_up_annual", 0))) for f in r_and_m_findings), Decimal("0")
     )
 
     if metadata.get("address"):

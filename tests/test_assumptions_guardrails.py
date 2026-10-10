@@ -428,6 +428,54 @@ def test_backsolve_house_policy_matches_generic_pricing_floors(pricing_deal):
     assert findings == []
 
 
+def _r_and_m_rows(canonical):
+    return [r for r in canonical["opex_table"]
+            if r["category_name"] in ("R&M", guardrails.R_AND_M_TOP_UP_CATEGORY)]
+
+
+def test_r_and_m_floor_ignores_its_own_top_up_line(minimal_deal_inputs):
+    """Re-enforcing after the analyst lowers R&M sizes the top-up from the analyst
+    lines alone: the existing top-up line never counts toward the floor."""
+    priced = _below_floor_deal(minimal_deal_inputs)
+    enforce_floors(priced, mode="pricing", profile=PROFILE, keys=("r_and_m_per_unit",))
+    next(r for r in priced["opex_table"] if r["category_name"] == "R&M").update(base_value=600)  # $/unit
+
+    findings = enforce_floors(priced, mode="pricing", profile=PROFILE, keys=("r_and_m_per_unit",))
+    top_ups = [r for r in priced["opex_table"] if r["category_name"] == guardrails.R_AND_M_TOP_UP_CATEGORY]
+    assert len(top_ups) == 1 and top_ups[0]["base_value"] == 30_000.0  # ($900 - $600) x 100 units
+    assert backsolve._sum_opex_bucket(priced, "repairs_maintenance") == Decimal("90000")
+    [finding] = findings
+    assert finding["original"] == 750.0  # the bucket as found: $600 + the old $150 top-up
+    assert finding["top_up_annual"] == 30_000.0 and finding["applied_annual"] == 90_000.0
+    assert finding["replaced_top_up_annual"] == 15_000.0
+    # The floor is met: enforcing again finds nothing and changes nothing.
+    again = copy.deepcopy(priced)
+    assert enforce_floors(again, mode="pricing", profile=PROFILE, keys=("r_and_m_per_unit",)) == []
+    assert again == priced
+
+
+def test_repricing_after_lowering_r_and_m_tops_up_to_the_floor_exactly(pricing_deal):
+    first = _solve(pricing_deal)["case"]
+    assert [r["category_name"] for r in _r_and_m_rows(first)] == ["R&M", guardrails.R_AND_M_TOP_UP_CATEGORY]
+
+    # The analyst lowers R&M on the priced canonical, then prices it again.
+    lowered = copy.deepcopy(first)
+    next(r for r in lowered["opex_table"] if r["category_name"] == "R&M").update(base_value=600)
+    result = _solve(lowered)
+    assert result["status"] == "converged"
+    case = result["case"]
+
+    rows = _r_and_m_rows(case)
+    assert [r["category_name"] for r in rows] == ["R&M", guardrails.R_AND_M_TOP_UP_CATEGORY]
+    units = backsolve._sum_units(case)
+    assert backsolve._sum_opex_bucket(case, "repairs_maintenance") / units == Decimal("900")
+    summary = result["summary"]["policy_summary"]
+    assert summary["repairs_maintenance_top_up_annual"] == 30_000.0
+    entry = case["assumptions"]["entries"]["r_and_m_per_unit"]
+    assert entry["value"] == 900.0 and entry["guardrail"]["action"] == "enforced"
+    assert resolve_assumptions(case, mode="pricing") == case
+
+
 # ── determinism ──────────────────────────────────────────────────────────
 
 

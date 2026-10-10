@@ -649,11 +649,27 @@ def _guard_insurance(canonical: dict[str, Any], floor: Floor, mode: str, units: 
     return [finding]
 
 
+def _is_r_and_m_top_up(row: Mapping[str, Any]) -> bool:
+    return str(row.get("category_name", "")).strip().lower() == R_AND_M_TOP_UP_CATEGORY.lower()
+
+
 def _guard_r_and_m(canonical: dict[str, Any], floor: Floor, mode: str, units: int) -> list[dict[str, Any]]:
+    """The R&M bucket against the vintage floor; a shortfall is one top-up line.
+
+    The bucket as found (``original``) includes a top-up line an earlier pricing
+    run added. The new top-up is sized from the other R&M lines alone, so
+    re-pricing after the analyst lowers R&M lands exactly on the floor instead
+    of keeping the stale top-up's size.
+    """
     if not units:
         return []
     try:
         observed = sum_opex_bucket(canonical, "repairs_maintenance")
+        prior_top_up = sum(
+            (annual_opex_amount(canonical, row) for row in canonical.get("opex_table") or []
+             if _is_r_and_m_top_up(row)),
+            Decimal("0"),
+        )
     except ValueError:
         if mode == MODE_PRICING:
             raise
@@ -664,10 +680,12 @@ def _guard_r_and_m(canonical: dict[str, Any], floor: Floor, mode: str, units: in
     finding = _finding("r_and_m_per_unit", floor, float(observed / Decimal(str(units))), mode,
                        original_annual=float(observed))
     if mode == MODE_PRICING:
-        top_up = floor_annual - observed
+        top_up = floor_annual - (observed - prior_top_up)
         upsert_annual_opex(canonical, category_name=R_AND_M_TOP_UP_CATEGORY, annual_amount=top_up)
         finding.update(applied_annual=float(floor_annual), top_up_annual=float(top_up),
                        category_name=R_AND_M_TOP_UP_CATEGORY)
+        if prior_top_up:
+            finding["replaced_top_up_annual"] = float(prior_top_up)
     return [finding]
 
 
