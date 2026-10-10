@@ -15,6 +15,7 @@ from engine.modules.opex import compute_opex
 from engine.modules.renovations import compute_renovations
 from engine.modules.revenue import compute_base_rent
 from engine.modules.revenue_programs import compute_program_revenue
+from engine.modules.rent_growth import generate_rent_curves
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, month_id, round2
 from engine.property_tax import apply_property_tax_policy
@@ -396,6 +397,70 @@ def _build_renovation_context(
     )
 
 
+def _apply_growth_assumptions(
+    time_grid: TimeGrid,
+    inputs: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Expand growth_assumptions into market_rent_curve segments.
+
+    A cohort whose market_rent_curve carries a single rent (the flat shape
+    ingestion produces) is grown from that rent with generate_rent_curves.
+    A cohort whose curve already varies over time is analyst-authored and is
+    used as provided, so growth is never stacked on top of it.
+
+    Returns the market_rent_curve the engine should use and a disclosure of
+    which cohorts were grown.
+    """
+    curve = list(inputs["market_rent_curve"])
+    growth = inputs.get("growth_assumptions") or {}
+
+    segments_by_cohort: Dict[str, List[Dict[str, Any]]] = {}
+    for seg in curve:
+        segments_by_cohort.setdefault(seg["cohort_id"], []).append(seg)
+    flat = [
+        cid for cid, segs in segments_by_cohort.items()
+        if len({dec(s["market_rent"]) for s in segs}) == 1
+    ]
+    disclosure: Dict[str, Any] = {
+        "growth_type": growth.get("growth_type"),
+        "annual_growth_rate": growth.get("annual_growth_rate"),
+        "growth_start_month": growth.get("growth_start_month", time_grid.month_ids[0]),
+        "applied_to_cohorts": [],
+        "explicit_curve_cohorts": sorted(cid for cid in segments_by_cohort if cid not in flat),
+        "market_rent_curve": curve,
+    }
+    rate = dec(growth.get("annual_growth_rate") or 0)
+    if not flat or rate == 0 or growth.get("growth_type") == "step_only":
+        return curve, disclosure
+
+    generated = generate_rent_curves(
+        time_grid,
+        [{"cohort_id": cid, "initial_inplace_rent": segments_by_cohort[cid][0]["market_rent"]} for cid in flat],
+        growth_assumptions=growth,
+    )["generated_market_rent_curve"]
+
+    grown: Dict[str, List[Dict[str, Any]]] = {}
+    for seg in sorted(generated, key=lambda s: s["start_period"]):
+        cid = seg["cohort_id"]
+        source = segments_by_cohort[cid][0].get("target_monthly_rent_source")
+        row = {
+            "cohort_id": cid,
+            "start_period": seg["start_period"],
+            "end_period": seg["end_period"],
+            "market_rent": seg["market_rent"],
+        }
+        if source is not None:
+            row["target_monthly_rent_source"] = source
+        grown.setdefault(cid, []).append(row)
+
+    new_curve: List[Dict[str, Any]] = []
+    for cid, segs in segments_by_cohort.items():
+        new_curve.extend(grown.get(cid, segs))
+    disclosure["applied_to_cohorts"] = sorted(flat)
+    disclosure["market_rent_curve"] = new_curve
+    return new_curve, disclosure
+
+
 def run_underwriting(
     inputs: Dict[str, Any],
     *,
@@ -467,6 +532,11 @@ def run_underwriting(
         else:
             validate_or_raise(inputs)
     time_grid = TimeGrid.build(inputs["time_grid"]["analysis_start_date"], inputs["time_grid"]["analysis_end_date"])
+
+    # Rent growth - expand growth_assumptions into the market rent curve before
+    # renovation cohorts inherit it.
+    grown_mr_curve, rent_growth_disclosure = _apply_growth_assumptions(time_grid, inputs)
+    inputs = {**inputs, "market_rent_curve": grown_mr_curve}
 
     # Renovation module - compute before revenue so dynamic unit counts are available
     renovation_result = None
@@ -978,6 +1048,7 @@ def run_underwriting(
         "debt": debt_result,
         "cashflow": cashflow_result,
         "metrics": metrics_result,
+        "rent_growth": rent_growth_disclosure,
     }
     result["property_tax_calculation"] = property_tax_calculation.to_json()
 
