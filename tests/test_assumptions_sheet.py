@@ -327,8 +327,13 @@ def test_json_edit_re_resolves_and_keeps_the_default(resolved_deal, tmp_path):
     assert entry["default_value"] == default
     assert entry["source"] == "analyst"
     assert deal["growth_assumptions"]["annual_growth_rate"] == 0.025
+    assert "annual_growth_rates" not in deal["growth_assumptions"]
     re_row = next(r for r in sheet_rows(deal) if r["key"] == "rent_growth")
-    assert re_row["delta"] == pytest.approx(0.025 - default)
+    if isinstance(default, list):
+        # A scalar edit of a per-year vector default has no element-wise delta.
+        assert re_row["delta"] is None
+    else:
+        assert re_row["delta"] == pytest.approx(0.025 - default)
 
 
 # ── Excel ────────────────────────────────────────────────────────────────
@@ -660,7 +665,9 @@ def test_row_order_and_json_bytes_are_deterministic(synthetic_canonical, resolve
     from engine.assumptions import ASSUMPTION_KEYS
 
     keys = [row["key"] for row in sheet_rows(resolved_deal)]
-    assert keys == [key for key in ASSUMPTION_KEYS if key in keys]
+    registry_keys = [key for key in ASSUMPTION_KEYS if key in keys]
+    other_keys = sorted(key for key in keys if key not in ASSUMPTION_KEYS)
+    assert keys == registry_keys + other_keys
 
     first = write_assumptions_json(resolved_deal, tmp_path / "a.json").read_bytes()
     second = write_assumptions_json(copy.deepcopy(resolved_deal), tmp_path / "b.json").read_bytes()
