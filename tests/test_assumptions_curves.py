@@ -382,16 +382,18 @@ def test_star_tier_and_submarket_become_the_geo():
 # ── curve shapes ─────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("deal_type, window, ltl_floor", [("stabilized", 12, 0.01), ("value_add", 24, 0.0125)])
-def test_vacancy_and_ltl_burn_off_shapes(deal_type, window, ltl_floor):
+# Stabilized vacancy is max(1980s typical midpoint 5.75%, house floor): 5.0% cashflow, 6.0% value-add.
+@pytest.mark.parametrize("deal_type, window, ltl_floor, stabilized",
+                         [("stabilized", 12, 0.01, 0.0575), ("value_add", 24, 0.0125, 0.06)])
+def test_vacancy_and_ltl_burn_off_shapes(deal_type, window, ltl_floor, stabilized):
     deal = _ingest(year_built=1984, deal_type=deal_type, market=None)
 
     vacancy, months = _cohort_values(deal, "physical_vacancy_curve", "vacancy_rate")
     assert len(vacancy) == window + 1  # one segment per ramp month, then one flat segment
     assert months[:2] == ["2026-08", "2026-09"]
     assert vacancy[0] == 0.2
-    assert vacancy[window // 2] == pytest.approx(0.2 + (0.0575 - 0.2) / 2, abs=1e-6)
-    assert vacancy[-1] == 0.0575
+    assert vacancy[window // 2] == pytest.approx(0.2 + (stabilized - 0.2) / 2, abs=1e-6)
+    assert vacancy[-1] == stabilized
     assert all(a > b for a, b in zip(vacancy, vacancy[1:]))
     stabilized_from = "2027-08" if window == 12 else "2028-08"
     assert months[-1] == stabilized_from
@@ -587,3 +589,54 @@ def test_end_to_end_ingest_runs_underwriting():
     years = result["cashflow"]["by_year"]
     assert len(years) == 6
     assert all(math.isfinite(row["net_operating_income"]) for row in years)
+
+
+# ── gap fill: MSA forecast fallback, house stabilized vacancy, growth fill ──
+
+
+def test_submarket_forecast_without_annual_coverage_falls_back_to_the_msa():
+    stale = {"2024Q1": 0.05, "2024Q2": 0.05}  # quarters before the analysis starts
+    deal = _ingest(year_built=1984, market=_registry(rent_growth_forecast__sub=stale), **_geo_kwargs())
+    growth = _entries(deal)["rent_growth"]
+
+    # MSA forecast (1pt below the default submarket one) for years 1-2, then glide to the MSA long run.
+    assert growth["value"] == [0.02, 0.025, 0.0265, 0.028]
+    assert growth["source"] == "market:synthetic"
+    assert "no annual coverage" in growth["basis"] and "MSA forecast is used" in growth["basis"]
+
+
+@pytest.mark.parametrize("year_built, deal_type, expected", [
+    (1984, "stabilized", 0.0575),  # midpoint 5.75% > floor 5.0%
+    (1984, "value_add", 0.06),     # floor 5.0% + 1pt = 6.0% > midpoint
+    (1974, "value_add", 0.08),     # 1970s floor 7.0% + 1pt = 8.0% > midpoint 6.0%
+    (2014, "stabilized", 0.0525),  # midpoint 5.25% > floor 4.5%
+])
+def test_house_stabilized_vacancy_is_never_below_the_house_floor(year_built, deal_type, expected):
+    deal = _ingest(year_built=year_built, deal_type=deal_type, market=None)
+    entry = _entries(deal)["physical_vacancy"]
+    strategy = "value_add" if deal_type == "value_add" else "cashflow"
+    floor = float(house.default_physical_vacancy_rate(year_built, strategy=strategy))
+    mid = float(house.typical_physical_vacancy_rate(year_built))
+
+    assert entry["value"]["stabilized"] == pytest.approx(expected) == pytest.approx(max(mid, floor))
+    assert "max(typical-band midpoint" in entry["basis"]
+    assert deal["physical_vacancy_curve"][-1]["vacancy_rate"] == pytest.approx(expected)
+
+
+def test_hand_authored_canonical_without_growth_gets_a_growth_section(minimal_deal_inputs):
+    deal = copy.deepcopy(minimal_deal_inputs)
+    deal.pop("growth_assumptions")
+    resolved = resolve_assumptions(deal)
+    growth = _entries(resolved)["rent_growth"]
+
+    assert resolved["growth_assumptions"] == {
+        "growth_type": "annual_compound", "annual_growth_rate": 0.025, "annual_growth_rates": [0.025] * 4,
+    }
+    assert growth["source"] == "house:long_run_rent_growth"
+    assert growth["review_required"] is True and growth["override"] is None
+    assert validate_schema(resolved) == []
+    assert resolve_assumptions(resolved) == resolved
+
+    # A section without a rate is filled the same way.
+    deal["growth_assumptions"] = {"growth_type": "annual_compound"}
+    assert resolve_assumptions(deal)["growth_assumptions"]["annual_growth_rates"] == [0.025] * 4

@@ -532,14 +532,6 @@ HOUSE_LTL_BURN_OFF_MONTHS = 12
 # stabilized level.
 HOUSE_YEAR1_CONCESSION_MONTHS = 12
 
-
-def default_bad_debt_rate(year_built: Optional[int]) -> Decimal:
-    """House default collection loss: vintage ``bad_debt_typical_low``, else 2.0%."""
-    bucket = vintage_bucket(year_built)
-    if bucket is None:
-        return HOUSE_DEFAULT_COLLECTION_LOSS
-    return VINTAGE_FRAMEWORK_2026[bucket]["bad_debt_typical_low"]
-
 # Exit cap rate when an exit is modeled but neither the analyst nor market
 # data supplies one (ADR 0003 §3): the going-in cap rate (trailing T12 NOI /
 # purchase price) plus this spread. 50 bps of cap-rate expansion over a
@@ -551,8 +543,22 @@ HOUSE_EXIT_CAP_SPREAD = Decimal("0.0050")
 HOUSE_EXIT_CAP_GOING_IN_MAX = Decimal("0.25")
 
 
+def default_bad_debt_rate(year_built: Optional[int]) -> Decimal:
+    """House default collection loss: vintage ``bad_debt_typical_low``, else 2.0%."""
+    bucket = vintage_bucket(year_built)
+    if bucket is None:
+        return HOUSE_DEFAULT_COLLECTION_LOSS
+    return VINTAGE_FRAMEWORK_2026[bucket]["bad_debt_typical_low"]
+
+
 def typical_physical_vacancy_rate(year_built: Optional[int]) -> Optional[Decimal]:
-    """House stabilized vacancy: midpoint of the vintage typical physical-vacancy band."""
+    """Midpoint of the vintage typical physical-vacancy band.
+
+    The resolver's house stabilized vacancy is
+    ``max(this midpoint, default_physical_vacancy_rate)`` for the deal's
+    strategy (engine/assumptions/curves.py), so a house-only deal never sits
+    below its own vacancy floor.
+    """
     bucket = vintage_bucket(year_built)
     if bucket is None:
         return None
