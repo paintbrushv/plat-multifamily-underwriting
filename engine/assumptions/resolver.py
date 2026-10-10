@@ -1680,6 +1680,9 @@ def resolve_assumptions(
     # re-read the opex entries so a second resolution is identical. The first
     # pass is the prior: a value it wrote is not mistaken for an analyst value.
     entries.update(opex_slice.resolve_opex_entries(ctx, {**prior_entries, **entries}, explicit))
+    # Keep the labels backsolve gave the values its pricing set (house:backsolve_policy, ...).
+    from engine.assumptions.guardrails import restore_pricing_labels
+    restore_pricing_labels(entries, prior_entries)
     # ── end slice 6 hook ──
 
     out["deal_profile"] = profile.to_dict()

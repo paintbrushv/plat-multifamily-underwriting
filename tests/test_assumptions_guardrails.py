@@ -26,6 +26,7 @@ from engine.assumptions import (
 )
 from engine.assumptions import guardrails
 from engine.assumptions.guardrails import GuardrailProfile, enforce_floors, house_floors
+from engine.modules.util import dec
 from engine.validator import validate_deal, validate_schema
 
 YEAR = 1984  # 1980s bucket: vacancy 5%, LTL 1%, collection 0.75%, concessions 0.75%, R&M $900, reserve $1,000
@@ -244,9 +245,18 @@ def test_ltl_floor_skips_cohorts_without_a_market_gap(minimal_deal_inputs):
 def test_analyst_insurance_override_waives_the_insurance_floor(minimal_deal_inputs):
     deal = _below_floor_deal(minimal_deal_inputs)
     next(r for r in deal["opex_table"] if r["category_name"] == "Insurance").update(base_value=40_000)
+    before = copy.deepcopy(deal)
+    overrides: list = []
     findings = enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("insurance_per_unit",),
-                              context={"insurance_per_unit_override": Decimal("400")})
-    assert findings == []
+                              context={"insurance_per_unit_override": Decimal("400"),
+                                       "policy_overrides": overrides})
+    assert deal == before  # the analyst's figure is kept
+    # ... and the waiver is disclosed.
+    assert [(f["action"], f["floor"], f["applied"]) for f in findings] == [
+        ("floor_waived_by_analyst_override", 600.0, 400.0)]
+    assert overrides == [{"input": "insurance_per_unit", "action": "floor_waived_by_analyst_override",
+                          "floor": 600.0, "floor_source": "house:year1_insurance_floor",
+                          "original": 400.0, "applied": 400.0}]
 
 
 def test_resolver_pricing_mode_updates_entries_to_the_priced_values(minimal_deal_inputs):
@@ -426,6 +436,162 @@ def test_backsolve_house_policy_matches_generic_pricing_floors(pricing_deal):
     assert summary["guardrails"]["profile"]["year_built"] == YEAR
     _, findings = apply_guardrails(prepared, mode="pricing", profile=GuardrailProfile("cashflow", YEAR))
     assert findings == []
+
+
+# ── pricing labels ───────────────────────────────────────────────────────
+
+
+def _shown_as_analyst_edits(case, original):
+    """Entries the solved case shows as analyst values the input canonical did not carry."""
+    from engine.assumptions.resolver import _NOTE_EDITED, _NOTE_PRESENT
+
+    before = original["assumptions"]["entries"]
+    out = set()
+    for key, entry in case["assumptions"]["entries"].items():
+        note = (entry.get("override") or {}).get("note")
+        if note == _NOTE_EDITED:
+            out.add(key)
+        elif note == _NOTE_PRESENT and not (
+            (before.get(key, {}).get("override") or {}).get("note") == _NOTE_PRESENT
+            and before[key]["value"] == entry["value"]
+        ):
+            out.add(key)
+    return out
+
+
+def _assert_pricing_labels(result, original):
+    """Every value backsolve's pricing set is labeled by who set it and disclosed."""
+    case = result["case"]
+    entries = case["assumptions"]["entries"]
+    overrides = result["summary"]["policy_summary"]["policy_overrides"]
+    assert _shown_as_analyst_edits(case, original) == set()
+    for key in backsolve.PRICING_POLICY_KEYS:
+        assert entries[key]["source"] == "house:backsolve_policy", key
+        assert entries[key]["override"] == {"value": entries[key]["value"], "note": guardrails.PRICING_POLICY_NOTE}
+    # Each normalization that changed an input is in policy_overrides with original and applied,
+    # and its entry carries house:pricing_normalization unless a floor was enforced on it.
+    normalized = {}
+    for override in overrides:
+        if override.get("normalization"):
+            assert override["source"] == "house:pricing_normalization"
+            assert override["original"] != override["applied"]
+            normalized[backsolve.PRICING_NORMALIZATIONS[override["input"]][1]] = override
+    labeled = {k for k, e in entries.items() if e["source"] == "house:pricing_normalization"}
+    enforced = {k for k, e in entries.items() if (e.get("guardrail") or {}).get("action") == "enforced"}
+    assert set(normalized) - enforced <= labeled
+    assert {k for k in labeled if not k.startswith("opex.")} <= set(normalized)
+    for key in labeled:
+        assert entries[key]["override"]["note"] == guardrails.PRICING_NORMALIZATION_NOTE
+        assert entries[key]["review_required"] is True
+    # The labels are stable: re-resolving the solved canonical changes nothing.
+    assert resolve_assumptions(case, mode="pricing") == case
+    return entries, normalized
+
+
+def test_backsolve_labels_what_its_pricing_policy_and_normalizations_set(pricing_deal):
+    result = _solve(pricing_deal)
+    entries, normalized = _assert_pricing_labels(result, pricing_deal)
+    case = result["case"]
+    # The policy's explicit exit cap, fees and closing costs.
+    assert entries["exit_cap_rate"]["source"] == "house:backsolve_policy"
+    assert "explicit policy value" in entries["exit_cap_rate"]["basis"]
+    assert entries["annual_partnership_expenses"]["value"] == case["fund_assumptions"]["annual_partnership_expenses"]
+    assert "DEFAULTS['acquisition_fee_pct']" in entries["acquisition_fee_pct"]["basis"]
+    # Collection loss (two rows -> one ALL row at the worst 2%) and loss to lease are rewritten.
+    assert set(normalized) == {"collection_loss", "loss_to_lease"}
+    assert entries["collection_loss"]["source"] == "house:pricing_normalization"
+    assert normalized["collection_loss"]["applied"] == case["collection_loss_curve"]
+    assert [r["loss_rate"] for r in normalized["collection_loss"]["original"]] == [0.002, 0.02]
+    # Concessions were raised by the floor: the guardrail label stands.
+    assert entries["concessions"]["source"] == "house:vintage_1980s"
+    # The real estate tax line is reassessed by the property-tax module at the priced price.
+    tax = entries["opex.real_estate_taxes.base"]
+    assert tax["source"] == "house:property_tax_module"
+    assert tax["override"]["note"] == guardrails.PRICING_PROPERTY_TAX_NOTE
+    assert tax["value"] == next(r for r in case["opex_table"] if r["category_name"] == "Real Estate Taxes")[
+        "base_value"]
+    # The R&M top-up line takes the R&M floor's source.
+    top_up = next(e for k, e in entries.items()
+                  if (e.get("detail") or {}).get("category_name") == guardrails.R_AND_M_TOP_UP_CATEGORY)
+    assert top_up["source"] == "house:vintage_1980s"
+    assert top_up["override"]["note"] == guardrails.PRICING_FLOOR_LINE_NOTE
+
+
+def test_reserves_above_the_vintage_reserve_are_a_disclosed_normalization(minimal_deal_inputs):
+    """Backsolve sets reserves to the vintage reserve even when the analyst's are higher
+    (a pricing normalization, unchanged here): it is labeled and listed, not shown as an edit."""
+    deal = _below_floor_deal(minimal_deal_inputs)
+    deal["opex_table"] = [r for r in deal["opex_table"] if r["calculation_type"] != "percent_egr"]
+    deal["replacement_reserves"] = [dict(r, annual_amount=150_000) for r in deal["replacement_reserves"]]
+    deal = resolve_assumptions(deal, deal_profile=PROFILE)
+    result = _solve(deal)
+    entries, normalized = _assert_pricing_labels(result, deal)
+    reserves = normalized["replacement_reserve_per_unit"]
+    assert reserves["normalization"] == "reserves_set_to_vintage_reserve"
+    assert [r["annual_amount"] for r in reserves["original"]] == [150_000.0]
+    assert reserves["applied"] == result["case"]["replacement_reserves"]
+    assert entries["replacement_reserve_per_unit"]["source"] == "house:pricing_normalization"
+    assert entries["replacement_reserve_per_unit"]["value"] == 1000.0
+
+
+@pytest.mark.parametrize("slug, strategy, target, max_price", [
+    ("a_stabilized_1990s", "cashflow", "0.06", "40000000.00"),
+    ("d_value_add_1980s_msa_only", "value_add", "0.03", "20000000.00"),
+])
+def test_library_backsolve_cases_carry_pricing_labels(slug, strategy, target, max_price):
+    from tests import deal_library
+
+    deal = deal_library.ingest(deal_library.load_deal(slug))
+    result = backsolve.backsolve_price(
+        copy.deepcopy(deal), target_coc=target, policy={"version": "plat.backsolve-policy/1", "strategy": strategy},
+        benchmark=BENCHMARK, min_price="1000000.00", max_price=max_price,
+    )
+    assert result["status"] == "converged"
+    entries, normalized = _assert_pricing_labels(result, deal)
+    assert entries["loss_to_lease"]["source"] == "house:pricing_normalization"
+    assert normalized["loss_to_lease"]["normalization"] == "ltl_rederived_from_market_vs_in_place"
+    assert entries["concessions"]["source"] == "house:pricing_normalization"
+    assert entries["opex.real_estate_taxes.base"]["source"] == "house:property_tax_module"
+    # The exit cap came from the canonical, not the policy: its label is unchanged.
+    assert entries["exit_cap_rate"]["source"] != "house:backsolve_policy"
+    # sale_cost_percent was an ingest input the policy matched: the basis says so.
+    assert "matches the canonical's 2.00% (analyst)" in entries["sale_cost_percent"]["basis"]
+
+
+def test_insurance_override_below_the_floor_is_kept_and_disclosed(pricing_deal):
+    policy = {**POLICY, "insurance_per_unit_override": "400"}
+    result = backsolve.backsolve_price(
+        copy.deepcopy(pricing_deal), target_coc="0.06", policy=policy, benchmark=BENCHMARK,
+        min_price="1000000.00", max_price="40000000.00",
+    )
+    assert result["status"] == "converged"
+    case = result["case"]
+    summary = result["summary"]["policy_summary"]
+    # The waiver keeps today's price: insurance is priced at the analyst's $400/unit.
+    insurance = next(r for r in case["opex_table"] if r["category_name"] == "Insurance")
+    assert insurance["base_value"] == 40_000.0
+    assert summary["insurance_per_unit_applied"] == 400.0
+    waiver = [o for o in summary["policy_overrides"] if o["input"] == "insurance_per_unit"]
+    assert waiver == [{"input": "insurance_per_unit", "action": "floor_waived_by_analyst_override",
+                       "floor": 600.0, "floor_source": "house:year1_insurance_floor",
+                       "category_name": "Insurance", "original": 600.0, "applied": 400.0}]
+    assert [f["action"] for f in summary["guardrails"]["findings"] if f["key"] == "insurance_per_unit"] == [
+        "floor_waived_by_analyst_override"]
+    entry = case["assumptions"]["entries"]["insurance_per_unit"]
+    assert entry["value"] == 400.0
+    assert entry["source"] == "analyst"
+    assert entry["override"] == {"value": 400.0, "note": guardrails.PRICING_INSURANCE_OVERRIDE_NOTE}
+    assert entry["guardrail"]["action"] == "floor_waived_by_analyst_override"
+    assert entry["guardrail"]["floor"] == 600.0 and entry["guardrail"]["applied"] == 400.0
+    assert not [i for i in validate_deal(case).issues if i.code == "GUARDRAIL_BELOW_FLOOR"]
+    # Re-resolving honors the recorded waiver in either mode: insurance is not raised.
+    assert resolve_assumptions(case, mode="pricing") == case
+    rewarned = resolve_assumptions(case)
+    assert rewarned["opex_table"] == case["opex_table"]
+    assert rewarned["assumptions"]["entries"]["insurance_per_unit"]["guardrail"] == entry["guardrail"]
+    # Without the policy override the floor is enforced and the price is lower.
+    floored = _solve(pricing_deal)
+    assert dec(floored["summary"]["solved_purchase_price"]) < dec(result["summary"]["solved_purchase_price"])
 
 
 def _r_and_m_rows(canonical):

@@ -23,6 +23,7 @@ HOUSE_PREFIX = "house:"
 
 # House rules referenced by entries (`house:<rule>`).
 HOUSE_BACKSOLVE_POLICY = "house:backsolve_policy"
+HOUSE_PRICING_NORMALIZATION = "house:pricing_normalization"
 HOUSE_YEAR1_INSURANCE_FLOOR = "house:year1_insurance_floor"
 HOUSE_EXIT_CAP_SPREAD = "house:exit_cap_spread"
 

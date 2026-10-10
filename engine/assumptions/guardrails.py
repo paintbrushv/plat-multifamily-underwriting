@@ -47,7 +47,9 @@ from engine.assumptions.canonical_ops import (
 )
 from engine.assumptions.profile import DEAL_TYPE_STRATEGY, DealProfile, check_deal_type
 from engine.assumptions.registry import (
+    HOUSE_BACKSOLVE_POLICY,
     HOUSE_PREFIX,
+    HOUSE_PRICING_NORMALIZATION,
     HOUSE_YEAR1_INSURANCE_FLOOR,
     MODES,
     SOURCE_ANALYST,
@@ -66,6 +68,9 @@ MODE_PRICING = "pricing"
 STATUS_BELOW_FLOOR = "below_floor"
 ACTION_WARNED = "warned"
 ACTION_ENFORCED = "enforced"
+# An explicit analyst insurance figure below the insurance floor: the value is
+# kept (no price change) and the waiver is disclosed.
+ACTION_WAIVED = "floor_waived_by_analyst_override"
 
 STRATEGIES = ("cashflow", "value_add")
 STRATEGY_DEAL_TYPE = {strategy: deal_type for deal_type, strategy in DEAL_TYPE_STRATEGY.items()}
@@ -109,6 +114,24 @@ SOURCE_SUPPLIED_MARKET_VACANCY = market_source("supplied_benchmark")
 # Note on the override that pins a value the pricing guardrail raised, so a
 # later re-resolution keeps the priced value instead of the resolver default.
 GUARDRAIL_OVERRIDE_NOTE = "pinned at the house floor enforced by the pricing guardrail"
+
+# Notes on the overrides that pin values backsolve's pricing set outside the
+# shared floors (see ``label_pricing_entry``). Each names who set the value, so
+# the entry is never shown as an analyst edit of the canonical.
+PRICING_POLICY_NOTE = "set by the backsolve pricing policy"
+PRICING_NORMALIZATION_NOTE = "rewritten by a backsolve pricing normalization"
+PRICING_FLOOR_LINE_NOTE = "opex line set by a house floor the pricing guardrail enforced"
+PRICING_PROPERTY_TAX_NOTE = "reassessed by the property tax module at the priced purchase price"
+PRICING_INSURANCE_OVERRIDE_NOTE = "analyst insurance_per_unit_override in the backsolve policy"
+PRICING_LABEL_NOTES = frozenset({
+    PRICING_POLICY_NOTE,
+    PRICING_NORMALIZATION_NOTE,
+    PRICING_FLOOR_LINE_NOTE,
+    PRICING_PROPERTY_TAX_NOTE,
+    PRICING_INSURANCE_OVERRIDE_NOTE,
+})
+SOURCE_HOUSE_BACKSOLVE_POLICY = HOUSE_BACKSOLVE_POLICY
+SOURCE_HOUSE_PRICING_NORMALIZATION = HOUSE_PRICING_NORMALIZATION
 
 _VACANCY_ANCHOR_SOURCES = {
     "broker_om": SOURCE_DEAL_OM,
@@ -622,7 +645,47 @@ def _guard_concessions(canonical: dict[str, Any], floor: Floor, mode: str) -> li
     return [finding]
 
 
-def _guard_insurance(canonical: dict[str, Any], floor: Floor, mode: str, units: int) -> list[dict[str, Any]]:
+def recorded_insurance_waiver(canonical: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """The insurance floor waiver a priced canonical records, if any.
+
+    Backsolve keeps an explicit analyst insurance figure below the floor and
+    records ``action: "floor_waived_by_analyst_override"`` on the
+    ``insurance_per_unit`` entry, whose override pins that figure. A later
+    resolution honors the waiver while the canonical still carries that figure.
+    """
+    section = canonical.get("assumptions") if isinstance(canonical, Mapping) else None
+    entry = ((section or {}).get("entries") or {}).get("insurance_per_unit") if isinstance(section, Mapping) else None
+    if not isinstance(entry, Mapping):
+        return None
+    record, override = entry.get("guardrail"), entry.get("override")
+    if not isinstance(record, Mapping) or record.get("action") != ACTION_WAIVED or not isinstance(override, Mapping):
+        return None
+    return {"value": override.get("value"), "original": record.get("original")}
+
+
+def waiver_finding(floor: Floor, *, original: Any, applied: Any, **extra: Any) -> dict[str, Any]:
+    """A disclosed insurance floor waiver (the value is kept as the analyst set it)."""
+    return {
+        "key": "insurance_per_unit",
+        "input": "insurance_per_unit",
+        "status": STATUS_BELOW_FLOOR,
+        "action": ACTION_WAIVED,
+        "floor": float(floor.value),
+        "floor_source": floor.source,
+        **extra,
+        "original": original,
+        "applied": applied,
+    }
+
+
+def _guard_insurance(
+    canonical: dict[str, Any],
+    floor: Floor,
+    mode: str,
+    units: int,
+    *,
+    analyst_override: Any = None,
+) -> list[dict[str, Any]]:
     if not units:
         return []
     rows = matching_opex_rows(canonical, "insurance")
@@ -635,6 +698,16 @@ def _guard_insurance(canonical: dict[str, Any], floor: Floor, mode: str, units: 
     per_unit = annual / Decimal(str(units))
     if per_unit >= floor.value:
         return []
+    # An explicit analyst figure waives the floor: nothing changes, the waiver is disclosed.
+    waiver = None
+    if analyst_override is not None:
+        waiver = {"original": float(per_unit)}
+    else:
+        recorded = recorded_insurance_waiver(canonical)
+        if recorded is not None and _same(recorded["value"], float(per_unit)):
+            waiver = recorded
+    if waiver is not None:
+        return [waiver_finding(floor, original=waiver["original"], applied=float(per_unit))]
     applied_annual = floor.value * Decimal(str(units))
     category = rows[0].get("category_name") if rows else "Insurance"
     if mode == MODE_PRICING:
@@ -744,9 +817,14 @@ def enforce_floors(
         ``broker_snapshot``, ``trailing_actuals``: deal anchors that can raise
             a floor (as backsolve's house policy always has).
         ``insurance_per_unit_override``: an explicit analyst insurance figure;
-            it waives the insurance floor.
-        ``policy_overrides``: a list; every enforced finding is appended to it
-            in ``policy_overrides`` form.
+            it waives the insurance floor. A value below the floor is kept and
+            disclosed as a finding with ``action:
+            "floor_waived_by_analyst_override"``. A waiver recorded on the
+            canonical's ``insurance_per_unit`` entry (a priced canonical) is
+            honored the same way while the insurance line still carries the
+            pinned figure.
+        ``policy_overrides``: a list; every enforced or waived finding is
+            appended to it in ``policy_overrides`` form.
     """
     _check_mode(mode)
     context = context or {}
@@ -772,20 +850,28 @@ def enforce_floors(
         elif key == "concessions":
             findings += _guard_concessions(canonical, floor, mode)
         elif key == "insurance_per_unit":
-            if context.get("insurance_per_unit_override") is None:
-                findings += _guard_insurance(canonical, floor, mode, units)
+            findings += _guard_insurance(canonical, floor, mode, units,
+                                         analyst_override=context.get("insurance_per_unit_override"))
         elif key == "r_and_m_per_unit":
             findings += _guard_r_and_m(canonical, floor, mode, units)
         elif key == "replacement_reserve_per_unit":
             findings += _guard_reserves(canonical, floor, mode, units)
     sink = context.get("policy_overrides")
     if isinstance(sink, list):
-        sink.extend(policy_override(f) for f in findings if f["action"] == ACTION_ENFORCED)
+        sink.extend(policy_override(f) for f in findings if f["action"] in (ACTION_ENFORCED, ACTION_WAIVED))
     return findings
 
 
 def policy_override(finding: Mapping[str, Any]) -> dict[str, Any]:
-    """A finding in backsolve's ``policy_overrides`` form (original/applied)."""
+    """A finding in backsolve's ``policy_overrides`` form (original/applied).
+
+    An enforced floor carries ``assumption`` and ``guardrail: "house_floor"``. A
+    waived floor is ``{input: "insurance_per_unit", action:
+    "floor_waived_by_analyst_override", floor, floor_source, original, applied}``.
+    """
+    if finding["action"] == ACTION_WAIVED:
+        out = {k: v for k, v in finding.items() if k not in ("key", "status")}
+        return out
     out = {
         k: v for k, v in finding.items()
         if k not in ("key", "status", "action")
@@ -815,8 +901,26 @@ def _fmt(value: Any, key: str) -> str:
 _SEGMENT_FIELDS = ("cohort_id", "applies_to", "start_period", "end_period")
 
 
+def _waiver_record(key: str, first: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "floor": first["floor"],
+        "floor_source": first["floor_source"],
+        "status": STATUS_BELOW_FLOOR,
+        "action": ACTION_WAIVED,
+        "original": first.get("original"),
+        "applied": first.get("applied"),
+        "basis": (
+            f"{key} {_fmt(first.get('applied'), key)} is below the house floor {_fmt(first['floor'], key)} "
+            f"({first['floor_source']}); the analyst's explicit insurance override waives the floor, so "
+            "pricing keeps the analyst's figure. Review the override."
+        ),
+    }
+
+
 def _entry_record(key: str, items: list[Mapping[str, Any]]) -> dict[str, Any]:
     first = items[0]
+    if first["action"] == ACTION_WAIVED:
+        return _waiver_record(key, first)
     originals = [float(i["original"]) for i in items if i.get("original") is not None]
     lowest = min(originals) if originals else None
     enforced = first["action"] == ACTION_ENFORCED
@@ -933,6 +1037,92 @@ def _fmt_default(entry: Mapping[str, Any], key: str) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return _fmt(value, key)
     return "none" if value is None else str(value)
+
+
+# ── pricing labels (values backsolve sets outside the shared floors) ─────
+
+
+def fmt_unit_value(value: Any, unit: Any) -> str:
+    """A value for a basis text, formatted by its entry unit."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "none" if value is None else str(value)
+    unit = str(unit or "")
+    if unit.startswith("decimal"):
+        return f"{float(value):.2%}"
+    if unit.startswith("usd"):
+        return f"${float(value):,.2f}"
+    return f"{float(value):g}"
+
+
+def _entry_confidence(source: str) -> Optional[str]:
+    return "high" if source == SOURCE_ANALYST else _confidence(source)
+
+
+def label_pricing_entry(entry: dict[str, Any], *, source: str, note: str, basis: str) -> dict[str, Any]:
+    """Label an entry whose value backsolve's pricing set (mutated and returned).
+
+    Backsolve sets values outside the shared floors: its pricing policy (fees,
+    closing costs, sale cost, an explicit exit cap; ``house:backsolve_policy``),
+    its pricing normalizations (``house:pricing_normalization``), the
+    property-tax reassessment at the priced price, and opex lines a floor
+    raised. Re-resolving the solved canonical would otherwise show each of them
+    as an ``analyst`` edit ("changed in the canonical after the last
+    resolution"). The entry takes ``source`` and ``basis``, and an override
+    with ``note`` (one of ``PRICING_LABEL_NOTES``) pins the priced value so a
+    re-resolution keeps it; ``restore_pricing_labels`` then keeps the label.
+    An entry the pricing guardrail enforced keeps its guardrail label.
+    """
+    from engine.assumptions.resolver import _NOTE_EDITED, _NOTE_PRESENT
+
+    if (entry.get("guardrail") or {}).get("action") == ACTION_ENFORCED:
+        return entry
+    auto_notes = {_NOTE_EDITED, _NOTE_PRESENT, GUARDRAIL_OVERRIDE_NOTE} | PRICING_LABEL_NOTES
+    value = entry.get("value")
+    override = entry.get("override") or {}
+    pin: dict[str, Any] = {"value": deepcopy(value), "note": note}
+    cohorts = override.get("cohort_overrides") or entry.get("cohort_overrides")
+    if cohorts:
+        pin["cohort_overrides"] = deepcopy(cohorts)
+    candidates = [
+        c for c in entry.get("candidates") or []
+        if not (c.get("source") == SOURCE_ANALYST and c.get("basis") in auto_notes)
+        and not (c.get("source") == source and _same(c.get("value"), value))
+    ]
+    entry.update(
+        source=source,
+        confidence=_entry_confidence(source),
+        review_required=requires_review(source),
+        override=pin,
+        candidates=[{"source": source, "value": deepcopy(value), "basis": basis}] + candidates,
+        basis=f"{basis} Resolver default: {fmt_unit_value(entry.get('default_value'), entry.get('unit'))}.",
+    )
+    return entry
+
+
+def restore_pricing_labels(
+    entries: dict[str, dict[str, Any]],
+    prior_entries: Optional[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Keep each pricing label on re-resolution (mutated and returned).
+
+    An entry still pinned by a ``PRICING_LABEL_NOTES`` override at the same
+    value as in ``prior_entries`` takes back the prior entry's source, basis,
+    confidence, review flag and candidates. A changed value (the analyst edited
+    the canonical) or a new override drops the label.
+    """
+    for key, entry in entries.items():
+        prior = (prior_entries or {}).get(key)
+        override = entry.get("override") or {}
+        if (
+            not isinstance(prior, Mapping)
+            or override.get("note") not in PRICING_LABEL_NOTES
+            or (prior.get("override") or {}).get("note") != override.get("note")
+            or not _same(entry.get("value"), prior.get("value"))
+        ):
+            continue
+        for field in ("source", "basis", "confidence", "review_required", "candidates"):
+            entry[field] = deepcopy(prior.get(field))
+    return entries
 
 
 # ── public entry point ───────────────────────────────────────────────────

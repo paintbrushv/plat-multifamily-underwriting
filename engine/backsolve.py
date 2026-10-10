@@ -24,6 +24,7 @@ from engine.assumptions.canonical_ops import (
     sum_opex_bucket as _sum_opex_bucket,
     ensure_year1_concession_schedule as _ensure_year1_concession_schedule,
     concession_pct_rent as _concession_pct_rent,
+    matching_opex_rows as _matching_opex_rows,
     upsert_annual_opex_by_match as _upsert_annual_opex_by_match,
     upsert_annual_opex as _upsert_annual_opex,
 )
@@ -36,9 +37,12 @@ from engine.assumptions.guardrails import (
     vacancy_anchor_summary as _vacancy_anchor_summary,
     year1_insurance_per_unit as _year1_insurance_per_unit,
 )
+from engine.assumptions.opex import SOURCE_HOUSE_PROPERTY_TAX
+from engine.assumptions.registry import SOURCE_ANALYST as SOURCE_ANALYST_OVERRIDE
 from engine.assumptions.resolver import resolve_assumptions
 from engine.property_tax import (
     apply_property_tax_policy,
+    is_property_tax_label,
     normalize_property_tax_purchase_price,
     property_tax_decimal_to_json_number,
     require_property_tax_policy,
@@ -547,6 +551,43 @@ def _rebase_to_house_box_score(
 _extract_t12_vacancy_rate = guardrails.t12_vacancy_rate
 _extract_broker_vacancy_rate = guardrails.broker_vacancy_rate
 
+# Backsolve's pricing normalizations (house-policy rewrites of analyst inputs),
+# by the canonical input each rewrites: (normalization name, assumption key, basis).
+PRICING_NORMALIZATIONS = {
+    "loss_to_lease": (
+        "ltl_rederived_from_market_vs_in_place", "loss_to_lease",
+        "Backsolve pricing normalization: loss to lease is re-derived per cohort as "
+        "1 - in-place rent / market rent.",
+    ),
+    "collection_loss_curve": (
+        "collection_loss_flattened_to_worst_rate", "collection_loss",
+        "Backsolve pricing normalization: collection loss becomes one ALL row at the worst current rate.",
+    ),
+    "concession_schedule": (
+        "concessions_as_year1_schedule", "concessions",
+        "Backsolve pricing normalization: concessions become one year-1 pct_rent schedule at the "
+        "highest current rate.",
+    ),
+    "replacement_reserves": (
+        "reserves_set_to_vintage_reserve", "replacement_reserve_per_unit",
+        "Backsolve pricing normalization: replacement reserves are set to the house vintage reserve "
+        "per unit for the whole hold.",
+    ),
+}
+
+
+def _pricing_normalization(input_name: str, original: Any, applied: Any) -> dict[str, Any]:
+    """A ``policy_overrides`` entry for one pricing normalization that changed an input."""
+    name, _key, basis = PRICING_NORMALIZATIONS[input_name]
+    return {
+        "input": input_name,
+        "normalization": name,
+        "source": guardrails.SOURCE_HOUSE_PRICING_NORMALIZATION,
+        "basis": basis,
+        "original": deepcopy(original),
+        "applied": deepcopy(applied),
+    }
+
 
 def _apply_house_revenue_policy(
     canonical: dict[str, Any],
@@ -562,10 +603,12 @@ def _apply_house_revenue_policy(
     Backsolve first normalizes three inputs (its pricing policy, unchanged):
     loss to lease is re-derived from market vs in-place rent, collection loss
     becomes one ALL row at the worst current rate, and concessions become a
-    year-1 pct_rent schedule at the highest current rate. Then
-    ``guardrails.enforce_floors`` in pricing mode raises every value below its
-    house floor (vacancy per segment against the property-level anchor) and
-    lists each raise in ``policy_overrides``.
+    year-1 pct_rent schedule at the highest current rate. Each normalization
+    that changes an input is listed in ``policy_overrides`` with
+    ``normalization``, ``source: "house:pricing_normalization"``, ``original``
+    and ``applied``. Then ``guardrails.enforce_floors`` in pricing mode raises
+    every value below its house floor (vacancy per segment against the
+    property-level anchor) and lists each raise in ``policy_overrides``.
     """
     broker_notes = (broker_snapshot or {}).get("underwriting_notes", {})
     profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=deferred)
@@ -577,13 +620,20 @@ def _apply_house_revenue_policy(
     broker_bad_debt = _parse_percent_note(broker_notes.get("bad_debt"))
     broker_concessions = _parse_percent_note(broker_notes.get("concessions"))
 
+    normalizations: list[dict[str, Any]] = []
+
     # Loss to lease: the house value is derived from market vs in-place rent.
+    original_ltl = deepcopy(canonical.get("loss_to_lease") or [])
     for row in canonical.get("loss_to_lease") or []:
         market_dec, inplace_dec = _cohort_rents(canonical, row["cohort_id"])
         derived = Decimal("0")
         if market_dec > inplace_dec:
             derived = max(Decimal("0"), Decimal("1") - (inplace_dec / market_dec))
         row["ltl_percent"] = float(derived)
+    if original_ltl != (canonical.get("loss_to_lease") or []):
+        normalizations.append(_pricing_normalization(
+            "loss_to_lease", original_ltl, canonical.get("loss_to_lease") or [],
+        ))
 
     # Concessions: one year-1 pct_rent schedule at the highest current rate.
     original_concessions = deepcopy(canonical.get("concession_schedule") or [])
@@ -594,6 +644,7 @@ def _apply_house_revenue_policy(
     _ensure_year1_concession_schedule(canonical, rate=current_concessions)
 
     # Collection loss: one ALL row at the worst current rate.
+    original_collection = deepcopy(canonical.get("collection_loss_curve") or [])
     current_collection = Decimal("0")
     if canonical.get("collection_loss_curve"):
         current_collection = max(
@@ -607,11 +658,15 @@ def _apply_house_revenue_policy(
             "loss_rate": float(current_collection),
         }
     ]
+    if original_collection != canonical["collection_loss_curve"]:
+        normalizations.append(_pricing_normalization(
+            "collection_loss_curve", original_collection, canonical["collection_loss_curve"],
+        ))
 
     # The vacancy anchor is a per-segment floor: a segment below it is raised
     # to it, a segment at or above it keeps the analyst's rate. The curve keeps
     # its shape, and one cohort's higher rate never spreads to other cohorts.
-    overrides: list[dict[str, Any]] = []
+    overrides: list[dict[str, Any]] = list(normalizations)
     findings = guardrails.enforce_floors(
         canonical,
         mode=guardrails.MODE_PRICING,
@@ -620,11 +675,11 @@ def _apply_house_revenue_policy(
         keys=("physical_vacancy", "loss_to_lease", "collection_loss", "concessions"),
     )
     if original_concessions and original_concessions != (canonical.get("concession_schedule") or []):
-        overrides.append({
-            "input": "concession_schedule",
-            "original": original_concessions,
-            "applied": canonical.get("concession_schedule") or [],
-        })
+        # The year-1 schedule as priced (after any concession floor).
+        overrides.append(_pricing_normalization(
+            "concession_schedule", original_concessions,
+            canonical.get("concession_schedule") or [],
+        ))
 
     applied_ltls = [float(row["ltl_percent"]) for row in canonical.get("loss_to_lease") or []]
     applied_vacancy = floors["physical_vacancy"].value
@@ -1048,6 +1103,21 @@ def _prepare_house_assumptions(
             guardrail_findings.append(finding)
             insurance_override = guardrails.policy_override(finding)
         policy_overrides.append(insurance_override)
+    if (
+        insurance_per_unit_override is not None
+        and units
+        and insurance_per_unit_override < insurance_floor
+    ):
+        # The analyst's explicit figure waives the floor and is priced as given;
+        # the waiver is disclosed, never silent.
+        waiver = guardrails.waiver_finding(
+            guardrails.Floor("insurance_per_unit", insurance_floor, guardrails.HOUSE_YEAR1_INSURANCE_FLOOR, ""),
+            original=float(observed_insurance_per_unit or 0),
+            applied=float(insurance_per_unit_override),
+            category_name=insurance_category,
+        )
+        guardrail_findings.append(waiver)
+        policy_overrides.append(guardrails.policy_override(waiver))
 
     # Reserves: the house vintage reserve replaces the analyst's reserves. The
     # shared guardrail first records any segment it raises.
@@ -1061,6 +1131,7 @@ def _prepare_house_assumptions(
             keys=("replacement_reserve_per_unit",),
         )
         annual_reserve = reserve_per_unit * Decimal(str(units))
+        floored_reserves = deepcopy(prepared.get("replacement_reserves") or [])
         prepared["replacement_reserves"] = [
             {
                 "start_period": str(prepared["time_grid"]["analysis_start_date"])[:7],
@@ -1068,6 +1139,10 @@ def _prepare_house_assumptions(
                 "annual_amount": float(annual_reserve),
             }
         ]
+        if floored_reserves != prepared["replacement_reserves"]:
+            policy_overrides.append(_pricing_normalization(
+                "replacement_reserves", floored_reserves, prepared["replacement_reserves"],
+            ))
 
     observed_r_and_m = _sum_opex_bucket(prepared, "repairs_maintenance")
     r_and_m_per_unit = guardrail_profile.r_and_m_per_unit()
@@ -1317,6 +1392,10 @@ def _with_pricing_assumptions(
     strategy: str,
     year_built: int | None,
     findings: list[dict[str, Any]],
+    original: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
+    values: dict[str, Any] | None = None,
+    policy_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Re-resolve the solved case's ``assumptions`` in pricing mode (ADR 0003 slice 6).
 
@@ -1325,6 +1404,9 @@ def _with_pricing_assumptions(
     The re-resolution records the priced values and the enforced floors and
     enforces nothing again. Only ``assumptions`` and ``deal_profile`` are taken
     from it, so every priced number in the case is unchanged.
+
+    Each value backsolve's pricing set outside the shared floors is then
+    labeled by who set it (``_label_pricing_entries``), never as an analyst edit.
     """
     resolved = resolve_assumptions(
         case,
@@ -1332,7 +1414,149 @@ def _with_pricing_assumptions(
         mode=guardrails.MODE_PRICING,
         guardrail_context={"enforced": findings},
     )
-    return {**case, "deal_profile": resolved["deal_profile"], "assumptions": resolved["assumptions"]}
+    section = resolved["assumptions"]
+    _label_pricing_entries(
+        section["entries"],
+        original=original or {},
+        case=case,
+        policy=policy or {},
+        values=values or {},
+        policy_summary=policy_summary or {},
+        findings=findings,
+    )
+    return {**case, "deal_profile": resolved["deal_profile"], "assumptions": section}
+
+
+# Assumption keys the backsolve pricing policy always sets (engine/backsolve_policy.DEFAULTS
+# or the caller's explicit policy); exit_cap_rate only when the policy carries it.
+PRICING_POLICY_KEYS = (
+    "sale_cost_percent",
+    "acquisition_fee_pct",
+    "asset_management_fee_pct",
+    "disposition_fee_pct",
+    "annual_partnership_expenses",
+    "partnership_closing_costs",
+    "purchase_closing_cost_pct",
+    "loan_closing_costs",
+)
+# Canonical fields the house box-score rebase rebuilds (an input normalization too).
+_REBASED_FIELDS = {"physical_vacancy": "physical_vacancy_curve", "loss_to_lease": "loss_to_lease"}
+
+
+def _label_pricing_entries(
+    entries: dict[str, dict[str, Any]],
+    *,
+    original: dict[str, Any],
+    case: dict[str, Any],
+    policy: dict[str, Any],
+    values: dict[str, Any],
+    policy_summary: dict[str, Any],
+    findings: list[dict[str, Any]],
+) -> None:
+    """Label every entry whose value backsolve's pricing set (ADR 0003 §5).
+
+    - ``house:backsolve_policy``: fees, closing costs, sale cost and an exit cap
+      the policy carries.
+    - ``house:pricing_normalization``: the house-policy rewrites of analyst
+      inputs (loss to lease re-derived, concessions as one year-1 schedule,
+      collection loss at the worst rate, reserves at the vintage reserve, the
+      house box-score rebase), each also listed in ``policy_overrides``.
+    - ``house:property_tax_module``: the real estate tax line reassessed at the
+      priced price; an opex line a floor raised takes that floor's source.
+    - ``analyst``: insurance set by the policy's ``insurance_per_unit_override``.
+
+    Entries the pricing guardrail enforced keep their guardrail label.
+    """
+    from engine.assumptions.resolver import _NOTE_EDITED, _NOTE_PRESENT
+
+    prior = ((original.get("assumptions") or {}).get("entries") or {}) if isinstance(original, dict) else {}
+
+    def changed(key: str) -> bool:
+        note = ((entries.get(key) or {}).get("override") or {}).get("note")
+        return note in (_NOTE_EDITED, _NOTE_PRESENT)
+
+    def label(key: str, source: str, note: str, basis: str) -> None:
+        if key in entries:
+            guardrails.label_pricing_entry(entries[key], source=source, note=note, basis=basis)
+
+    # 1. Pricing policy values.
+    policy_keys = PRICING_POLICY_KEYS + (("exit_cap_rate",) if "exit_cap_rate" in policy else ())
+    for key in policy_keys:
+        entry = entries.get(key)
+        if entry is None:
+            continue
+        origin = "an explicit policy value" if key in policy else f"engine/backsolve_policy.DEFAULTS[{key!r}]"
+        unit = entry.get("unit")
+        basis = (
+            f"Set by the backsolve pricing policy {POLICY_VERSION} ({origin}): "
+            f"{guardrails.fmt_unit_value(entry.get('value'), unit)}."
+        )
+        before = prior.get(key) if isinstance(prior.get(key), dict) else None
+        if before is not None and before.get("value") is not None:
+            verb = "matches" if guardrails._same(before.get("value"), entry.get("value")) else "replaces"
+            basis += (
+                f" It {verb} the canonical's {guardrails.fmt_unit_value(before.get('value'), unit)} "
+                f"({before.get('source')})."
+            )
+        label(key, guardrails.SOURCE_HOUSE_BACKSOLVE_POLICY, guardrails.PRICING_POLICY_NOTE, basis)
+
+    # 2. Pricing normalizations (each one is in policy_overrides).
+    for override in policy_summary.get("policy_overrides") or []:
+        if override.get("normalization"):
+            _name, key, basis = PRICING_NORMALIZATIONS[override["input"]]
+            label(key, guardrails.SOURCE_HOUSE_PRICING_NORMALIZATION, guardrails.PRICING_NORMALIZATION_NOTE, basis)
+    rebase = policy_summary.get("house_box_score_rebase") or {}
+    for key, field in _REBASED_FIELDS.items():
+        if rebase.get("applied") and changed(key) and original.get(field) != case.get(field):
+            label(key, guardrails.SOURCE_HOUSE_PRICING_NORMALIZATION, guardrails.PRICING_NORMALIZATION_NOTE,
+                  f"Backsolve pricing normalization: the house box-score rebase rebuilt {field} on the "
+                  "rent-roll floorplans.")
+
+    # 3. Insurance and opex lines.
+    insurance_override = values.get("insurance_per_unit_override")
+    if insurance_override is not None:
+        label("insurance_per_unit", SOURCE_ANALYST_OVERRIDE, guardrails.PRICING_INSURANCE_OVERRIDE_NOTE,
+              f"Analyst insurance_per_unit_override in the backsolve policy: "
+              f"${float(insurance_override):,.2f} per unit.")
+    enforced = {f["key"]: f for f in findings if f.get("action") == guardrails.ACTION_ENFORCED}
+    original_rows = {
+        str(row.get("category_name")): row for row in original.get("opex_table") or [] if isinstance(row, dict)
+    }
+    base_keys = {
+        str((entry.get("detail") or {}).get("category_name")): key
+        for key, entry in entries.items()
+        if key.startswith("opex.") and key.endswith(".base")
+    }
+    insurance_rows = _matching_opex_rows(case, "insurance")
+    insurance_name = str(insurance_rows[0].get("category_name")) if insurance_rows else None
+    price = (case.get("purchase_assumptions") or {}).get("purchase_price")
+    for row in case.get("opex_table") or []:
+        name = str(row.get("category_name"))
+        key = base_keys.get(name)
+        if key is None or not changed(key) or original_rows.get(name) == row:
+            continue
+        if is_property_tax_label(name):
+            label(key, SOURCE_HOUSE_PROPERTY_TAX, guardrails.PRICING_PROPERTY_TAX_NOTE,
+                  f"{name} reassessed by engine/property_tax.py at the priced purchase price "
+                  f"${float(price or 0):,.2f} (see summary.property_tax_calculation).")
+        elif name == insurance_name and insurance_override is not None:
+            label(key, SOURCE_ANALYST_OVERRIDE, guardrails.PRICING_INSURANCE_OVERRIDE_NOTE,
+                  f"{name} set from the analyst insurance_per_unit_override in the backsolve policy: "
+                  f"${float(insurance_override):,.2f} per unit.")
+        elif name == insurance_name and "insurance_per_unit" in enforced:
+            floor = enforced["insurance_per_unit"]
+            label(key, floor["floor_source"], guardrails.PRICING_FLOOR_LINE_NOTE,
+                  f"{name} raised to the house insurance floor ${floor['floor']:,.2f} per unit by the "
+                  "pricing guardrail.")
+        elif name == guardrails.R_AND_M_TOP_UP_CATEGORY and "r_and_m_per_unit" in enforced:
+            floor = enforced["r_and_m_per_unit"]
+            label(key, floor["floor_source"], guardrails.PRICING_FLOOR_LINE_NOTE,
+                  f"{name}: the pricing guardrail tops the R&M bucket up to the house floor "
+                  f"${floor['floor']:,.2f} per unit.")
+        else:
+            label(key, guardrails.SOURCE_HOUSE_PRICING_NORMALIZATION, guardrails.PRICING_NORMALIZATION_NOTE,
+                  f"{name} set by backsolve's pricing preparation (for example a revenue-quality "
+                  "bridge paired expense).")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1463,6 +1687,10 @@ def backsolve_price(
         strategy=values["strategy"],
         year_built=values["year_built"],
         findings=(policy_summary.get("guardrails") or {}).get("findings") or [],
+        original=canonical,
+        policy=policy,
+        values=values,
+        policy_summary=policy_summary,
     )
     solved_by_year = solved_results["cashflow"]["by_year"]
     solved_projected_noi = dec(solved_by_year[1 if len(solved_by_year) >= 2 else 0]["net_operating_income"])
