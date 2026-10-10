@@ -19,8 +19,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Default path to market-study-agent repo (sibling project)
-MARKET_AGENT_ROOT = Path(__file__).resolve().parents[1].parent / "market-study-agent"
+from engine.market_data.paths import market_study_root
+
+# Default path to the plat-market-study-agent repo: PLAT_MARKET_STUDY_ROOT, else
+# the sibling plat-market-study-agent (legacy sibling name market-study-agent
+# is used only when it exists and the new name does not).
+MARKET_AGENT_ROOT = market_study_root()
 
 
 @dataclass
