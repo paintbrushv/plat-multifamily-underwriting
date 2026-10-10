@@ -324,6 +324,10 @@ def build_deal_from_documents(
             When omitted but ``exit_month`` or ``sale_cost_pct`` is given, the
             exit is still modeled and the resolver fills the cap rate (the
             market exit-year cap rate, else the disclosed engine default).
+            When a purchase price is known (argument or OM) and no exit input
+            is given, the exit is modeled at ``analysis_end`` with an
+            ``exit_cap_rate`` placeholder (null) the resolver's fallback chain
+            fills; ingest never invents a cap rate.
         exit_month: Exit month "YYYY-MM" (default: analysis end)
         sale_cost_pct: Sale cost percent. When omitted, the house default
             (``backsolve_policy.DEFAULTS``, 2%) is used and flagged for review.
@@ -628,14 +632,18 @@ def build_deal_from_documents(
     # Build exit_assumptions from CLI flags (or OM). An exit month or sale cost
     # without an exit cap rate still models the exit: the resolver fills the
     # cap rate (market exit-year cap rate, else the disclosed engine default).
+    # A priced deal with no exit input is modeled as a sale at the analysis
+    # end, with an exit_cap_rate placeholder (null) left for the resolver's
+    # fallback chain; ingest never invents a cap rate.
     exit_given = any(value is not None for value in (exit_cap_rate, exit_month, sale_cost_pct))
-    if exit_given and "exit_assumptions" not in deal:
+    if (exit_given or purchase_price is not None) and "exit_assumptions" not in deal:
         deal["exit_assumptions"] = {
             "exit_month": exit_month or end,
             "sale_cost_percent": None,
         }
-        if exit_cap_rate is not None:
+        if exit_cap_rate is not None or not exit_given:
             deal["exit_assumptions"]["exit_cap_rate"] = None
+        if exit_cap_rate is not None:
             overrides["exit_cap_rate"] = {"value": exit_cap_rate, "note": "ingest input exit_cap_rate"}
         if sale_cost_pct is not None:
             overrides["sale_cost_percent"] = {"value": sale_cost_pct, "note": "ingest input sale_cost_pct"}

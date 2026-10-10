@@ -587,8 +587,12 @@ def main() -> int:
         r = result["debt_terms"]["rate"]
         sections.append(f"debt ${c:,.0f} @ {r:.1%}")
     if "exit_assumptions" in result:
-        ec = result["exit_assumptions"]["exit_cap_rate"]
-        sections.append(f"exit cap {ec:.2%}")
+        exit_assumptions = result["exit_assumptions"]
+        ec = exit_assumptions.get("exit_cap_rate")
+        if isinstance(ec, (int, float)) and not isinstance(ec, bool):
+            sections.append(f"exit {exit_assumptions.get('exit_month')} at {ec:.2%} cap")
+        else:
+            sections.append(f"exit {exit_assumptions.get('exit_month')} (cap rate unresolved)")
     if "fund_assumptions" in result:
         sp = result["fund_assumptions"]["sponsor_equity_pct"]
         sections.append(f"fund {sp:.0%} GP")

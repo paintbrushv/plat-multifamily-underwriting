@@ -173,6 +173,46 @@ def property_tax_preflight_issues(inputs: Mapping[str, Any]) -> List[ValidationI
     return []
 
 
+# A null exit_cap_rate is the placeholder ingest writes for the resolver to
+# fill (ADR 0003 §3 fallback chain). Validation accepts it with a WARNING;
+# the engine entry (validate_or_raise) refuses to run on it.
+EXIT_CAP_RATE_PLACEHOLDER = "EXIT_CAP_RATE_PLACEHOLDER"
+EXIT_CAP_RATE_UNRESOLVED = "EXIT_CAP_RATE_UNRESOLVED"
+_EXIT_CAP_PATH = "/exit_assumptions/exit_cap_rate"
+
+
+def has_exit_cap_placeholder(inputs: Mapping[str, Any]) -> bool:
+    """True when ``exit_assumptions.exit_cap_rate`` is present and null."""
+    exit_assumptions = inputs.get("exit_assumptions")
+    return (
+        isinstance(exit_assumptions, Mapping)
+        and "exit_cap_rate" in exit_assumptions
+        and exit_assumptions["exit_cap_rate"] is None
+    )
+
+
+def _accept_exit_cap_placeholder(
+    inputs: Mapping[str, Any], issues: List[ValidationIssue]
+) -> List[ValidationIssue]:
+    if not has_exit_cap_placeholder(inputs):
+        return issues
+    kept = [i for i in issues if not (i.code == "SCHEMA" and i.path == _EXIT_CAP_PATH)]
+    kept.append(
+        ValidationIssue(
+            severity="WARNING",
+            code=EXIT_CAP_RATE_PLACEHOLDER,
+            message=(
+                "exit_cap_rate is a placeholder the assumption resolver fills "
+                "(analyst > market exit-year cap rate > house fallback). Re-resolve "
+                "(runs/assumptions_sheet.py apply) or set an exit_cap_rate override "
+                "before running the engine."
+            ),
+            path=_EXIT_CAP_PATH,
+        )
+    )
+    return kept
+
+
 def _check_non_overlapping_segments(
     rows: List[Dict[str, Any]],
     key_fields: List[str],
@@ -1518,7 +1558,7 @@ def validate_deal(
             for section in _optional_sections
         )
 
-    issues = validate_schema(inputs)
+    issues = _accept_exit_cap_placeholder(inputs, validate_schema(inputs))
     issues.extend(_check_property_tax_policy(inputs, required=property_tax_required(inputs)))
 
     if not strict:
@@ -1710,6 +1750,18 @@ def validate_or_raise(inputs: Dict[str, Any]) -> ValidationReport:
         for issue in _check_property_tax_policy(inputs, required=True)
         if (issue.code, issue.path) not in existing
     )
+    if has_exit_cap_placeholder(inputs):
+        issues.append(
+            ValidationIssue(
+                severity="ERROR",
+                code=EXIT_CAP_RATE_UNRESOLVED,
+                message=(
+                    "exit_cap_rate is still the unresolved placeholder; the engine needs a cap "
+                    "rate to value the exit. Re-resolve the assumptions or override exit_cap_rate."
+                ),
+                path=_EXIT_CAP_PATH,
+            )
+        )
     report = ValidationReport(
         status=(
             "FAIL"
