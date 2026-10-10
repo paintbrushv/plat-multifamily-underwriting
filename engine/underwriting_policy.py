@@ -410,6 +410,59 @@ def default_year1_concessions_rate(
     return value
 
 
+# ── ADR 0003 slice 4: house curve policy ─────────────────────────────────
+# House policy used by the assumption resolver (engine/assumptions/curves.py)
+# when the deal and the market data do not supply a value.
+
+# Long-run annual market rent growth. Rent growth glides to this rate after
+# the market forecast horizon, unless a provider supplies an MSA long-run rate.
+HOUSE_LONG_RUN_RENT_GROWTH = Decimal("0.025")
+# Years over which rent growth glides linearly from the last forecast year to
+# the long-run rate.
+HOUSE_RENT_GROWTH_GLIDE_YEARS = 2
+
+# Default collection loss (bad debt) when the T12 shows none: the vintage
+# ``bad_debt_typical_low``. When the year built is unknown the house uses 2.0%,
+# the most conservative vintage typical-low (1960s). The vintage
+# ``collection_loss_floor`` stays a guardrail floor, not the default.
+HOUSE_DEFAULT_COLLECTION_LOSS = Decimal("0.020")
+
+# Months over which physical vacancy moves linearly from the rent-roll level
+# to stabilized vacancy, by deal type (ADR 0003 §1 deal_type).
+HOUSE_STABILIZATION_WINDOW_MONTHS = {"stabilized": 12, "value_add": 24}
+# Months over which the rent-roll loss to lease burns off to the vintage
+# floor (one lease term).
+HOUSE_LTL_BURN_OFF_MONTHS = 12
+# Months the year-1 concession rate applies before concessions step to the
+# stabilized level.
+HOUSE_YEAR1_CONCESSION_MONTHS = 12
+
+
+def default_bad_debt_rate(year_built: Optional[int]) -> Decimal:
+    """House default collection loss: vintage ``bad_debt_typical_low``, else 2.0%."""
+    bucket = vintage_bucket(year_built)
+    if bucket is None:
+        return HOUSE_DEFAULT_COLLECTION_LOSS
+    return VINTAGE_FRAMEWORK_2026[bucket]["bad_debt_typical_low"]
+
+
+def typical_physical_vacancy_rate(year_built: Optional[int]) -> Optional[Decimal]:
+    """House stabilized vacancy: midpoint of the vintage typical physical-vacancy band."""
+    bucket = vintage_bucket(year_built)
+    if bucket is None:
+        return None
+    row = VINTAGE_FRAMEWORK_2026[bucket]
+    return (row["physical_vacancy_typical_low"] + row["physical_vacancy_typical_high"]) / Decimal("2")
+
+
+def stabilized_concessions_rate(year_built: Optional[int]) -> Optional[Decimal]:
+    """House stabilized concessions: the vintage ``concessions_typical_low``."""
+    bucket = vintage_bucket(year_built)
+    if bucket is None:
+        return None
+    return VINTAGE_FRAMEWORK_2026[bucket]["concessions_typical_low"]
+
+
 def revenue_guardrails(
     year_built: Optional[int],
     *,

@@ -641,18 +641,24 @@ def _check_growth_bounds(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     issues: List[ValidationIssue] = []
     g = inputs.get("growth_assumptions")
     if g is not None:
-        rate = g.get("annual_growth_rate")
-        if rate is not None:
+        rates = [("annual_growth_rate", g.get("annual_growth_rate"))]
+        vector = g.get("annual_growth_rates")
+        if isinstance(vector, list):
+            rates.extend((f"annual_growth_rates/{i}", r) for i, r in enumerate(vector))
+        for field, rate in rates:
+            if rate is None or isinstance(rate, bool) or not isinstance(rate, (int, float)):
+                continue
+            label = "growth_assumptions." + field.replace("/", "[", 1) + ("]" if "/" in field else "")
             if rate < -1.0 or rate > 1.0:
                 issues.append(
                     ValidationIssue(
                         severity="ERROR",
                         code="GROWTH_RATE_ABSURD",
                         message=(
-                            f"growth_assumptions.annual_growth_rate is mathematically absurd: "
+                            f"{label} is mathematically absurd: "
                             f"{rate} (must be in (-1.0, 1.0))"
                         ),
-                        path="/growth_assumptions/annual_growth_rate",
+                        path=f"/growth_assumptions/{field}",
                     )
                 )
             elif rate < -0.05 or rate > 0.15:
@@ -661,10 +667,10 @@ def _check_growth_bounds(inputs: Dict[str, Any]) -> List[ValidationIssue]:
                         severity="WARNING",
                         code="GROWTH_RATE_OUT_OF_BAND",
                         message=(
-                            f"growth_assumptions.annual_growth_rate {rate} outside expected "
+                            f"{label} {rate} outside expected "
                             f"band [-0.05, 0.15]"
                         ),
-                        path="/growth_assumptions/annual_growth_rate",
+                        path=f"/growth_assumptions/{field}",
                     )
                 )
 

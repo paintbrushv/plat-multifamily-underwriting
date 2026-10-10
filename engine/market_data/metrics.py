@@ -25,6 +25,10 @@ METRICS: dict[str, MetricSpec] = {
             "Forecast year-over-year effective rent growth, keyed by quarter (e.g. 2026Q3).",
         ),
         MetricSpec(
+            "rent_growth_long_run", "decimal_yoy", "scalar",
+            "Long-run (terminal) annual effective rent growth for the MSA.",
+        ),
+        MetricSpec(
             "vacancy_current", "decimal", "scalar",
             "Latest actual physical vacancy rate.",
         ),

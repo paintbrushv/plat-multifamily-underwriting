@@ -10,6 +10,7 @@ deterministic.
 | metric | unit | value shape | meaning |
 | --- | --- | --- | --- |
 | `rent_growth_forecast` | `decimal_yoy` | series by quarter (`2026Q3`) | forecast year-over-year effective rent growth |
+| `rent_growth_long_run` | `decimal_yoy` | scalar | long-run (terminal) annual effective rent growth for the MSA |
 | `vacancy_current` | `decimal` | scalar | latest actual physical vacancy |
 | `vacancy_stabilized` | `decimal` | scalar | latest actual stabilized vacancy |
 | `concession_rate` | `decimal_of_asking` | scalar | (asking - effective) / asking rent |
@@ -27,7 +28,7 @@ or `low`.
 | --- | --- | --- | --- |
 | `UserFileProvider` | `user_file` | any | an analyst's CSV/JSON (`PLAT_MARKET_DATA_USER_FILE`) |
 | `CoStarProvider`, `YardiMatrixProvider`, `RealPageProvider` | `costar`, `yardi_matrix`, `realpage` | none yet | placeholders; always unavailable |
-| `PlatMarketStudyAgentProvider` | `plat_market_study_agent` | all but `renovation_premium` | `PLAT_MARKET_STUDY_ROOT` output files |
+| `PlatMarketStudyAgentProvider` | `plat_market_study_agent` | all but `renovation_premium` and `rent_growth_long_run` | `PLAT_MARKET_STUDY_ROOT` output files |
 | `PlatSupplyDemandProvider` | `plat_supply_demand` | `rent_growth_forecast` | `PLAT_SUPPLY_DEMAND_ROOT` forecast parquet |
 | `SyntheticProvider` | `synthetic` | any | in-memory (tests) |
 

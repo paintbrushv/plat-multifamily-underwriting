@@ -933,6 +933,12 @@
       "properties": {
         "growth_type": { "type": "string", "enum": ["annual_compound", "monthly_compound", "step_only"] },
         "annual_growth_rate": { "type": "number" },
+        "annual_growth_rates": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "number" },
+          "description": "ADR 0003 §4. Optional per-year market rent growth. Element k is the growth applied at the start of growth year k+2 (the first increase uses element 0); growth years count from growth_start_month, the analysis start by default. Elements past the hold are ignored; when shorter than the hold the last value repeats. When present it wins over annual_growth_rate for flat market_rent_curve cohorts; annual_growth_rate stays as the scalar shorthand (the resolver writes element 0)."
+        },
         "growth_start_month": { "$ref": "#/$defs/month" }
       }
     },

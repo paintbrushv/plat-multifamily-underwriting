@@ -1,9 +1,11 @@
 """ADR 0003 slice 2: deal_profile + assumptions schema and resolver v1.
 
 The resolver records provenance and candidates for every v1 assumption key
-and writes resolved values into the existing canonical fields. Slice 2 changes
-no numbers: ingest and the engine must produce exactly what they produced
-before the assumption layer existed.
+and writes resolved values into the existing canonical fields. Slice 2 changed
+no numbers. Slice 4 (tests/test_assumptions_curves.py) intentionally changes
+the ingest values of rent_growth, collection_loss, physical_vacancy,
+loss_to_lease and concessions; the expectations below that pin those keys
+were updated with it.
 """
 from __future__ import annotations
 
@@ -110,13 +112,20 @@ def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
 @pytest.mark.parametrize(
     "key, source, value, candidate_sources",
     [
-        ("rent_growth", "engine_fallback", 0.03, ["engine_fallback"]),
-        ("collection_loss", "house:vintage_1980s", 0.0075,
-         ["deal:t12", "house:vintage_1980s", "engine_fallback"]),
-        ("physical_vacancy", "deal:rent_roll", 0.2, ["deal:rent_roll", "house:vintage_1980s"]),
-        ("loss_to_lease", "engine_fallback", 0.0,
-         ["deal:rent_roll", "house:vintage_1980s", "engine_fallback"]),
-        ("concessions", "engine_fallback", 0.0, ["deal:t12", "house:vintage_1980s", "engine_fallback"]),
+        # Slice 4: ADR 0003 §3 precedence (house long-run growth, T12 bad debt
+        # and concessions, vacancy and LTL curves to the vintage levels).
+        ("rent_growth", "house:long_run_rent_growth", [0.025, 0.025, 0.025, 0.025],
+         ["house:long_run_rent_growth"]),
+        ("collection_loss", "deal:t12", 0.015,
+         ["deal:t12", "house:vintage_1980s", "house:vintage_1980s"]),
+        ("physical_vacancy", "house:vintage_1980s",
+         {"start": 0.2, "stabilized": 0.0575, "window_months": 12},
+         ["deal:rent_roll", "house:vintage_1980s", "house:vintage_1980s"]),
+        ("loss_to_lease", "house:vintage_1980s",
+         {"start": 0.08737, "floor": 0.01, "burn_off_months": 12,
+          "start_by_cohort": {"1br1ba": 0.117547, "2br1ba": 0.076809, "2br2ba": 0.067308}},
+         ["deal:rent_roll", "house:vintage_1980s"]),
+        ("concessions", "deal:t12", 0.01, ["deal:t12", "house:vintage_1980s", "house:vintage_1980s"]),
         ("insurance_per_unit", "deal:t12", 25_200.0,
          ["deal:t12", "house:year1_insurance_floor", "engine_fallback"]),
         ("r_and_m_per_unit", "deal:t12", 19_500.0, ["deal:t12", "house:vintage_1980s", "engine_fallback"]),
@@ -136,7 +145,10 @@ def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
 def test_provenance_and_candidates_per_key(full_deal, key, source, value, candidate_sources):
     entry = _entries(full_deal)[key]
     assert entry["source"] == source
-    assert entry["value"] == pytest.approx(value)
+    if isinstance(value, dict):
+        assert entry["value"] == value
+    else:
+        assert entry["value"] == pytest.approx(value)
     assert _sources(entry) == candidate_sources
     assert entry["review_required"] is (source.startswith("house:") or source == "engine_fallback")
 
@@ -148,8 +160,8 @@ def test_house_candidates_are_recorded_even_when_deal_evidence_wins(full_deal):
     assert insurance["house:year1_insurance_floor"] == pytest.approx(600.0)
     r_and_m = {c["source"]: c["value"] for c in entries["r_and_m_per_unit"]["candidates"]}
     assert r_and_m["house:vintage_1980s"] == float(house.default_r_and_m_per_unit(1984, strategy="cashflow"))
-    vacancy = {c["source"]: c["value"] for c in entries["physical_vacancy"]["candidates"]}
-    assert vacancy["house:vintage_1980s"] == float(house.default_physical_vacancy_rate(1984, strategy="cashflow"))
+    vacancy = [(c["source"], c["value"]) for c in entries["physical_vacancy"]["candidates"]]
+    assert ("house:vintage_1980s", float(house.default_physical_vacancy_rate(1984, strategy="cashflow"))) in vacancy
 
 
 def test_deal_evidence_candidates_come_from_the_documents(full_deal):
@@ -165,9 +177,6 @@ def test_deal_evidence_candidates_come_from_the_documents(full_deal):
 def test_where_adr_precedence_would_change_a_number_the_basis_says_so(full_deal):
     entries = _entries(full_deal)
     for key in (
-        "collection_loss",
-        "loss_to_lease",
-        "concessions",
         "replacement_reserve_per_unit",
         "annual_partnership_expenses",
         "partnership_closing_costs",
@@ -175,7 +184,9 @@ def test_where_adr_precedence_would_change_a_number_the_basis_says_so(full_deal)
     ):
         assert "ADR 0003 precedence would select" in entries[key]["basis"], key
         assert "today's" in entries[key]["basis"], key
-    for key in ("physical_vacancy", "insurance_per_unit", "r_and_m_per_unit", "rent_growth"):
+    # Slice 4 resolves these keys by the ADR precedence itself.
+    for key in ("physical_vacancy", "insurance_per_unit", "r_and_m_per_unit", "rent_growth",
+                "collection_loss", "loss_to_lease", "concessions"):
         assert "ADR 0003 precedence" not in entries[key]["basis"], key
 
 
@@ -212,8 +223,11 @@ def test_value_add_profile_uses_value_add_house_values_and_adds_turn_cost():
         "year_built": 1984,
     }
     assert set(entries) == STABILIZED_KEYS | {"turn_cost_per_unit"}
-    assert entries["collection_loss"]["value"] == pytest.approx(0.01)
-    assert entries["collection_loss"]["source"] == "house:vintage_1980s"
+    # Slice 4: T12 bad debt wins; value_add stabilizes over 24 months to a higher LTL floor.
+    assert entries["collection_loss"]["value"] == pytest.approx(0.015)
+    assert entries["collection_loss"]["source"] == "deal:t12"
+    assert entries["physical_vacancy"]["value"]["window_months"] == 24
+    assert entries["loss_to_lease"]["value"]["floor"] == pytest.approx(0.0125)
     turn = entries["turn_cost_per_unit"]
     assert turn["source"] == "house:vintage_1980s"
     assert turn["value"] > 0
@@ -274,7 +288,7 @@ def test_override_round_trip_keeps_default_value():
 
     growth = entries["rent_growth"]
     assert growth["value"] == 0.025
-    assert growth["default_value"] == 0.03
+    assert growth["default_value"] == [0.025, 0.025, 0.025, 0.025]
     assert growth["override"] == {"value": 0.025, "note": "analyst override"}
     assert growth["source"] == "analyst"
     assert growth["review_required"] is False
@@ -283,7 +297,7 @@ def test_override_round_trip_keeps_default_value():
 
     vacancy = entries["physical_vacancy"]
     assert vacancy["override"] == {"value": 0.07, "note": "leasing report"}
-    assert vacancy["default_value"] == pytest.approx(0.2)
+    assert vacancy["default_value"] == pytest.approx(0.2)  # no year built: rent-roll level held flat
     assert {row["vacancy_rate"] for row in resolved["physical_vacancy_curve"]} == {0.07}
 
     reserves = entries["replacement_reserve_per_unit"]
@@ -355,8 +369,9 @@ def test_canonical_edit_after_resolution_becomes_an_override():
 
     assert growth["source"] == "analyst"
     assert growth["value"] == 0.02
-    assert growth["default_value"] == 0.03
+    assert growth["default_value"] == [0.025, 0.025, 0.025, 0.025]
     assert growth["override"]["note"] == "changed in the canonical after the last resolution"
+    assert resolved["growth_assumptions"] == {"growth_type": "annual_compound", "annual_growth_rate": 0.02}
 
 
 def test_override_validation():
@@ -429,27 +444,45 @@ def _curve_values(deal, table, key):
     return {row[key] for row in deal[table]}
 
 
+_HOUSE_VECTOR = {"growth_type": "annual_compound", "annual_growth_rate": 0.025,
+                 "annual_growth_rates": [0.025, 0.025, 0.025, 0.025]}
+_LTL_STARTS = {0.117547, 0.076809, 0.067308}
+
+
+# Slice 4 intentionally changed rent growth (house long-run vector instead of the
+# 3% engine fallback), collection loss (T12 bad debt 1.5% instead of the vintage
+# floor / 0.5% fallback), vacancy and LTL (curves instead of flat 20% / 0%) and
+# concessions (T12 1% year-1 schedule instead of none). Opex and economics are
+# unchanged.
 @pytest.mark.parametrize(
-    "kwargs, growth, loss, vacancy",
+    "kwargs, growth, loss, vacancy, ltl, concessions",
     [
-        ({}, 0.03, 0.005, 0.2),
-        ({"year_built": 1984}, 0.03, 0.0075, 0.2),
+        ({}, _HOUSE_VECTOR, 0.015, {0.2}, _LTL_STARTS, 0.01),
+        ({"year_built": 1984}, _HOUSE_VECTOR, 0.015, None, None, 0.01),
         ({"rent_growth_rate": 0.025, "collection_loss_rate": 0.02, "vacancy_rate_override": 0.07},
-         0.025, 0.02, 0.07),
+         {"growth_type": "annual_compound", "annual_growth_rate": 0.025}, 0.02, {0.07}, _LTL_STARTS, 0.01),
     ],
 )
-def test_ingest_numbers_are_unchanged(kwargs, growth, loss, vacancy):
+def test_ingest_numbers(kwargs, growth, loss, vacancy, ltl, concessions):
     deal = _ingest(**kwargs)
 
-    assert deal["growth_assumptions"] == {"growth_type": "annual_compound", "annual_growth_rate": growth}
+    assert deal["growth_assumptions"] == growth
     assert deal["collection_loss_curve"] == [
         {"applies_to": "ALL", "start_period": "2026-08", "end_period": "2031-07", "loss_rate": loss}
     ]
-    assert _curve_values(deal, "physical_vacancy_curve", "vacancy_rate") == {vacancy}
-    assert _curve_values(deal, "loss_to_lease", "ltl_percent") == {0.0}
+    if vacancy is None:  # year built known: ramp from 20% to the 1980s typical 5.75%
+        assert deal["physical_vacancy_curve"][0]["vacancy_rate"] == 0.2
+        assert deal["physical_vacancy_curve"][-1]["vacancy_rate"] == 0.0575
+    else:
+        assert _curve_values(deal, "physical_vacancy_curve", "vacancy_rate") == vacancy
+    if ltl is None:  # burns off to the 1980s LTL floor
+        assert deal["loss_to_lease"][-1]["ltl_percent"] == 0.01
+    else:  # no year built: each cohort's rent-roll LTL held flat
+        assert _curve_values(deal, "loss_to_lease", "ltl_percent") == ltl
+    assert [row["amount"] for row in deal["concession_schedule"]] == [concessions]
     assert [(row["category_name"], row["base_value"]) for row in deal["opex_table"]] == _EXPECTED_OPEX
     assert {row["calculation_type"] for row in deal["opex_table"]} == {"fixed_annual"}
-    for absent in ("concession_schedule", "replacement_reserves", "exit_assumptions",
+    for absent in ("replacement_reserves", "exit_assumptions",
                    "fund_assumptions", "purchase_assumptions", "debt_terms"):
         assert absent not in deal, absent
 
@@ -487,7 +520,8 @@ def test_assumption_overrides_kwarg_wins_over_explicit_inputs():
 
     assert deal["growth_assumptions"]["annual_growth_rate"] == 0.04
     assert growth["override"] == {"value": 0.04, "note": "IC"}
-    assert deal["metadata"]["ingest_gate"]["assumed_defaults"][0]["field"] == "collection_loss_curve.loss_rate"
+    # Slice 4: collection loss now comes from T12 bad debt, so nothing is assumed.
+    assert deal["metadata"]["ingest_gate"]["assumed_defaults"] == []
 
 
 # ── validator gates ──────────────────────────────────────────────────────
@@ -503,7 +537,8 @@ def test_validator_warns_once_per_review_required_entry():
     assert {w.path for w in warnings} == {f"/assumptions/entries/{key}" for key in flagged}
     assert len(warnings) == len(flagged)
     assert {w.severity for w in warnings} == {"WARNING"}
-    assert "rent_growth" in flagged and "physical_vacancy" not in flagged
+    # Slice 4: house-sourced curves are flagged; T12-sourced collection loss is not.
+    assert "rent_growth" in flagged and "physical_vacancy" in flagged and "collection_loss" not in flagged
     assert not [i for i in report.issues if i.severity == "ERROR"]
 
 
@@ -513,45 +548,42 @@ def test_overridden_entries_do_not_warn():
     paths = {i.path for i in validate_deal(resolved).issues if i.code == "ASSUMPTION_REVIEW_REQUIRED"}
 
     assert "/assumptions/entries/rent_growth" not in paths
-    assert "/assumptions/entries/collection_loss" in paths
+    assert "/assumptions/entries/physical_vacancy" in paths
 
 
-# ── market candidates are recorded, never applied ────────────────────────
+# ── market data is read through a registry with a Geo (slice 4) ─────────
 
 
-class _SyntheticMarket:
+class _RecordingMarket:
+    """A registry stand-in that records calls and has no data."""
+
     def __init__(self):
         self.calls = []
 
     def resolve(self, metric, geo, as_of=None):
         self.calls.append((metric, geo, as_of))
-        if metric == "rent_growth_forecast":
-            observation = {"provider": "synthetic", "value": 0.021, "unit": "decimal_yoy",
-                           "as_of": "2026-09-30", "confidence": "medium"}
-            return observation, [observation, {"provider": "synthetic-msa", "value": 0.024}]
         return None, []
 
 
-def test_market_results_are_recorded_as_candidates_without_changing_values():
+def test_market_is_queried_with_a_geo_and_missing_data_falls_through():
+    from engine.market_data import Geo
+
     deal = _ingest(metro_slug="synthetic_metro")
-    market = _SyntheticMarket()
+    market = _RecordingMarket()
     resolved = resolve_assumptions(deal, market=market)
 
-    assert [call[0] for call in market.calls] == [
-        "rent_growth_forecast", "vacancy_current", "vacancy_stabilized", "concession_rate", "market_cap_rate",
-    ]
-    assert all(call[1] == {"msa": {"metro_slug": "synthetic_metro"}} and call[2] is None for call in market.calls)
-    growth = _entries(resolved)["rent_growth"]
-    assert growth["value"] == 0.03
-    assert resolved["growth_assumptions"]["annual_growth_rate"] == 0.03
-    market_candidates = [c for c in growth["candidates"] if c["source"].startswith("market:")]
-    assert [(c["source"], c["value"]) for c in market_candidates] == [
-        ("market:synthetic", 0.021), ("market:synthetic-msa", 0.024),
-    ]
-    assert market_candidates[0]["as_of"] == "2026-09-30"
-    assert "ADR 0003 precedence would select market:synthetic" in growth["basis"]
-    stripped = {k: v for k, v in resolved.items() if k != "assumptions"}
-    assert stripped == {k: v for k, v in deal.items() if k != "assumptions"}
+    assert {call[0] for call in market.calls} == {
+        "rent_growth_forecast", "rent_growth_long_run", "vacancy_current", "vacancy_stabilized",
+        "concession_rate", "market_cap_rate",
+    }
+    assert all(call[1] == Geo(metro_slug="synthetic_metro") and call[2] is None for call in market.calls)
+    without = resolve_assumptions(deal)
+    strip = lambda d: {k: v for k, v in d.items() if k != "assumptions"}  # noqa: E731
+    assert strip(without) == strip(resolved)
+    assert {k: e["value"] for k, e in _entries(without).items()} == {
+        k: e["value"] for k, e in _entries(resolved).items()
+    }
+    assert _entries(resolved)["rent_growth"]["source"] == "house:long_run_rent_growth"
 
 
 # ── --partial-json staleness fix ─────────────────────────────────────────
@@ -567,14 +599,16 @@ def test_partial_json_reresolves_and_records_analyst_overrides():
     merged = apply_partial_and_reresolve(base, {"growth_assumptions": {"annual_growth_rate": 0.025}})
     gate = merged["metadata"]["ingest_gate"]
 
-    assert [e["field"] for e in gate["assumed_defaults"]] == ["collection_loss_curve.loss_rate"]
+    # Slice 4: collection loss comes from T12 bad debt, so it is not an assumed default.
+    assert gate["assumed_defaults"] == []
     growth = _entries(merged)["rent_growth"]
     assert growth["source"] == "analyst"
     assert growth["override"] == {"value": 0.025, "note": "supplied by --partial-json"}
-    assert growth["default_value"] == 0.03
-    flags = merged["metadata"]["intake_sanity_flags"]
+    assert growth["default_value"] == [0.025, 0.025, 0.025, 0.025]
+    assert "annual_growth_rates" not in merged["growth_assumptions"]
+    flags = merged["metadata"].get("intake_sanity_flags") or []
     assert "assumed_default_annual_growth_rate" not in flags
-    assert "assumed_default_loss_rate" in flags
+    assert "assumed_default_loss_rate" not in flags
     assert not [
         i for i in validate_deal(merged).issues
         if i.code == "ASSUMED_DEFAULT" and "annual_growth_rate" in i.message

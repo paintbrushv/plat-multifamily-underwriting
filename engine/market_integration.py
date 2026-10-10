@@ -459,6 +459,9 @@ class MarketContext:
 
         ga = modified.setdefault("growth_assumptions", {})
         ga["annual_growth_rate"] = adjusted_rg
+        # Shift a per-year vector (ADR 0003 §4) by the same comp adjustment.
+        if ga.get("annual_growth_rates"):
+            ga["annual_growth_rates"] = [r + (adjusted_rg - base_rg) for r in ga["annual_growth_rates"]]
         ga["comp_adjusted"] = True
         ga["original_growth_rate"] = base_rg
 
