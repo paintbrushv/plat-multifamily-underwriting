@@ -1151,11 +1151,15 @@ def _is_section_subtotal_row(
     normalized = _normalize_statement_label(label)
     if detail_seen_in_section and current_detail_section:
         current_normalized = _normalize_statement_label(current_detail_section)
+        label_is_account_detail = bool(re.match(r"^\s*\d+(?:\.\d+)?\s*[: -]", label))
         if current_normalized == normalized:
+            # An account-coded GL line named like its section ("6120 - Repairs
+            # & Maintenance") is a rollup only when it ties to the detail above.
+            if label_is_account_detail:
+                return amount is None or _ties_to_section(amount, section_amounts or [])
             return True
         current_canonical = _matches_category_map(current_detail_section)
         label_canonical = _matches_category_map(label)
-        label_is_account_detail = bool(re.match(r"^\s*\d+(?:\.\d+)?\s*[: -]", label))
         if (
             not label_is_account_detail
             and current_canonical
