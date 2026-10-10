@@ -74,6 +74,9 @@ ALLOWED_METADATA_KEYS = {
     "intake_sanity_flags",
     "purchase_assumptions_source",
     "analyst_review_required",
+    # The ingest gate carries the deal evidence the assumption resolver reads
+    # (and its blockers): the solved case is re-resolved from it.
+    "ingest_gate",
 }
 _PRICE_CENT = Decimal("0.01")
 

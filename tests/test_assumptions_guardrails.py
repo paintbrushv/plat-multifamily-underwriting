@@ -365,6 +365,37 @@ def test_backsolve_reads_the_vintage_from_the_deal_profile(pricing_deal):
     assert result["case"] == _solve(pricing_deal)["case"]
 
 
+def test_backsolve_keeps_the_ingest_evidence_its_case_is_resolved_from():
+    """The solved case keeps metadata.ingest_gate, so its pricing re-resolution reads
+    the same T12 / rent-roll evidence as ingest: every entry matches the priced
+    canonical and re-resolving the case changes nothing. A blocked gate still blocks."""
+    from tests import deal_library
+
+    deal = deal_library.ingest(deal_library.load_deal("a_stabilized_1990s"))
+    policy = {"version": "plat.backsolve-policy/1", "strategy": "cashflow"}
+    result = backsolve.backsolve_price(
+        copy.deepcopy(deal), target_coc="0.06", policy=policy, benchmark=BENCHMARK,
+        min_price="1000000.00", max_price="60000000.00",
+    )
+    assert result["status"] == "converged"
+    case = result["case"]
+    entries = case["assumptions"]["entries"]
+    assert case["metadata"]["ingest_gate"] == deal["metadata"]["ingest_gate"]
+    assert entries["collection_loss"]["source"] == "deal:t12"
+    assert entries["collection_loss"]["value"] == case["collection_loss_curve"][0]["loss_rate"] == 0.008
+    assert entries["insurance_per_unit"]["source"] == "deal:t12"
+    assert entries["insurance_per_unit"]["value"] == 650.0
+    assert entries["opex.payroll.base"]["source"] == "deal:t12"
+    _assert_no_silent_override(case)
+    assert resolve_assumptions(case, mode="pricing") == case
+
+    blocked = copy.deepcopy(deal)
+    blocked["metadata"]["ingest_gate"]["status"] = "BLOCKED"
+    with pytest.raises(ValueError, match="INGEST_BLOCKED"):
+        backsolve.backsolve_price(blocked, target_coc="0.06", policy=policy, benchmark=BENCHMARK,
+                                  min_price="1000000.00", max_price="60000000.00")
+
+
 def test_backsolve_assumptions_refresh_changes_no_priced_number(pricing_deal):
     result = _solve(pricing_deal)
     case = result["case"]
