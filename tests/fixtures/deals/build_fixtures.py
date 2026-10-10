@@ -226,7 +226,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "exit_cap_rate": "market:synthetic",
                 "insurance_per_unit": "deal:t12",
                 "r_and_m_per_unit": "deal:t12",
-                "replacement_reserve_per_unit": "engine_fallback",
+                "replacement_reserve_per_unit": "house:vintage_1990s",
+                "purchase_closing_cost_pct": "house:backsolve_policy",
                 "sale_cost_percent": "analyst",
             },
             "bands": {
@@ -241,6 +242,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "exit_cap_rate": [0.0570, 0.0580],
                 "insurance_per_unit": [600, 700],
                 "r_and_m_per_unit": [700, 760],
+                "replacement_reserve_per_unit": [750, 750],
             },
             "opex_growth": {
                 "Payroll": [0.035, 0.035],
@@ -253,8 +255,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "Telephone": [0.025, 0.03],
                 "Marketing / Advertising": [0.025, 0.025],
                 "Insurance": [0.05, 0.05],
-                "Real Estate Taxes": [0.0, 0.0],
-                "Property Management Fee": [0.03, 0.03],
+                "Real Estate Taxes": [0.03, 0.03],
+                "Property Management Fee": [0.0, 0.0],
             },
             "results": {
                 "unlevered_irr": [0.05, 0.10],
@@ -262,7 +264,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "minimum_dscr": [1.15, 2.0],
                 "going_in_cap_rate": [0.048, 0.060],
             },
-            "guardrail_warnings": ["replacement_reserve_per_unit"],
+            "guardrail_warnings": [],
         },
     ),
     DealSpec(
@@ -344,7 +346,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "exit_cap_rate": "analyst",
                 "insurance_per_unit": "deal:t12",
                 "r_and_m_per_unit": "deal:t12",
-                "replacement_reserve_per_unit": "engine_fallback",
+                "replacement_reserve_per_unit": "house:vintage_2010s",
+                "purchase_closing_cost_pct": "house:backsolve_policy",
                 "sale_cost_percent": "analyst",
             },
             "bands": {
@@ -359,6 +362,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "exit_cap_rate": [0.0575, 0.0575],
                 "insurance_per_unit": [540, 580],
                 "r_and_m_per_unit": [500, 600],
+                "replacement_reserve_per_unit": [300, 300],
             },
             "opex_growth": {
                 "Payroll": [0.035, 0.035],
@@ -371,8 +375,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "Telephone": [0.025, 0.03],
                 "Marketing / Advertising": [0.025, 0.025],
                 "Insurance": [0.05, 0.05],
-                "Real Estate Taxes": [0.0, 0.0],
-                "Property Management Fee": [0.03, 0.03],
+                "Real Estate Taxes": [0.03, 0.03],
+                "Property Management Fee": [0.0, 0.0],
             },
             "results": {
                 "unlevered_irr": [0.04, 0.09],
@@ -380,7 +384,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "minimum_dscr": [1.10, 2.0],
                 "going_in_cap_rate": [0.045, 0.058],
             },
-            "guardrail_warnings": ["insurance_per_unit", "replacement_reserve_per_unit"],
+            "guardrail_warnings": ["insurance_per_unit"],
         },
     ),
     DealSpec(
@@ -501,7 +505,9 @@ DEALS: tuple[DealSpec, ...] = (
                 "exit_cap_rate": "market:synthetic",
                 "insurance_per_unit": "deal:t12",
                 "r_and_m_per_unit": "deal:t12",
-                "replacement_reserve_per_unit": "engine_fallback",
+                "replacement_reserve_per_unit": "house:vintage_1970s",
+                "purchase_closing_cost_pct": "house:backsolve_policy",
+                "renovation_premium": "analyst",
                 "turn_cost_per_unit": "house:vintage_1970s",
                 "sale_cost_percent": "analyst",
             },
@@ -517,6 +523,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "exit_cap_rate": [0.0595, 0.0605],
                 "insurance_per_unit": [680, 760],
                 "r_and_m_per_unit": [1300, 1400],
+                "replacement_reserve_per_unit": [2125, 2125],
             },
             "opex_growth": {
                 "Payroll": [0.035, 0.035],
@@ -529,8 +536,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "Telephone": [0.025, 0.03],
                 "Marketing / Advertising": [0.025, 0.025],
                 "Insurance": [0.05, 0.05],
-                "Real Estate Taxes": [0.0, 0.0],
-                "Property Management Fee": [0.03, 0.03],
+                "Real Estate Taxes": [0.03, 0.03],
+                "Property Management Fee": [0.0, 0.0],
             },
             "results": {
                 "unlevered_irr": [0.05, 0.12],
@@ -538,9 +545,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "minimum_dscr": [1.0, 2.0],
                 "going_in_cap_rate": [0.050, 0.066],
             },
-            "guardrail_warnings": [
-                "physical_vacancy", "concessions", "r_and_m_per_unit", "replacement_reserve_per_unit",
-            ],
+            "guardrail_warnings": ["physical_vacancy", "concessions", "r_and_m_per_unit"],
         },
     ),
     DealSpec(
@@ -650,7 +655,9 @@ DEALS: tuple[DealSpec, ...] = (
                 "exit_cap_rate": "market:synthetic",
                 "insurance_per_unit": "deal:t12",
                 "r_and_m_per_unit": "deal:t12",
-                "replacement_reserve_per_unit": "engine_fallback",
+                "replacement_reserve_per_unit": "house:vintage_1980s",
+                "purchase_closing_cost_pct": "house:backsolve_policy",
+                "renovation_premium": "engine_fallback",
                 "turn_cost_per_unit": "house:vintage_1980s",
                 "sale_cost_percent": "analyst",
             },
@@ -666,6 +673,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "exit_cap_rate": [0.0610, 0.0620],
                 "insurance_per_unit": [600, 680],
                 "r_and_m_per_unit": [1400, 1500],
+                "replacement_reserve_per_unit": [1750, 1750],
             },
             "opex_growth": {
                 "Payroll": [0.035, 0.035],
@@ -682,8 +690,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "Legal & Professional": [0.025, 0.03],
                 "Marketing / Advertising": [0.025, 0.025],
                 "Insurance": [0.05, 0.05],
-                "Real Estate Taxes": [0.0, 0.0],
-                "Property Management Fee": [0.03, 0.03],
+                "Real Estate Taxes": [0.03, 0.03],
+                "Property Management Fee": [0.0, 0.0],
             },
             "results": {
                 "unlevered_irr": [0.05, 0.12],
@@ -691,7 +699,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "minimum_dscr": [1.05, 2.0],
                 "going_in_cap_rate": [0.052, 0.068],
             },
-            "guardrail_warnings": ["collection_loss", "replacement_reserve_per_unit"],
+            "guardrail_warnings": ["collection_loss"],
         },
     ),
 )

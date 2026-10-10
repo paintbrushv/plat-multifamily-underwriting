@@ -57,7 +57,7 @@
     },
     "unit": "decimal_of_units",
     "source": "house:vintage_2010s",
-    "basis": "Physical vacancy moves linearly from the rent-roll 5.00% to the house 2010s vintage typical vacancy 5.25% (midpoint of 4.00%-6.50%; year built 2014) over the stabilized stabilization window of 12 months, then stays flat (monthly segments per cohort).",
+    "basis": "Physical vacancy moves linearly from the rent-roll 5.00% to the house 2010s vintage stabilized vacancy 5.25% = max(typical-band midpoint 5.25% of 4.00%-6.50%, house vacancy floor 4.50% for the cashflow strategy; year built 2014) over the stabilized stabilization window of 12 months, then stays flat (monthly segments per cohort).",
     "as_of": null,
     "confidence": "medium",
     "review_required": true,
@@ -178,48 +178,32 @@
   },
   {
     "key": "replacement_reserve_per_unit",
-    "value": 0.0,
+    "value": 300.0,
     "unit": "usd_per_unit_year",
-    "source": "engine_fallback",
-    "basis": "No replacement_reserves in the canonical: the engine reserves nothing. ADR 0003 precedence would select house:vintage_2010s ($300.00); today's $0.00 is kept because slice 2 changes no numbers.",
+    "source": "house:vintage_2010s",
+    "basis": "Year built 2014 (analyst input) maps to the 2010s vintage bucket; house economic CapEx reserve per unit $300.00 (VINTAGE_FRAMEWORK_2026, cashflow strategy). Written as replacement_reserves = reserve per unit x units over the analysis window when the canonical carries none.",
     "as_of": null,
-    "confidence": "low",
+    "confidence": "medium",
     "review_required": true,
-    "default_value": 0.0,
+    "default_value": 300.0,
     "delta": 0.0,
     "override_value": null,
     "override_note": null,
     "override_cohorts": null,
-    "guardrail_status": "below_floor",
-    "extra": {
-      "guardrail": {
-        "floor": 300.0,
-        "floor_source": "house:vintage_2010s",
-        "status": "below_floor",
-        "action": "warned",
-        "original": 0.0,
-        "segments": [
-          {
-            "start_period": "2026-11",
-            "end_period": "2031-10",
-            "original": 0.0
-          }
-        ],
-        "basis": "replacement_reserve_per_unit (1 segment) is below the house floor $300.00 (house:vintage_2010s); lowest value before the guardrail $0.00. Underwrite mode keeps the value; pricing mode would enforce the floor."
-      }
-    }
+    "guardrail_status": null,
+    "extra": null
   },
   {
     "key": "exit_cap_rate",
     "value": 0.0575,
     "unit": "decimal",
     "source": "analyst",
-    "basis": "Analyst override (ingest input exit_cap_rate); the resolver default is none from engine_fallback.",
+    "basis": "Analyst override (ingest input exit_cap_rate); the resolver default is 5.82% from house:exit_cap_spread.",
     "as_of": null,
     "confidence": "high",
     "review_required": false,
-    "default_value": null,
-    "delta": null,
+    "default_value": 0.058218,
+    "delta": -0.000718,
     "override_value": 0.0575,
     "override_note": "ingest input exit_cap_rate",
     "override_cohorts": null,
@@ -330,14 +314,14 @@
   },
   {
     "key": "purchase_closing_cost_pct",
-    "value": 0.0,
+    "value": 0.015,
     "unit": "decimal_of_purchase_price",
-    "source": "engine_fallback",
-    "basis": "Ingest writes purchase_assumptions.closing_costs = 0; the engine applies none. ADR 0003 precedence would select house:backsolve_policy (1.50%); today's 0.00% is kept because slice 2 changes no numbers.",
+    "source": "house:backsolve_policy",
+    "basis": "House purchase closing costs 1.50% of the purchase price (DEFAULT_PURCHASE_CLOSING_COST_PCT, engine/backsolve_policy.DEFAULTS['purchase_closing_cost_pct']), written to purchase_assumptions.closing_costs when the canonical carries none.",
     "as_of": null,
-    "confidence": "low",
+    "confidence": "medium",
     "review_required": true,
-    "default_value": 0.0,
+    "default_value": 0.015,
     "delta": 0.0,
     "override_value": null,
     "override_note": null,
@@ -677,41 +661,13 @@
   },
   {
     "key": "opex.property_management_fee.base",
-    "value": 78942.35,
-    "unit": "usd_per_year",
+    "value": 0.03,
+    "unit": "decimal_of_egr",
     "source": "deal:t12",
-    "basis": "T12 line 'Property Management Fee' (fixed_annual): $78,942.35 a year, $657.85 per unit a year; source rows: Management Fee.",
+    "basis": "T12 line 'Property Management Fee': T12 management fee $78,942.35 / T12 EGI (total income) $2,631,411.60 = 3.00% of EGR, entered as percent_egr so the fee moves with modeled revenue. Source rows: Management Fee.",
     "as_of": null,
     "confidence": "high",
     "review_required": false,
-    "default_value": 78942.35,
-    "delta": 0.0,
-    "override_value": null,
-    "override_note": null,
-    "override_cohorts": null,
-    "guardrail_status": null,
-    "extra": {
-      "detail": {
-        "category_name": "Property Management Fee",
-        "calculation_type": "fixed_annual",
-        "base_value": 78942.35,
-        "annual_amount": 78942.35,
-        "per_unit_annual": 657.8529166666667,
-        "source_rows": [
-          "Management Fee"
-        ]
-      }
-    }
-  },
-  {
-    "key": "opex.property_management_fee.growth",
-    "value": 0.03,
-    "unit": "decimal_yoy",
-    "source": "house:opex_growth_table",
-    "basis": "Property Management Fee maps to the house category 'Property Management Fee': OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
-    "as_of": null,
-    "confidence": "medium",
-    "review_required": true,
     "default_value": 0.03,
     "delta": 0.0,
     "override_value": null,
@@ -721,9 +677,40 @@
     "extra": {
       "detail": {
         "category_name": "Property Management Fee",
+        "calculation_type": "percent_egr",
+        "base_value": 0.03,
+        "percent_of_revenue": 0.03,
+        "annual_amount": null,
+        "per_unit_annual": null,
+        "source_rows": [
+          "Management Fee"
+        ],
+        "t12_annual_amount": 78942.35,
+        "t12_egi": 2631411.6
+      }
+    }
+  },
+  {
+    "key": "opex.property_management_fee.growth",
+    "value": 0.0,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Property Management Fee is entered as percent_egr: it already moves with modeled revenue, so the house table applies no growth (OPEX_GROWTH_PERCENT_OF_REVENUE = 0.00%; growth would compound the percentage itself).",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Property Management Fee",
         "growth_category": "Property Management Fee",
-        "house_constant": "OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED",
-        "calculation_type": "fixed_annual"
+        "house_constant": "OPEX_GROWTH_PERCENT_OF_REVENUE",
+        "calculation_type": "percent_egr"
       }
     }
   },
@@ -757,14 +744,14 @@
   },
   {
     "key": "opex.real_estate_taxes.growth",
-    "value": 0.0,
+    "value": 0.03,
     "unit": "decimal_yoy",
-    "source": "house:property_tax_module",
-    "basis": "Real Estate Taxes is owned by engine/property_tax.py: apply_property_tax_policy resets the year-1 tax to purchase price x assessment ratio x millage and keeps the row's own growth_rate. The house table has no rate for it (OPEX_GROWTH_REAL_ESTATE_TAXES) and the resolver writes none, so growth is never stacked on the reassessment; without a growth_rate the engine holds the reassessed tax flat.",
+    "source": "house:opex_growth_table",
+    "basis": "Real Estate Taxes: engine/property_tax.py resets the year-1 tax to purchase price x assessment ratio x millage and keeps this growth_rate, which the engine applies from analysis year 2 on the reassessed amount (HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT = 3.00% a year, engine/underwriting_policy.py). Applied once, never stacked on the reassessment. A house assumption to be reviewed.",
     "as_of": null,
     "confidence": "medium",
     "review_required": true,
-    "default_value": 0.0,
+    "default_value": 0.03,
     "delta": 0.0,
     "override_value": null,
     "override_note": null,
@@ -774,7 +761,7 @@
       "detail": {
         "category_name": "Real Estate Taxes",
         "growth_category": "Real Estate Taxes",
-        "house_constant": "OPEX_GROWTH_REAL_ESTATE_TAXES",
+        "house_constant": "HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT",
         "calculation_type": "fixed_annual"
       }
     }
