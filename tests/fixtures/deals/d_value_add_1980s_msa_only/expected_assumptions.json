@@ -1,0 +1,1231 @@
+[
+  {
+    "key": "rent_growth",
+    "value": [
+      0.024,
+      0.029,
+      0.027,
+      0.025
+    ],
+    "unit": "decimal_yoy_by_analysis_year",
+    "source": "market:synthetic",
+    "basis": "Increases entering analysis years 2-3 from the msa rent_growth_forecast (synthetic, as of 2026-09-30), annualized to analysis years; then a linear glide over 2 years to the house long-run 2.50% (HOUSE_LONG_RUN_RENT_GROWTH). Element k is the increase entering analysis year k+2.",
+    "as_of": "2026-09-30",
+    "confidence": "medium",
+    "review_required": false,
+    "default_value": [
+      0.024,
+      0.029,
+      0.027,
+      0.025
+    ],
+    "delta": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "collection_loss",
+    "value": 0.009,
+    "unit": "decimal_of_rent",
+    "source": "deal:t12",
+    "basis": "T12 bad debt / gross potential rent.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 0.009,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": "below_floor",
+    "extra": {
+      "guardrail": {
+        "floor": 0.01,
+        "floor_source": "house:vintage_1980s",
+        "status": "below_floor",
+        "action": "warned",
+        "original": 0.009,
+        "segments": [
+          {
+            "applies_to": "ALL",
+            "start_period": "2026-11",
+            "end_period": "2031-10",
+            "original": 0.009
+          }
+        ],
+        "basis": "collection_loss (1 segment) is below the house floor 1.00% (house:vintage_1980s); lowest value before the guardrail 0.90%. Underwrite mode keeps the value; pricing mode would enforce the floor."
+      }
+    }
+  },
+  {
+    "key": "physical_vacancy",
+    "value": {
+      "start": 0.0667,
+      "stabilized": 0.06,
+      "window_months": 24
+    },
+    "unit": "decimal_of_units",
+    "source": "market:synthetic",
+    "basis": "Physical vacancy moves linearly from the rent-roll 6.67% to the msa stabilized vacancy 6.00% from synthetic over the value_add stabilization window of 24 months, then stays flat (monthly segments per cohort).",
+    "as_of": "2026-09-30",
+    "confidence": "medium",
+    "review_required": false,
+    "default_value": {
+      "start": 0.0667,
+      "stabilized": 0.06,
+      "window_months": 24
+    },
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "loss_to_lease",
+    "value": {
+      "start": 0.043359,
+      "floor": 0.0125,
+      "burn_off_months": 12,
+      "start_by_cohort": {
+        "1br1ba": 0.043155,
+        "2br2ba": 0.04381,
+        "3br2ba": 0.042018
+      }
+    },
+    "unit": "decimal_of_market_rent",
+    "source": "house:vintage_1980s",
+    "basis": "Each cohort's rent-roll loss to lease (market vs in-place; 4.34% market-weighted) burns off linearly over 12 months (one lease term) to the house 1980s vintage LTL floor 1.25% (value_add strategy), then stays flat (monthly segments per cohort).",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": {
+      "start": 0.043359,
+      "floor": 0.0125,
+      "burn_off_months": 12,
+      "start_by_cohort": {
+        "1br1ba": 0.043155,
+        "2br2ba": 0.04381,
+        "3br2ba": 0.042018
+      }
+    },
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "concessions",
+    "value": {
+      "year1": 0.015,
+      "stabilized": 0.015,
+      "year1_months": 12
+    },
+    "unit": "decimal_of_rent",
+    "source": "market:synthetic",
+    "basis": "Year-1 concessions from the msa concession rate 1.50% from synthetic for 12 months, then the stabilized level from the msa concession rate 1.50% (pct_rent concession_schedule rows).",
+    "as_of": "2026-09-30",
+    "confidence": "medium",
+    "review_required": false,
+    "default_value": {
+      "year1": 0.015,
+      "stabilized": 0.015,
+      "year1_months": 12
+    },
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "insurance_per_unit",
+    "value": 640.0,
+    "unit": "usd_per_unit_year",
+    "source": "deal:t12",
+    "basis": "T12 insurance annualized by calculation_type: $57,600.00 / 90 units.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 640.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "r_and_m_per_unit",
+    "value": 1450.0,
+    "unit": "usd_per_unit_year",
+    "source": "deal:t12",
+    "basis": "T12 repairs & maintenance bucket annualized by calculation_type: $130,500.00 / 90 units.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 1450.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "replacement_reserve_per_unit",
+    "value": 0.0,
+    "unit": "usd_per_unit_year",
+    "source": "engine_fallback",
+    "basis": "No replacement_reserves in the canonical: the engine reserves nothing. ADR 0003 precedence would select house:vintage_1980s ($1,750.00); today's $0.00 is kept because slice 2 changes no numbers.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": "below_floor",
+    "extra": {
+      "guardrail": {
+        "floor": 1750.0,
+        "floor_source": "house:vintage_1980s",
+        "status": "below_floor",
+        "action": "warned",
+        "original": 0.0,
+        "segments": [
+          {
+            "start_period": "2026-11",
+            "end_period": "2031-10",
+            "original": 0.0
+          }
+        ],
+        "basis": "replacement_reserve_per_unit (1 segment) is below the house floor $1,750.00 (house:vintage_1980s); lowest value before the guardrail $0.00. Underwrite mode keeps the value; pricing mode would enforce the floor."
+      }
+    }
+  },
+  {
+    "key": "turn_cost_per_unit",
+    "value": 5750.0,
+    "unit": "usd_per_turn",
+    "source": "house:vintage_1980s",
+    "basis": "Year built 1986 (analyst input) maps to the 1980s vintage bucket; house turn cost per turned unit $5,750.00 (VINTAGE_FRAMEWORK_2026, value_add strategy). Informational: the engine does not consume a turn cost in this slice.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 5750.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "exit_cap_rate",
+    "value": 0.0615,
+    "unit": "decimal",
+    "source": "market:synthetic",
+    "basis": "msa market cap rate for the exit year 2031 (synthetic, calendar-year mean of the quarterly series).",
+    "as_of": "2026-09-30",
+    "confidence": "medium",
+    "review_required": false,
+    "default_value": 0.0615,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "sale_cost_percent",
+    "value": 0.02,
+    "unit": "decimal_of_sale_price",
+    "source": "analyst",
+    "basis": "Analyst override (ingest input sale_cost_pct); the resolver default is 2.00% from house:backsolve_policy.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 0.02,
+    "delta": 0.0,
+    "override_value": 0.02,
+    "override_note": "ingest input sale_cost_pct",
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "acquisition_fee_pct",
+    "value": null,
+    "unit": "decimal_of_purchase_price",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "asset_management_fee_pct",
+    "value": null,
+    "unit": "decimal_per_year",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "disposition_fee_pct",
+    "value": null,
+    "unit": "decimal_of_sale_price",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "annual_partnership_expenses",
+    "value": null,
+    "unit": "usd_per_year",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "partnership_closing_costs",
+    "value": null,
+    "unit": "usd",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "purchase_closing_cost_pct",
+    "value": 0.0,
+    "unit": "decimal_of_purchase_price",
+    "source": "engine_fallback",
+    "basis": "Ingest writes purchase_assumptions.closing_costs = 0; the engine applies none. ADR 0003 precedence would select house:backsolve_policy (1.50%); today's 0.00% is kept because slice 2 changes no numbers.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "loan_closing_costs",
+    "value": 0.0,
+    "unit": "usd",
+    "source": "engine_fallback",
+    "basis": "debt_terms.loan_closing_costs not set: the engine applies 0.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "opex.electricity.base",
+    "value": 18900.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Electricity' (fixed_annual): $18,900.00 a year, $210.00 per unit a year; source rows: Electric - Common Area.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 18900.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Electricity",
+        "calculation_type": "fixed_annual",
+        "base_value": 18900.0,
+        "annual_amount": 18900.0,
+        "per_unit_annual": 210.0,
+        "source_rows": [
+          "Electric - Common Area"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.electricity.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Electricity maps to the house category 'Electricity': OPEX_GROWTH_ELECTRICITY = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Electricity",
+        "growth_category": "Electricity",
+        "house_constant": "OPEX_GROWTH_ELECTRICITY",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.fuel_gas_oil.base",
+    "value": 8100.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Fuel (Gas & Oil)' (fixed_annual): $8,100.00 a year, $90.00 per unit a year; source rows: Gas - Common Area.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 8100.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Fuel (Gas & Oil)",
+        "calculation_type": "fixed_annual",
+        "base_value": 8100.0,
+        "annual_amount": 8100.0,
+        "per_unit_annual": 90.0,
+        "source_rows": [
+          "Gas - Common Area"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.fuel_gas_oil.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Fuel (Gas & Oil) maps to the house category 'Fuel (Gas & Oil)': OPEX_GROWTH_FUEL_GAS_OIL = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Fuel (Gas & Oil)",
+        "growth_category": "Fuel (Gas & Oil)",
+        "house_constant": "OPEX_GROWTH_FUEL_GAS_OIL",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.insurance.base",
+    "value": 57600.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Insurance' (fixed_annual): $57,600.00 a year, $640.00 per unit a year; source rows: Property Insurance; General Liability Insurance.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 57600.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Insurance",
+        "calculation_type": "fixed_annual",
+        "base_value": 57600.0,
+        "annual_amount": 57600.0,
+        "per_unit_annual": 640.0,
+        "source_rows": [
+          "Property Insurance",
+          "General Liability Insurance"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.insurance.growth",
+    "value": 0.05,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Insurance maps to the house category 'Insurance': OPEX_GROWTH_INSURANCE = 5.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.05,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Insurance",
+        "growth_category": "Insurance",
+        "house_constant": "OPEX_GROWTH_INSURANCE",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.landscaping_grounds.base",
+    "value": 17100.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Landscaping / Grounds' (fixed_annual): $17,100.00 a year, $190.00 per unit a year; source rows: Landscaping.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 17100.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Landscaping / Grounds",
+        "calculation_type": "fixed_annual",
+        "base_value": 17100.0,
+        "annual_amount": 17100.0,
+        "per_unit_annual": 190.0,
+        "source_rows": [
+          "Landscaping"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.landscaping_grounds.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Landscaping / Grounds maps to the house category 'Landscaping / Grounds': OPEX_GROWTH_LANDSCAPING_GROUNDS = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Landscaping / Grounds",
+        "growth_category": "Landscaping / Grounds",
+        "house_constant": "OPEX_GROWTH_LANDSCAPING_GROUNDS",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.legal_professional.base",
+    "value": 4500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Legal & Professional' (fixed_annual): $4,500.00 a year, $50.00 per unit a year; source rows: Legal & Professional.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 4500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Legal & Professional",
+        "calculation_type": "fixed_annual",
+        "base_value": 4500.0,
+        "annual_amount": 4500.0,
+        "per_unit_annual": 50.0,
+        "source_rows": [
+          "Legal & Professional"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.legal_professional.growth",
+    "value": 0.025,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Legal & Professional maps to the house category 'Administrative': OPEX_GROWTH_ADMINISTRATIVE = 2.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.025,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Legal & Professional",
+        "growth_category": "Administrative",
+        "house_constant": "OPEX_GROWTH_ADMINISTRATIVE",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.marketing_advertising.base",
+    "value": 11700.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Marketing / Advertising' (fixed_annual): $11,700.00 a year, $130.00 per unit a year; source rows: Advertising.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 11700.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Marketing / Advertising",
+        "calculation_type": "fixed_annual",
+        "base_value": 11700.0,
+        "annual_amount": 11700.0,
+        "per_unit_annual": 130.0,
+        "source_rows": [
+          "Advertising"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.marketing_advertising.growth",
+    "value": 0.025,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Marketing / Advertising maps to the house category 'Marketing / Advertising': OPEX_GROWTH_MARKETING_ADVERTISING = 2.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.025,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Marketing / Advertising",
+        "growth_category": "Marketing / Advertising",
+        "house_constant": "OPEX_GROWTH_MARKETING_ADVERTISING",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.office_supplies.base",
+    "value": 8100.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Office Supplies' (fixed_annual): $8,100.00 a year, $90.00 per unit a year; source rows: Office Supplies.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 8100.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Office Supplies",
+        "calculation_type": "fixed_annual",
+        "base_value": 8100.0,
+        "annual_amount": 8100.0,
+        "per_unit_annual": 90.0,
+        "source_rows": [
+          "Office Supplies"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.office_supplies.growth",
+    "value": 0.025,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Office Supplies maps to the house category 'Administrative': OPEX_GROWTH_ADMINISTRATIVE = 2.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.025,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Office Supplies",
+        "growth_category": "Administrative",
+        "house_constant": "OPEX_GROWTH_ADMINISTRATIVE",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.payroll.base",
+    "value": 117000.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Payroll' (fixed_annual): $117,000.00 a year, $1,300.00 per unit a year; source rows: Payroll - Office; Payroll - Maintenance; Payroll Taxes & Benefits.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 117000.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Payroll",
+        "calculation_type": "fixed_annual",
+        "base_value": 117000.0,
+        "annual_amount": 117000.0,
+        "per_unit_annual": 1300.0,
+        "source_rows": [
+          "Payroll - Office",
+          "Payroll - Maintenance",
+          "Payroll Taxes & Benefits"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.payroll.growth",
+    "value": 0.035,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Payroll maps to the house category 'Payroll': OPEX_GROWTH_PAYROLL = 3.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.035,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Payroll",
+        "growth_category": "Payroll",
+        "house_constant": "OPEX_GROWTH_PAYROLL",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.pest_control.base",
+    "value": 4500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Pest Control' (fixed_annual): $4,500.00 a year, $50.00 per unit a year; source rows: Pest Control.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 4500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Pest Control",
+        "calculation_type": "fixed_annual",
+        "base_value": 4500.0,
+        "annual_amount": 4500.0,
+        "per_unit_annual": 50.0,
+        "source_rows": [
+          "Pest Control"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.pest_control.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Pest Control maps to the house category 'Contract Services': OPEX_GROWTH_CONTRACT_SERVICES = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Pest Control",
+        "growth_category": "Contract Services",
+        "house_constant": "OPEX_GROWTH_CONTRACT_SERVICES",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.property_management_fee.base",
+    "value": 47924.12,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Property Management Fee' (fixed_annual): $47,924.12 a year, $532.49 per unit a year; source rows: Management Fee.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 47924.12,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Property Management Fee",
+        "calculation_type": "fixed_annual",
+        "base_value": 47924.12,
+        "annual_amount": 47924.12,
+        "per_unit_annual": 532.4902222222222,
+        "source_rows": [
+          "Management Fee"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.property_management_fee.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Property Management Fee maps to the house category 'Property Management Fee': OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Property Management Fee",
+        "growth_category": "Property Management Fee",
+        "house_constant": "OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.real_estate_taxes.base",
+    "value": 136389.3,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Real Estate Taxes' (fixed_annual): $136,389.30 a year, $1,515.44 per unit a year; source rows: Real Estate Taxes.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 136389.3,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Real Estate Taxes",
+        "calculation_type": "fixed_annual",
+        "base_value": 136389.3,
+        "annual_amount": 136389.3,
+        "per_unit_annual": 1515.4366666666667,
+        "source_rows": [
+          "Real Estate Taxes"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.real_estate_taxes.growth",
+    "value": 0.0,
+    "unit": "decimal_yoy",
+    "source": "house:property_tax_module",
+    "basis": "Real Estate Taxes is owned by engine/property_tax.py: apply_property_tax_policy resets the year-1 tax to purchase price x assessment ratio x millage and keeps the row's own growth_rate. The house table has no rate for it (OPEX_GROWTH_REAL_ESTATE_TAXES) and the resolver writes none, so growth is never stacked on the reassessment; without a growth_rate the engine holds the reassessed tax flat.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Real Estate Taxes",
+        "growth_category": "Real Estate Taxes",
+        "house_constant": "OPEX_GROWTH_REAL_ESTATE_TAXES",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.repairs_maintenance.base",
+    "value": 130500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Repairs & Maintenance' (fixed_annual): $130,500.00 a year, $1,450.00 per unit a year; source rows: 6110 - Repairs & Maintenance; 6120 - Repairs & Maintenance; Plumbing Repairs; Repairs & Maintenance: Water Extraction; Repairs & Maintenance: Electrical Repairs/Supplies; Repairs & Maintenance: Gas Line Repair.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 130500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Repairs & Maintenance",
+        "calculation_type": "fixed_annual",
+        "base_value": 130500.0,
+        "annual_amount": 130500.0,
+        "per_unit_annual": 1450.0,
+        "source_rows": [
+          "6110 - Repairs & Maintenance",
+          "6120 - Repairs & Maintenance",
+          "Plumbing Repairs",
+          "Repairs & Maintenance: Water Extraction",
+          "Repairs & Maintenance: Electrical Repairs/Supplies",
+          "Repairs & Maintenance: Gas Line Repair"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.repairs_maintenance.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Repairs & Maintenance maps to the house category 'Repairs & Maintenance': OPEX_GROWTH_REPAIRS_MAINTENANCE = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Repairs & Maintenance",
+        "growth_category": "Repairs & Maintenance",
+        "house_constant": "OPEX_GROWTH_REPAIRS_MAINTENANCE",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.telephone.base",
+    "value": 5400.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Telephone' (fixed_annual): $5,400.00 a year, $60.00 per unit a year; source rows: Telephone.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 5400.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Telephone",
+        "calculation_type": "fixed_annual",
+        "base_value": 5400.0,
+        "annual_amount": 5400.0,
+        "per_unit_annual": 60.0,
+        "source_rows": [
+          "Telephone"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.telephone.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Telephone maps to the house category 'Contract Services': OPEX_GROWTH_CONTRACT_SERVICES = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Telephone",
+        "growth_category": "Contract Services",
+        "house_constant": "OPEX_GROWTH_CONTRACT_SERVICES",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.trash.base",
+    "value": 10800.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Trash' (fixed_annual): $10,800.00 a year, $120.00 per unit a year; source rows: Trash Removal.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 10800.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Trash",
+        "calculation_type": "fixed_annual",
+        "base_value": 10800.0,
+        "annual_amount": 10800.0,
+        "per_unit_annual": 120.0,
+        "source_rows": [
+          "Trash Removal"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.trash.growth",
+    "value": 0.035,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Trash maps to the house category 'Trash': OPEX_GROWTH_TRASH = 3.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.035,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Trash",
+        "growth_category": "Trash",
+        "house_constant": "OPEX_GROWTH_TRASH",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.turnover_make_ready.base",
+    "value": 27900.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Turnover / Make-Ready' (fixed_annual): $27,900.00 a year, $310.00 per unit a year; source rows: Turnover - Paint; Turnover - Cleaning.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 27900.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Turnover / Make-Ready",
+        "calculation_type": "fixed_annual",
+        "base_value": 27900.0,
+        "annual_amount": 27900.0,
+        "per_unit_annual": 310.0,
+        "source_rows": [
+          "Turnover - Paint",
+          "Turnover - Cleaning"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.turnover_make_ready.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Turnover / Make-Ready maps to the house category 'Turnover / Make-Ready': OPEX_GROWTH_TURNOVER_MAKE_READY = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Turnover / Make-Ready",
+        "growth_category": "Turnover / Make-Ready",
+        "house_constant": "OPEX_GROWTH_TURNOVER_MAKE_READY",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.water_sewer.base",
+    "value": 43200.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Water & Sewer' (fixed_annual): $43,200.00 a year, $480.00 per unit a year; source rows: Water & Sewer.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 43200.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Water & Sewer",
+        "calculation_type": "fixed_annual",
+        "base_value": 43200.0,
+        "annual_amount": 43200.0,
+        "per_unit_annual": 480.0,
+        "source_rows": [
+          "Water & Sewer"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.water_sewer.growth",
+    "value": 0.04,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Water & Sewer maps to the house category 'Water & Sewer': OPEX_GROWTH_WATER_SEWER = 4.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.04,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Water & Sewer",
+        "growth_category": "Water & Sewer",
+        "house_constant": "OPEX_GROWTH_WATER_SEWER",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  }
+]

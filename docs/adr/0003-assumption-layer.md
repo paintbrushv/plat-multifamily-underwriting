@@ -315,6 +315,18 @@ As implemented (slice 7, `engine/assumptions/sheet.py`):
 - Tests assert that resolved assumptions fall in expected bands, that the
   full engine run passes, and that overrides round-trip.
 
+As implemented (slice 8): `tests/fixtures/deals/<slug>/` holds four invented
+deals (stabilized 1990s with market data, stabilized 2010s with none,
+value-add 1970s with a renovation program, value-add 1980s with MSA-only data
+and GL collisions), each a consistent rent roll and T12 plus a `deal.json`
+with the profile, economics, analyst inputs, synthetic market data and the
+expected bands. `build_fixtures.py` generates them deterministically.
+`tests/test_deal_library.py` ingests each deal with no hand edits and checks
+the ingest gate, sources and review flags, the bands, the engine run, the
+underwrite guardrail warnings, backsolve on one deal of each type, a sheet
+override round-trip, determinism, and a golden `expected_assumptions.json`
+(regenerated only with `build_fixtures.py --update-goldens`).
+
 ## Implementation slices (stacked PRs)
 
 1. ADR (this document).

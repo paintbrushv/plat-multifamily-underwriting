@@ -1,0 +1,1470 @@
+[
+  {
+    "key": "rent_growth",
+    "value": [
+      0.03,
+      0.034,
+      0.0305,
+      0.027
+    ],
+    "unit": "decimal_yoy_by_analysis_year",
+    "source": "market:synthetic",
+    "basis": "Increases entering analysis years 2-3 from the submarket rent_growth_forecast (synthetic, as of 2026-09-30), annualized to analysis years; then a linear glide over 2 years to the MSA long-run 2.70% from synthetic. Element k is the increase entering analysis year k+2.",
+    "as_of": "2026-09-30",
+    "confidence": "high",
+    "review_required": false,
+    "default_value": [
+      0.03,
+      0.034,
+      0.0305,
+      0.027
+    ],
+    "delta": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "collection_loss",
+    "value": 0.016,
+    "unit": "decimal_of_rent",
+    "source": "deal:t12",
+    "basis": "T12 bad debt / gross potential rent.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 0.016,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "physical_vacancy",
+    "value": {
+      "start": 0.08,
+      "stabilized": 0.065,
+      "window_months": 24
+    },
+    "unit": "decimal_of_units",
+    "source": "market:synthetic",
+    "basis": "Physical vacancy moves linearly from the rent-roll 8.00% to the submarket stabilized vacancy 6.50% from synthetic over the value_add stabilization window of 24 months, then stays flat (monthly segments per cohort).",
+    "as_of": "2026-09-30",
+    "confidence": "high",
+    "review_required": false,
+    "default_value": {
+      "start": 0.08,
+      "stabilized": 0.065,
+      "window_months": 24
+    },
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": "below_floor",
+    "extra": {
+      "guardrail": {
+        "floor": 0.08,
+        "floor_source": "house:vintage_1970s",
+        "status": "below_floor",
+        "action": "warned",
+        "original": 0.065,
+        "segments": [
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2026-12",
+            "end_period": "2026-12",
+            "original": 0.079375
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-01",
+            "end_period": "2027-01",
+            "original": 0.07875
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-02",
+            "end_period": "2027-02",
+            "original": 0.078125
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-03",
+            "end_period": "2027-03",
+            "original": 0.0775
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-04",
+            "end_period": "2027-04",
+            "original": 0.076875
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-05",
+            "end_period": "2027-05",
+            "original": 0.07625
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-06",
+            "end_period": "2027-06",
+            "original": 0.075625
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-07",
+            "end_period": "2027-07",
+            "original": 0.075
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-08",
+            "end_period": "2027-08",
+            "original": 0.074375
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-09",
+            "end_period": "2027-09",
+            "original": 0.07375
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-10",
+            "end_period": "2027-10",
+            "original": 0.073125
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-11",
+            "end_period": "2027-11",
+            "original": 0.0725
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2027-12",
+            "end_period": "2027-12",
+            "original": 0.071875
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-01",
+            "end_period": "2028-01",
+            "original": 0.07125
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-02",
+            "end_period": "2028-02",
+            "original": 0.070625
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-03",
+            "end_period": "2028-03",
+            "original": 0.07
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-04",
+            "end_period": "2028-04",
+            "original": 0.069375
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-05",
+            "end_period": "2028-05",
+            "original": 0.06875
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-06",
+            "end_period": "2028-06",
+            "original": 0.068125
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-07",
+            "end_period": "2028-07",
+            "original": 0.0675
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-08",
+            "end_period": "2028-08",
+            "original": 0.066875
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-09",
+            "end_period": "2028-09",
+            "original": 0.06625
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-10",
+            "end_period": "2028-10",
+            "original": 0.065625
+          },
+          {
+            "cohort_id": "1br1ba",
+            "start_period": "2028-11",
+            "end_period": "2031-10",
+            "original": 0.065
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2026-12",
+            "end_period": "2026-12",
+            "original": 0.079375
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-01",
+            "end_period": "2027-01",
+            "original": 0.07875
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-02",
+            "end_period": "2027-02",
+            "original": 0.078125
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-03",
+            "end_period": "2027-03",
+            "original": 0.0775
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-04",
+            "end_period": "2027-04",
+            "original": 0.076875
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-05",
+            "end_period": "2027-05",
+            "original": 0.07625
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-06",
+            "end_period": "2027-06",
+            "original": 0.075625
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-07",
+            "end_period": "2027-07",
+            "original": 0.075
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-08",
+            "end_period": "2027-08",
+            "original": 0.074375
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-09",
+            "end_period": "2027-09",
+            "original": 0.07375
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-10",
+            "end_period": "2027-10",
+            "original": 0.073125
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-11",
+            "end_period": "2027-11",
+            "original": 0.0725
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2027-12",
+            "end_period": "2027-12",
+            "original": 0.071875
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-01",
+            "end_period": "2028-01",
+            "original": 0.07125
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-02",
+            "end_period": "2028-02",
+            "original": 0.070625
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-03",
+            "end_period": "2028-03",
+            "original": 0.07
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-04",
+            "end_period": "2028-04",
+            "original": 0.069375
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-05",
+            "end_period": "2028-05",
+            "original": 0.06875
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-06",
+            "end_period": "2028-06",
+            "original": 0.068125
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-07",
+            "end_period": "2028-07",
+            "original": 0.0675
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-08",
+            "end_period": "2028-08",
+            "original": 0.066875
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-09",
+            "end_period": "2028-09",
+            "original": 0.06625
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-10",
+            "end_period": "2028-10",
+            "original": 0.065625
+          },
+          {
+            "cohort_id": "2br1ba",
+            "start_period": "2028-11",
+            "end_period": "2031-10",
+            "original": 0.065
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2026-12",
+            "end_period": "2026-12",
+            "original": 0.079375
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-01",
+            "end_period": "2027-01",
+            "original": 0.07875
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-02",
+            "end_period": "2027-02",
+            "original": 0.078125
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-03",
+            "end_period": "2027-03",
+            "original": 0.0775
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-04",
+            "end_period": "2027-04",
+            "original": 0.076875
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-05",
+            "end_period": "2027-05",
+            "original": 0.07625
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-06",
+            "end_period": "2027-06",
+            "original": 0.075625
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-07",
+            "end_period": "2027-07",
+            "original": 0.075
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-08",
+            "end_period": "2027-08",
+            "original": 0.074375
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-09",
+            "end_period": "2027-09",
+            "original": 0.07375
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-10",
+            "end_period": "2027-10",
+            "original": 0.073125
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-11",
+            "end_period": "2027-11",
+            "original": 0.0725
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2027-12",
+            "end_period": "2027-12",
+            "original": 0.071875
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-01",
+            "end_period": "2028-01",
+            "original": 0.07125
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-02",
+            "end_period": "2028-02",
+            "original": 0.070625
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-03",
+            "end_period": "2028-03",
+            "original": 0.07
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-04",
+            "end_period": "2028-04",
+            "original": 0.069375
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-05",
+            "end_period": "2028-05",
+            "original": 0.06875
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-06",
+            "end_period": "2028-06",
+            "original": 0.068125
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-07",
+            "end_period": "2028-07",
+            "original": 0.0675
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-08",
+            "end_period": "2028-08",
+            "original": 0.066875
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-09",
+            "end_period": "2028-09",
+            "original": 0.06625
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-10",
+            "end_period": "2028-10",
+            "original": 0.065625
+          },
+          {
+            "cohort_id": "2br2ba",
+            "start_period": "2028-11",
+            "end_period": "2031-10",
+            "original": 0.065
+          }
+        ],
+        "basis": "physical_vacancy (72 segments) is below the house floor 8.00% (house:vintage_1970s); lowest value before the guardrail 6.50%. Underwrite mode keeps the value; pricing mode would enforce the floor."
+      }
+    }
+  },
+  {
+    "key": "loss_to_lease",
+    "value": {
+      "start": 0.059748,
+      "floor": 0.02,
+      "burn_off_months": 12,
+      "start_by_cohort": {
+        "1br1ba": 0.059898,
+        "2br1ba": 0.059724,
+        "2br2ba": 0.059462
+      }
+    },
+    "unit": "decimal_of_market_rent",
+    "source": "house:vintage_1970s",
+    "basis": "Each cohort's rent-roll loss to lease (market vs in-place; 5.97% market-weighted) burns off linearly over 12 months (one lease term) to the house 1970s vintage LTL floor 2.00% (value_add strategy), then stays flat (monthly segments per cohort).",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": {
+      "start": 0.059748,
+      "floor": 0.02,
+      "burn_off_months": 12,
+      "start_by_cohort": {
+        "1br1ba": 0.059898,
+        "2br1ba": 0.059724,
+        "2br2ba": 0.059462
+      }
+    },
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "concessions",
+    "value": {
+      "year1": 0.01,
+      "stabilized": 0.012,
+      "year1_months": 12
+    },
+    "unit": "decimal_of_rent",
+    "source": "deal:t12",
+    "basis": "Year-1 concessions from the T12 concessions / GPR 1.00% for 12 months, then the stabilized level from the submarket concession rate 1.20% (pct_rent concession_schedule rows).",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": {
+      "year1": 0.01,
+      "stabilized": 0.012,
+      "year1_months": 12
+    },
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": "below_floor",
+    "extra": {
+      "guardrail": {
+        "floor": 0.0125,
+        "floor_source": "house:vintage_1970s",
+        "status": "below_floor",
+        "action": "warned",
+        "original": 0.012,
+        "basis": "concessions is below the house floor 1.25% (house:vintage_1970s); lowest value before the guardrail 1.20%. Underwrite mode keeps the value; pricing mode would enforce the floor."
+      }
+    }
+  },
+  {
+    "key": "insurance_per_unit",
+    "value": 680.0,
+    "unit": "usd_per_unit_year",
+    "source": "deal:t12",
+    "basis": "T12 insurance annualized by calculation_type: $102,000.00 / 150 units.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 680.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "r_and_m_per_unit",
+    "value": 1350.0,
+    "unit": "usd_per_unit_year",
+    "source": "deal:t12",
+    "basis": "T12 repairs & maintenance bucket annualized by calculation_type: $202,500.00 / 150 units.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 1350.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": "below_floor",
+    "extra": {
+      "guardrail": {
+        "floor": 1600.0,
+        "floor_source": "house:vintage_1970s",
+        "status": "below_floor",
+        "action": "warned",
+        "original": 1350.0,
+        "basis": "r_and_m_per_unit is below the house floor $1,600.00 (house:vintage_1970s); lowest value before the guardrail $1,350.00. Underwrite mode keeps the value; pricing mode would enforce the floor."
+      }
+    }
+  },
+  {
+    "key": "replacement_reserve_per_unit",
+    "value": 0.0,
+    "unit": "usd_per_unit_year",
+    "source": "engine_fallback",
+    "basis": "No replacement_reserves in the canonical: the engine reserves nothing. ADR 0003 precedence would select house:vintage_1970s ($2,125.00); today's $0.00 is kept because slice 2 changes no numbers.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": "below_floor",
+    "extra": {
+      "guardrail": {
+        "floor": 2125.0,
+        "floor_source": "house:vintage_1970s",
+        "status": "below_floor",
+        "action": "warned",
+        "original": 0.0,
+        "segments": [
+          {
+            "start_period": "2026-11",
+            "end_period": "2031-10",
+            "original": 0.0
+          }
+        ],
+        "basis": "replacement_reserve_per_unit (1 segment) is below the house floor $2,125.00 (house:vintage_1970s); lowest value before the guardrail $0.00. Underwrite mode keeps the value; pricing mode would enforce the floor."
+      }
+    }
+  },
+  {
+    "key": "turn_cost_per_unit",
+    "value": 2000.0,
+    "unit": "usd_per_turn",
+    "source": "house:vintage_1970s",
+    "basis": "Year built 1974 (analyst input) maps to the 1970s vintage bucket; house turn cost per turned unit $2,000.00 (VINTAGE_FRAMEWORK_2026, value_add strategy). Informational: the engine does not consume a turn cost in this slice.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 2000.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "exit_cap_rate",
+    "value": 0.0601,
+    "unit": "decimal",
+    "source": "market:synthetic",
+    "basis": "submarket market cap rate for the exit year 2031 (synthetic, calendar-year mean of the quarterly series).",
+    "as_of": "2026-09-30",
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 0.0601,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "sale_cost_percent",
+    "value": 0.02,
+    "unit": "decimal_of_sale_price",
+    "source": "analyst",
+    "basis": "Analyst override (ingest input sale_cost_pct); the resolver default is 2.00% from house:backsolve_policy.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 0.02,
+    "delta": 0.0,
+    "override_value": 0.02,
+    "override_note": "ingest input sale_cost_pct",
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "acquisition_fee_pct",
+    "value": null,
+    "unit": "decimal_of_purchase_price",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "asset_management_fee_pct",
+    "value": null,
+    "unit": "decimal_per_year",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "disposition_fee_pct",
+    "value": null,
+    "unit": "decimal_of_sale_price",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "annual_partnership_expenses",
+    "value": null,
+    "unit": "usd_per_year",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "partnership_closing_costs",
+    "value": null,
+    "unit": "usd",
+    "source": "engine_fallback",
+    "basis": "The canonical has no fund_assumptions, so the engine does not model this assumption.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": null,
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "purchase_closing_cost_pct",
+    "value": 0.0,
+    "unit": "decimal_of_purchase_price",
+    "source": "engine_fallback",
+    "basis": "Ingest writes purchase_assumptions.closing_costs = 0; the engine applies none. ADR 0003 precedence would select house:backsolve_policy (1.50%); today's 0.00% is kept because slice 2 changes no numbers.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "loan_closing_costs",
+    "value": 0.0,
+    "unit": "usd",
+    "source": "engine_fallback",
+    "basis": "debt_terms.loan_closing_costs not set: the engine applies 0.",
+    "as_of": null,
+    "confidence": "low",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
+    "key": "opex.insurance.base",
+    "value": 102000.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Insurance' (fixed_annual): $102,000.00 a year, $680.00 per unit a year; source rows: Property Insurance.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 102000.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Insurance",
+        "calculation_type": "fixed_annual",
+        "base_value": 102000.0,
+        "annual_amount": 102000.0,
+        "per_unit_annual": 680.0,
+        "source_rows": [
+          "Property Insurance"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.insurance.growth",
+    "value": 0.05,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Insurance maps to the house category 'Insurance': OPEX_GROWTH_INSURANCE = 5.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.05,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Insurance",
+        "growth_category": "Insurance",
+        "house_constant": "OPEX_GROWTH_INSURANCE",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.landscaping_grounds.base",
+    "value": 21000.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Landscaping / Grounds' (fixed_annual): $21,000.00 a year, $140.00 per unit a year; source rows: Landscaping.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 21000.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Landscaping / Grounds",
+        "calculation_type": "fixed_annual",
+        "base_value": 21000.0,
+        "annual_amount": 21000.0,
+        "per_unit_annual": 140.0,
+        "source_rows": [
+          "Landscaping"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.landscaping_grounds.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Landscaping / Grounds maps to the house category 'Landscaping / Grounds': OPEX_GROWTH_LANDSCAPING_GROUNDS = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Landscaping / Grounds",
+        "growth_category": "Landscaping / Grounds",
+        "house_constant": "OPEX_GROWTH_LANDSCAPING_GROUNDS",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.marketing_advertising.base",
+    "value": 15000.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Marketing / Advertising' (fixed_annual): $15,000.00 a year, $100.00 per unit a year; source rows: Marketing - Internet Listing.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 15000.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Marketing / Advertising",
+        "calculation_type": "fixed_annual",
+        "base_value": 15000.0,
+        "annual_amount": 15000.0,
+        "per_unit_annual": 100.0,
+        "source_rows": [
+          "Marketing - Internet Listing"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.marketing_advertising.growth",
+    "value": 0.025,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Marketing / Advertising maps to the house category 'Marketing / Advertising': OPEX_GROWTH_MARKETING_ADVERTISING = 2.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.025,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Marketing / Advertising",
+        "growth_category": "Marketing / Advertising",
+        "house_constant": "OPEX_GROWTH_MARKETING_ADVERTISING",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.office_supplies.base",
+    "value": 13500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Office Supplies' (fixed_annual): $13,500.00 a year, $90.00 per unit a year; source rows: Office Supplies.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 13500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Office Supplies",
+        "calculation_type": "fixed_annual",
+        "base_value": 13500.0,
+        "annual_amount": 13500.0,
+        "per_unit_annual": 90.0,
+        "source_rows": [
+          "Office Supplies"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.office_supplies.growth",
+    "value": 0.025,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Office Supplies maps to the house category 'Administrative': OPEX_GROWTH_ADMINISTRATIVE = 2.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.025,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Office Supplies",
+        "growth_category": "Administrative",
+        "house_constant": "OPEX_GROWTH_ADMINISTRATIVE",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.payroll.base",
+    "value": 172500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Payroll' (fixed_annual): $172,500.00 a year, $1,150.00 per unit a year; source rows: Payroll - Office; Payroll - Leasing; Payroll - Maintenance.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 172500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Payroll",
+        "calculation_type": "fixed_annual",
+        "base_value": 172500.0,
+        "annual_amount": 172500.0,
+        "per_unit_annual": 1150.0,
+        "source_rows": [
+          "Payroll - Office",
+          "Payroll - Leasing",
+          "Payroll - Maintenance"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.payroll.growth",
+    "value": 0.035,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Payroll maps to the house category 'Payroll': OPEX_GROWTH_PAYROLL = 3.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.035,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Payroll",
+        "growth_category": "Payroll",
+        "house_constant": "OPEX_GROWTH_PAYROLL",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.pest_control.base",
+    "value": 7500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Pest Control' (fixed_annual): $7,500.00 a year, $50.00 per unit a year; source rows: Pest Control.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 7500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Pest Control",
+        "calculation_type": "fixed_annual",
+        "base_value": 7500.0,
+        "annual_amount": 7500.0,
+        "per_unit_annual": 50.0,
+        "source_rows": [
+          "Pest Control"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.pest_control.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Pest Control maps to the house category 'Contract Services': OPEX_GROWTH_CONTRACT_SERVICES = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Pest Control",
+        "growth_category": "Contract Services",
+        "house_constant": "OPEX_GROWTH_CONTRACT_SERVICES",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.property_management_fee.base",
+    "value": 74501.83,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Property Management Fee' (fixed_annual): $74,501.83 a year, $496.68 per unit a year; source rows: Management Fee.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 74501.83,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Property Management Fee",
+        "calculation_type": "fixed_annual",
+        "base_value": 74501.83,
+        "annual_amount": 74501.83,
+        "per_unit_annual": 496.6788666666667,
+        "source_rows": [
+          "Management Fee"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.property_management_fee.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Property Management Fee maps to the house category 'Property Management Fee': OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Property Management Fee",
+        "growth_category": "Property Management Fee",
+        "house_constant": "OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.real_estate_taxes.base",
+    "value": 221142.24,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Real Estate Taxes' (fixed_annual): $221,142.24 a year, $1,474.28 per unit a year; source rows: Real Estate Taxes.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 221142.24,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Real Estate Taxes",
+        "calculation_type": "fixed_annual",
+        "base_value": 221142.24,
+        "annual_amount": 221142.24,
+        "per_unit_annual": 1474.2816,
+        "source_rows": [
+          "Real Estate Taxes"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.real_estate_taxes.growth",
+    "value": 0.0,
+    "unit": "decimal_yoy",
+    "source": "house:property_tax_module",
+    "basis": "Real Estate Taxes is owned by engine/property_tax.py: apply_property_tax_policy resets the year-1 tax to purchase price x assessment ratio x millage and keeps the row's own growth_rate. The house table has no rate for it (OPEX_GROWTH_REAL_ESTATE_TAXES) and the resolver writes none, so growth is never stacked on the reassessment; without a growth_rate the engine holds the reassessed tax flat.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Real Estate Taxes",
+        "growth_category": "Real Estate Taxes",
+        "house_constant": "OPEX_GROWTH_REAL_ESTATE_TAXES",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.repairs_maintenance.base",
+    "value": 202500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Repairs & Maintenance' (fixed_annual): $202,500.00 a year, $1,350.00 per unit a year; source rows: Maintenance Supplies; Plumbing Repairs; HVAC Repairs; Repairs & Maintenance: Electrical Repairs/Supplies; Repairs & Maintenance: Water Extraction; Appliance Repairs.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 202500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Repairs & Maintenance",
+        "calculation_type": "fixed_annual",
+        "base_value": 202500.0,
+        "annual_amount": 202500.0,
+        "per_unit_annual": 1350.0,
+        "source_rows": [
+          "Maintenance Supplies",
+          "Plumbing Repairs",
+          "HVAC Repairs",
+          "Repairs & Maintenance: Electrical Repairs/Supplies",
+          "Repairs & Maintenance: Water Extraction",
+          "Appliance Repairs"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.repairs_maintenance.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Repairs & Maintenance maps to the house category 'Repairs & Maintenance': OPEX_GROWTH_REPAIRS_MAINTENANCE = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Repairs & Maintenance",
+        "growth_category": "Repairs & Maintenance",
+        "house_constant": "OPEX_GROWTH_REPAIRS_MAINTENANCE",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.telephone.base",
+    "value": 10500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Telephone' (fixed_annual): $10,500.00 a year, $70.00 per unit a year; source rows: Telephone.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 10500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Telephone",
+        "calculation_type": "fixed_annual",
+        "base_value": 10500.0,
+        "annual_amount": 10500.0,
+        "per_unit_annual": 70.0,
+        "source_rows": [
+          "Telephone"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.telephone.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Telephone maps to the house category 'Contract Services': OPEX_GROWTH_CONTRACT_SERVICES = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Telephone",
+        "growth_category": "Contract Services",
+        "house_constant": "OPEX_GROWTH_CONTRACT_SERVICES",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.turnover_make_ready.base",
+    "value": 49500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Turnover / Make-Ready' (fixed_annual): $49,500.00 a year, $330.00 per unit a year; source rows: Turnover - Paint; Turnover - Cleaning; Turnover - Carpet Replacement.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 49500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Turnover / Make-Ready",
+        "calculation_type": "fixed_annual",
+        "base_value": 49500.0,
+        "annual_amount": 49500.0,
+        "per_unit_annual": 330.0,
+        "source_rows": [
+          "Turnover - Paint",
+          "Turnover - Cleaning",
+          "Turnover - Carpet Replacement"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.turnover_make_ready.growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Turnover / Make-Ready maps to the house category 'Turnover / Make-Ready': OPEX_GROWTH_TURNOVER_MAKE_READY = 3.00% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Turnover / Make-Ready",
+        "growth_category": "Turnover / Make-Ready",
+        "house_constant": "OPEX_GROWTH_TURNOVER_MAKE_READY",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  },
+  {
+    "key": "opex.utilities.base",
+    "value": 127500.0,
+    "unit": "usd_per_year",
+    "source": "deal:t12",
+    "basis": "T12 line 'Utilities' (fixed_annual): $127,500.00 a year, $850.00 per unit a year; source rows: Utilities - Electric; Utilities - Water; Utilities - Gas; Utilities - Trash.",
+    "as_of": null,
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 127500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Utilities",
+        "calculation_type": "fixed_annual",
+        "base_value": 127500.0,
+        "annual_amount": 127500.0,
+        "per_unit_annual": 850.0,
+        "source_rows": [
+          "Utilities - Electric",
+          "Utilities - Water",
+          "Utilities - Gas",
+          "Utilities - Trash"
+        ]
+      }
+    }
+  },
+  {
+    "key": "opex.utilities.growth",
+    "value": 0.035,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Utilities maps to the house category 'Utilities': OPEX_GROWTH_UTILITIES = 3.50% a year (engine/underwriting_policy.py). A house assumption to be reviewed, not market data.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.035,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "category_name": "Utilities",
+        "growth_category": "Utilities",
+        "house_constant": "OPEX_GROWTH_UTILITIES",
+        "calculation_type": "fixed_annual"
+      }
+    }
+  }
+]
