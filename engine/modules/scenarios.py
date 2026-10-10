@@ -287,7 +287,9 @@ def _apply_scenario_deltas(
 
         for cohort_id, entries in cohort_entries.items():
             sorted_entries = sorted(entries, key=lambda e: e["start_period"])
-            if len(sorted_entries) <= 1:
+            # A flat curve is grown by the engine from growth_assumptions,
+            # which already carries the delta; scaling it here would double count.
+            if len({e["market_rent"] for e in sorted_entries}) <= 1:
                 continue
             base_rent = sorted_entries[0]["market_rent"]
             for i, entry in enumerate(sorted_entries[1:], 1):
