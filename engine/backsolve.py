@@ -140,6 +140,7 @@ def _infer_costar_metro(canonical: dict[str, Any], broker_snapshot: dict[str, An
 def _costar_exit_cap_rate_for_case(
     canonical: dict[str, Any],
     broker_snapshot: dict[str, Any] | None,
+    registry: Any = None,
 ) -> tuple[Decimal | None, dict[str, Any] | None]:
     metro = _infer_costar_metro(canonical, broker_snapshot)
     if not metro:
@@ -153,15 +154,17 @@ def _costar_exit_cap_rate_for_case(
     except (TypeError, ValueError):
         exit_year = date.today().year + 5
     try:
-        from engine.market_data.costar_cap_rates import get_exit_cap_rate
+        from engine.market_data import Geo, annual_value, default_registry
 
-        rate = get_exit_cap_rate(metro, exit_year)
+        geo = Geo(metro_slug=re.sub(r"[^a-z0-9]+", "_", metro.lower()).strip("_"))
+        obs, _ = (registry or default_registry()).resolve("market_cap_rate", geo)
+        rate = annual_value(obs, exit_year) if obs is not None else None
     except Exception:
         rate = None
     if rate is None:
         return None, None
     return Decimal(str(rate)), {
-        "source": "CoStar 2026 Q2 Base Case Market Cap Rate",
+        "source": f"{obs.provenance.source_label or obs.provenance.provider} market_cap_rate",
         "metro": metro,
         "exit_year": exit_year,
         "rate": float(rate),
