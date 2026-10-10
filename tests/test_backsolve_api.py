@@ -115,6 +115,9 @@ def test_cli_and_api_share_solver_output(economy, tmp_path, monkeypatch):
     assert summary == {**solve()["summary"], "artifacts": {
         "canonical": str(tmp_path / "out/canonical_backsolved_target_coc.json"),
         "underwriting": str(tmp_path / "out/underwriting_backsolved_target_coc.json"),
+        # The solved case carries a pricing-mode assumptions section (ADR 0003),
+        # so the CLI also writes the assumptions sheet.
+        "assumptions": str(tmp_path / "out/assumptions.json"),
     }}
 
 

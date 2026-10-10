@@ -1309,8 +1309,10 @@ def _apply_guardrail_mode(
         findings = guardrails.enforce_floors(ctx.canonical, mode=ctx.mode, profile=profile, context=context)
         if any(f["action"] == guardrails.ACTION_ENFORCED for f in findings):
             # Re-read the raised values, with the first pass as the prior resolution.
+            # Keys outside the specs (opex.*) are kept; the caller re-reads them.
             entries = {
-                spec.key: _resolve_key(spec, ctx, entries[spec.key], None).to_dict() for spec in specs
+                **entries,
+                **{spec.key: _resolve_key(spec, ctx, entries[spec.key], None).to_dict() for spec in specs},
             }
     return guardrails.record_on_entries(entries, findings, mode=ctx.mode, prior_entries=prior_entries)
 
@@ -1387,6 +1389,9 @@ def resolve_assumptions(
 
     # ── ADR 0003 slice 6 hook: guardrail modes (engine/assumptions/guardrails.py) ──
     entries = _apply_guardrail_mode(ctx, specs, entries, prior_entries, guardrail_context)
+    # Pricing floors can add opex lines (e.g. the R&M vintage floor top-up);
+    # re-read the opex entries so a second resolution is identical.
+    entries.update(opex_slice.resolve_opex_entries(ctx, prior_entries, explicit))
     # ── end slice 6 hook ──
 
     out["deal_profile"] = profile.to_dict()
