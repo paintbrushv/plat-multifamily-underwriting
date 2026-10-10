@@ -574,10 +574,11 @@ def test_end_to_end_ingest_runs_underwriting():
         year_built=1984, market=_registry(), purchase_price=1_000_000, ltv=0.6, loan_rate=0.06,
         amort_years=30, exit_cap_rate=0.06, **_geo_kwargs(),
     )
-    report = validate_deal(deal)
+    # A priced deal needs its property-tax millage to validate (ADR 0003 §5).
+    inputs = with_synthetic_tax_policy(deal)
+    report = validate_deal(inputs)
     assert report.status == "PASS", [i for i in report.issues if i.severity == "ERROR"]
 
-    inputs = with_synthetic_tax_policy(deal)
     result = run_underwriting(copy.deepcopy(inputs))
     assert run_underwriting(copy.deepcopy(inputs)) == result
 

@@ -9,6 +9,7 @@ import pytest
 from engine.ingest.broker_om_snapshot import stable_property_tax_source_locator
 from engine.ingest.ingestion_pipeline import build_deal_from_documents
 from engine.ingest.om_parser import OmData, OmUnitType
+from tests.synthetic_tax_policy import with_synthetic_tax_policy
 
 T12 = Path("tests/fixtures/sample_t12.csv")
 ROLL = Path("tests/fixtures/sample_rent_roll.csv")
@@ -231,9 +232,21 @@ class TestDealEconomics:
             sponsor_equity_pct=0.10,
             pref_return=0.08,
         )
-        report = validate_deal(result)
+        # A priced deal needs its property-tax millage (ADR 0003 §5).
+        report = validate_deal(with_synthetic_tax_policy(result))
         errors = [i for i in report.issues if i.severity == "ERROR"]
         assert report.status == "PASS", f"Validation failed: {[e.message for e in errors]}"
+
+    def test_priced_deal_without_millage_fails_validation(self):
+        """The engine taxes the purchase price at the millage: missing it is a blocker."""
+        from engine.validator import validate_deal
+        result = _build(purchase_price=25_000_000, ltv=0.75, loan_rate=0.065, amort_years=30,
+                        exit_cap_rate=0.055)
+        report = validate_deal(result)
+        assert report.status == "FAIL"
+        errors = [i for i in report.issues if i.severity == "ERROR"]
+        assert [i.code for i in errors] == ["PROPERTY_TAX_MILLAGE_MISSING"]
+        assert errors[0].path == "/metadata/property_summary/property_tax_policy/millage_rate_mills"
 
     def test_schema_validation_passes_minimal(self):
         """Minimal ingested JSON (no deal economics) should pass schema validation."""

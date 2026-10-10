@@ -518,6 +518,16 @@ def run_underwriting(
             "call run_underwriting without federation_mode."
         )
 
+    if not skip_validation:
+        # ADR 0003 §5: a missing or invalid millage is an integrity blocker.
+        # Refuse with the validation error before the tax is priced.
+        from engine.validator import property_tax_preflight_issues
+
+        tax_issues = property_tax_preflight_issues(inputs)
+        if tax_issues:
+            messages = "\n".join(f"{i.code} {i.path}: {i.message}" for i in tax_issues)
+            raise ValueError(f"Validation failed:\n{messages}")
+
     inputs, property_tax_calculation = apply_property_tax_policy(inputs)
 
     validator_report_dict: Optional[Dict[str, Any]] = None
