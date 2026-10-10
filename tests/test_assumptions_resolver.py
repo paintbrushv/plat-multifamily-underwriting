@@ -441,7 +441,8 @@ _EXPECTED_OPEX = [
     ("Marketing / Advertising", 36_000.0),
     ("Insurance", 252_000.0),
     ("Real Estate Taxes", 900_000.0),
-    ("Property Management Fee", 180_000.0),
+    # The T12 fee ($180,000) is entered as percent_egr = fee / T12 EGI ($6,381,000).
+    ("Property Management Fee", round(180_000 / 6_381_000, 6)),
 ]
 
 
@@ -486,10 +487,15 @@ def test_ingest_numbers(kwargs, growth, loss, vacancy, ltl, concessions):
         assert _curve_values(deal, "loss_to_lease", "ltl_percent") == ltl
     assert [row["amount"] for row in deal["concession_schedule"]] == [concessions]
     assert [(row["category_name"], row["base_value"]) for row in deal["opex_table"]] == _EXPECTED_OPEX
-    assert {row["calculation_type"] for row in deal["opex_table"]} == {"fixed_annual"}
-    for absent in ("replacement_reserves", "exit_assumptions",
-                   "fund_assumptions", "purchase_assumptions", "debt_terms"):
+    assert [row["calculation_type"] for row in deal["opex_table"]] == ["fixed_annual"] * 9 + ["percent_egr"]
+    for absent in ("exit_assumptions", "fund_assumptions", "purchase_assumptions", "debt_terms"):
         assert absent not in deal, absent
+    if "year_built" in kwargs:  # the house vintage reserve ($1,000/unit for the 1980s, cashflow)
+        assert deal["replacement_reserves"] == [
+            {"start_period": "2026-08", "end_period": "2031-07", "annual_amount": 10_000.0}
+        ]
+    else:  # no vintage, no house reserve
+        assert "replacement_reserves" not in deal
 
 
 def test_ingest_economics_are_unchanged(full_deal):

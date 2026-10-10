@@ -69,15 +69,20 @@ OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED = Decimal("0.030")
 OPEX_GROWTH_PERCENT_OF_REVENUE = Decimal("0")
 # Any category the table does not name.
 OPEX_GROWTH_DEFAULT = Decimal("0.030")
-# Real estate taxes have no house growth rate: engine/property_tax.py owns them
-# (it resets the year-1 tax to purchase price x assessment ratio x millage and
-# keeps the row's own growth_rate). A house rate here would stack on that.
-OPEX_GROWTH_REAL_ESTATE_TAXES: Optional[Decimal] = None
+# Real estate taxes: engine/property_tax.py resets the year-1 tax to purchase
+# price x assessment ratio x millage and keeps the row's own growth_rate, which
+# the engine applies from analysis year 2 (the rent-growth convention). After
+# the purchase reassessment the house grows taxes at a flat 3% a year (millage
+# creep and annual reassessment of a rising value). The resolver writes it
+# once into the tax row; property_tax.py never compounds it, so it is applied
+# exactly once, on top of the reassessed year-1 amount.
+HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT = Decimal("0.03")
+OPEX_GROWTH_REAL_ESTATE_TAXES: Optional[Decimal] = HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT
 
 # Management fee for an ingested deal whose T12 carries none (percent of EGR).
 DEFAULT_MANAGEMENT_FEE_PCT_EGR = Decimal("0.030")
 
-# Canonical T12 category -> (constant name, rate). None defers to another module.
+# Canonical T12 category -> (constant name, rate).
 OPEX_GROWTH_TABLE: dict[str, tuple[str, Optional[Decimal]]] = {
     "Payroll": ("OPEX_GROWTH_PAYROLL", OPEX_GROWTH_PAYROLL),
     "Repairs & Maintenance": ("OPEX_GROWTH_REPAIRS_MAINTENANCE", OPEX_GROWTH_REPAIRS_MAINTENANCE),
@@ -100,7 +105,7 @@ OPEX_GROWTH_TABLE: dict[str, tuple[str, Optional[Decimal]]] = {
         "OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED",
         OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED,
     ),
-    "Real Estate Taxes": ("OPEX_GROWTH_REAL_ESTATE_TAXES", OPEX_GROWTH_REAL_ESTATE_TAXES),
+    "Real Estate Taxes": ("HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT", HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT),
 }
 PERCENT_OF_REVENUE_CALCULATION_TYPES = frozenset({"percent_egr", "percent_rent"})
 
@@ -113,8 +118,9 @@ def default_opex_growth_rate(
     """House growth for a canonical opex category: ``(constant name, rate)``.
 
     Percent-of-revenue rows never grow. An unknown category gets
-    ``OPEX_GROWTH_DEFAULT``. Real estate taxes return ``None``: the
-    property-tax module owns them.
+    ``OPEX_GROWTH_DEFAULT``. Real estate taxes get
+    ``HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT``, applied from year 2 on top of
+    the reassessed year-1 tax (engine/property_tax.py).
     """
     if calculation_type in PERCENT_OF_REVENUE_CALCULATION_TYPES:
         return "OPEX_GROWTH_PERCENT_OF_REVENUE", OPEX_GROWTH_PERCENT_OF_REVENUE

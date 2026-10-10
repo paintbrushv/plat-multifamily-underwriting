@@ -140,6 +140,10 @@ class _Context:
     om_confidence: Optional[str] = None
     notes: dict[str, list[str]] = field(default_factory=dict)
     market_cache: dict[Any, Any] = field(default_factory=dict)  # slice 4: per-run market lookups
+    # Entries of the last resolution (empty on a first resolution).
+    prior_entries: Mapping[str, Any] = field(default_factory=dict)
+    # ids of the opex rows this resolution added from house defaults (opex.py).
+    opex_house_rows: set[int] = field(default_factory=set)
 
     @property
     def strategy(self) -> str:
@@ -707,13 +711,13 @@ def _insurance_candidates(ctx: _Context) -> list[dict[str, Any]]:
 def _opex_default(field_name: str, label: str, absent_basis: str):
     def default(ctx: _Context, state: str) -> _Choice:
         if state != ABSENT:
-            evidence = _opex_evidence(ctx, field_name, label)
-            if evidence:
-                return _choice_from(evidence, ctx)
             # ── ADR 0003 slice 5 hook: core line added from house defaults ──
             filled = _opex_slice().filled_core_candidate(ctx, field_name)
             if filled:
                 return _choice_from(filled, ctx)
+            evidence = _opex_evidence(ctx, field_name, label)
+            if evidence:
+                return _choice_from(evidence, ctx)
         return _fallback(0.0, absent_basis)
 
     return default
@@ -1645,6 +1649,7 @@ def resolve_assumptions(
 
     prior_section = out.get("assumptions") if isinstance(out.get("assumptions"), Mapping) else {}
     prior_entries = prior_section.get("entries") if isinstance(prior_section.get("entries"), Mapping) else {}
+    ctx.prior_entries = prior_entries
 
     specs = _specs_for(profile)
     opex_slice = _opex_slice()
@@ -1656,8 +1661,12 @@ def resolve_assumptions(
             f"assumption keys {inapplicable} do not apply to deal_type {profile.deal_type!r}"
         )
 
-    # ── ADR 0003 slice 5 hook: add missing core opex lines before the v1 keys read them ──
-    opex_slice.prepare_opex_table(ctx)
+    # ── ADR 0003 slice 5 hook: apply opex line overrides and add missing core
+    # opex lines before the v1 keys read them. It returns the overrides its
+    # row changes imply (an explicitly deleted line kept at $0, the
+    # insurance / R&M per-unit keys an opex base override moved); the
+    # caller's own overrides win.
+    explicit = {**opex_slice.prepare_opex_table(ctx, explicit), **explicit}
     entries: dict[str, Any] = {}
     for spec in specs:
         entry = _resolve_key(spec, ctx, prior_entries.get(spec.key), explicit.get(spec.key))
@@ -1668,8 +1677,9 @@ def resolve_assumptions(
     # ── ADR 0003 slice 6 hook: guardrail modes (engine/assumptions/guardrails.py) ──
     entries = _apply_guardrail_mode(ctx, specs, entries, prior_entries, guardrail_context)
     # Pricing floors can add opex lines (e.g. the R&M vintage floor top-up);
-    # re-read the opex entries so a second resolution is identical.
-    entries.update(opex_slice.resolve_opex_entries(ctx, prior_entries, explicit))
+    # re-read the opex entries so a second resolution is identical. The first
+    # pass is the prior: a value it wrote is not mistaken for an analyst value.
+    entries.update(opex_slice.resolve_opex_entries(ctx, {**prior_entries, **entries}, explicit))
     # ── end slice 6 hook ──
 
     out["deal_profile"] = profile.to_dict()

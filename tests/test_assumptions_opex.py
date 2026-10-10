@@ -113,11 +113,9 @@ def test_growth_table_covers_every_parser_category():
     assert _parser_categories() <= set(table)
     for category, (constant, rate) in table.items():
         assert getattr(house, constant) == rate, category
-        if category == "Real Estate Taxes":
-            assert rate is None
-            continue
         assert isinstance(rate, Decimal), category
         assert Decimal("0") <= rate <= Decimal("0.06"), category
+    assert table["Real Estate Taxes"] == ("HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT", Decimal("0.03"))
     assert house.default_opex_growth_rate("Unmapped Line") == ("OPEX_GROWTH_DEFAULT", house.OPEX_GROWTH_DEFAULT)
     assert house.default_opex_growth_rate("Payroll", calculation_type="percent_egr") == (
         "OPEX_GROWTH_PERCENT_OF_REVENUE", Decimal("0"),
@@ -154,7 +152,7 @@ def test_ingested_rows_get_the_house_rate_by_category(ingested):
         "Telephone": house.OPEX_GROWTH_CONTRACT_SERVICES,
         "Marketing / Advertising": house.OPEX_GROWTH_MARKETING_ADVERTISING,
         "Insurance": house.OPEX_GROWTH_INSURANCE,
-        "Property Management Fee": house.OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED,
+        "Real Estate Taxes": house.HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT,
     }
     for name, rate in expected.items():
         assert _row(ingested, name)["growth_rate"] == float(rate), name
@@ -164,6 +162,10 @@ def test_ingested_rows_get_the_house_rate_by_category(ingested):
         assert entry["value"] == float(rate), name
         assert entry["review_required"] is True
         assert "house assumption to be reviewed" in entry["basis"]
+    # The T12 fee is entered as a percent of EGR, so it gets the house 0% growth.
+    fee = entries["opex.property_management_fee.growth"]
+    assert (fee["value"], fee["source"]) == (0.0, "house:opex_growth_table")
+    assert _row(ingested, "Property Management Fee")["growth_rate"] == 0.0
 
 
 # ── 2. analyst growth is preserved ───────────────────────────────────────
@@ -207,8 +209,10 @@ def test_explicit_growth_override_wins_and_keeps_the_default(ingested):
 
 
 def test_opex_override_validation(ingested):
-    with pytest.raises(AssumptionOverrideError, match="display-only"):
-        resolve_assumptions(ingested, overrides={"opex.payroll.base": 1})
+    with pytest.raises(AssumptionOverrideError, match="unknown opex lines"):
+        resolve_assumptions(ingested, overrides={"opex.pool_heating.base": 1_000})
+    with pytest.raises(AssumptionOverrideError, match="finite number"):
+        resolve_assumptions(ingested, overrides={"opex.payroll.base": "lots"})
     with pytest.raises(AssumptionOverrideError, match="unknown opex lines"):
         resolve_assumptions(ingested, overrides={"opex.pool_heating.growth": 0.03})
     with pytest.raises(AssumptionOverrideError, match="finite number"):
@@ -241,15 +245,19 @@ def test_hand_authored_canonical_numbers_are_unchanged(minimal_deal_inputs):
     assert run_underwriting(resolved) == run_underwriting(copy.deepcopy(minimal_deal_inputs))
 
 
-def test_hand_authored_row_without_growth_is_not_filled(minimal_deal_inputs):
+def test_hand_authored_row_without_growth_gets_the_house_rate(minimal_deal_inputs):
     deal = copy.deepcopy(minimal_deal_inputs)
     _row(deal, "Utilities").pop("growth_rate")
     resolved = resolve_assumptions(deal)
     entry = _entries(resolved)["opex.utilities.growth"]
 
-    assert "growth_rate" not in _row(resolved, "Utilities")
-    assert entry["source"] == "engine_fallback"
-    assert entry["value"] == 0.0
+    # Written and flagged exactly as for an ingested deal.
+    assert _row(resolved, "Utilities")["growth_rate"] == float(house.OPEX_GROWTH_UTILITIES)
+    assert entry["source"] == "house:opex_growth_table"
+    assert entry["value"] == float(house.OPEX_GROWTH_UTILITIES)
+    assert entry["review_required"] is True
+    assert entry["override"] is None
+    assert resolve_assumptions(resolved) == resolved
     assert entry["candidates"][0] == {
         "source": "house:opex_growth_table",
         "value": float(house.OPEX_GROWTH_UTILITIES),
@@ -261,19 +269,37 @@ def test_hand_authored_row_without_growth_is_not_filled(minimal_deal_inputs):
 # ── 3. real estate taxes defer to the property-tax module ────────────────
 
 
-def test_real_estate_taxes_defer_to_the_property_tax_module(ingested):
+def _taxes(results):
+    return [r["expense"] for r in results["opex"]["by_category_by_month"] if r["category"] == "Real Estate Taxes"]
+
+
+def test_real_estate_taxes_grow_at_the_house_rate_after_the_reassessment(ingested):
     entry = _entries(ingested)["opex.real_estate_taxes.growth"]
 
-    assert "growth_rate" not in _row(ingested, "Real Estate Taxes")
-    assert entry["source"] == "house:property_tax_module"
-    assert entry["value"] == 0.0
+    assert _row(ingested, "Real Estate Taxes")["growth_rate"] == 0.03
+    assert entry["source"] == "house:opex_growth_table"
+    assert entry["value"] == float(house.HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT) == 0.03
+    assert entry["review_required"] is True
+    assert entry["detail"]["house_constant"] == "HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT"
     assert "engine/property_tax.py" in entry["basis"]
-    assert [c["source"] for c in entry["candidates"]] == ["house:property_tax_module", "engine_fallback"]
+    assert [c["source"] for c in entry["candidates"]] == ["house:opex_growth_table", "engine_fallback"]
 
-    results = run_underwriting(_with_tax_policy(ingested))
-    taxes = [r["expense"] for r in results["opex"]["by_category_by_month"] if r["category"] == "Real Estate Taxes"]
+    taxes = _taxes(run_underwriting(_with_tax_policy(ingested)))
     assert len(taxes) == 60
-    assert set(taxes) == {PURCHASE_PRICE * TAX_MILLS / 1000 / 12}
+    year1 = PURCHASE_PRICE * TAX_MILLS / 1000 / 12  # the reassessed tax, unchanged in year 1
+    for year in range(5):
+        months = taxes[12 * year:12 * year + 12]
+        assert months == pytest.approx([year1 * 1.03**year] * 12, abs=0.01), year
+    # Year over year 3%, exactly once: never stacked on the reassessment.
+    assert taxes[12] / taxes[0] == pytest.approx(1.03, abs=1e-6)
+    assert taxes[48] / taxes[36] == pytest.approx(1.03, abs=1e-6)
+
+
+def test_real_estate_tax_growth_override_to_zero_holds_taxes_flat(ingested):
+    resolved = resolve_assumptions(ingested, overrides={"opex.real_estate_taxes.growth": 0})
+    entry = _entries(resolved)["opex.real_estate_taxes.growth"]
+    assert (entry["source"], entry["value"], entry["default_value"]) == ("analyst", 0.0, 0.03)
+    assert set(_taxes(run_underwriting(_with_tax_policy(resolved)))) == {PURCHASE_PRICE * TAX_MILLS / 1000 / 12}
 
 
 def test_analyst_tax_growth_is_kept_on_the_reassessed_row(ingested):
@@ -457,10 +483,6 @@ def test_duplicate_line_names_get_distinct_slugs():
 # ── 8. end to end ────────────────────────────────────────────────────────
 
 
-def _year5_opex(results):
-    return sum(row["total_opex"] for row in results["opex"]["totals_by_month"][48:60])
-
-
 def test_ingest_and_run_underwriting_grows_opex_by_category(ingested):
     deal = _with_tax_policy(ingested)
     assert validate_deal(deal).status == "PASS"
@@ -476,10 +498,129 @@ def test_ingest_and_run_underwriting_grows_opex_by_category(ingested):
         by_category.setdefault(row["category"], []).append(row["expense"])
     assert by_category["Payroll"][48] == pytest.approx(810_000 / 12 * 1.035**4, abs=0.01)
     assert by_category["Insurance"][48] == pytest.approx(252_000 / 12 * 1.05**4, abs=0.01)
-    assert by_category["Real Estate Taxes"][48] == by_category["Real Estate Taxes"][0]
-    assert _year5_opex(before) == pytest.approx(3_087_000.0, abs=1)
-    # Year 5 (months 49-60) is four growth steps from the T12 run rate.
-    expected = sum(row["base_value"] * (1 + row.get("growth_rate", 0.0)) ** 4 for row in deal["opex_table"])
-    assert expected == pytest.approx(3_414_035.8, abs=1)
-    assert _year5_opex(after) == pytest.approx(expected, abs=1)
+    # Taxes: the reassessed year-1 amount, then the house 3% from year 2.
+    assert by_category["Real Estate Taxes"][48] == pytest.approx(by_category["Real Estate Taxes"][0] * 1.03**4)
+    # Year 5 (months 49-60) of every dollar line is four growth steps from its year-1 amount.
+    fixed = [row for row in deal["opex_table"] if row["calculation_type"] == "fixed_annual"]
+    year1 = {name: sum(values[:12]) for name, values in by_category.items()}
+    expected = sum(year1[row["category_name"]] * (1 + row.get("growth_rate", 0.0)) ** 4 for row in fixed)
+    actual = sum(sum(by_category[row["category_name"]][48:60]) for row in fixed)
+    assert actual == pytest.approx(expected, abs=1)
+    assert sum(sum(r["expense"] for r in before["opex"]["by_category_by_month"]
+                   if r["category"] == row["category_name"] and r["month"] >= "2030-08")
+               for row in fixed) == pytest.approx(sum(year1[row["category_name"]] for row in fixed), abs=1)
     assert after["metrics"]["noi"]["year_1_noi"] == before["metrics"]["noi"]["year_1_noi"]
+
+
+# ── 9. opex base overrides, suppressions and the management fee ─────────
+
+
+def test_base_override_is_annual_dollars_written_in_the_row_calculation_type(minimal_deal_inputs):
+    resolved = resolve_assumptions(minimal_deal_inputs, overrides={
+        "opex.r_m.base": {"value": 90_000, "note": "bid"},  # per_unit row, 100 units
+        "opex.utilities.base": 120_000,  # per_unit_monthly row
+        "opex.management_fee.base": 0.035,  # percent_egr: the percent
+    })
+    entries = _entries(resolved)
+
+    assert _row(resolved, "R&M")["base_value"] == 900.0
+    assert _row(resolved, "Utilities")["base_value"] == pytest.approx(100.0)
+    assert _row(resolved, "Management Fee")["base_value"] == 0.035
+    base = entries["opex.r_m.base"]
+    assert (base["source"], base["value"], base["override"]) == ("analyst", 90_000, {"value": 90_000, "note": "bid"})
+    assert base["detail"]["per_unit_annual"] == 900.0
+    # The v1 R&M key follows the line it reads.
+    assert entries["r_and_m_per_unit"]["value"] == 900.0
+    assert resolve_assumptions(resolved) == resolved
+
+
+def test_ingested_management_fee_is_a_percent_of_t12_egi(ingested):
+    row = _row(ingested, "Property Management Fee")
+    entry = _entries(ingested)["opex.property_management_fee.base"]
+
+    assert (row["calculation_type"], row["base_value"]) == ("percent_egr", round(180_000 / 6_381_000, 6))
+    assert entry["source"] == "deal:t12" and entry["review_required"] is False
+    assert entry["unit"] == "decimal_of_egr"
+    assert entry["detail"]["t12_annual_amount"] == 180_000.0
+    assert entry["detail"]["t12_egi"] == 6_381_000.0
+    assert "$180,000.00" in entry["basis"] and "$6,381,000.00" in entry["basis"]
+    # The T12 snapshot keeps the dollar line.
+    assert ingested["metadata"]["ingest_gate"]["evidence"]["t12"]["opex_lines"]["Property Management Fee"][
+        "annual_amount"] == 180_000.0
+
+
+def test_management_fee_falls_back_to_the_house_percent_without_egi(ingested):
+    deal = copy.deepcopy(ingested)
+    deal.pop("assumptions")
+    deal["metadata"]["ingest_gate"].pop("t12_reconciliation")
+    _row(deal, "Property Management Fee").update(calculation_type="fixed_annual", base_value=180_000.0)
+    resolved = resolve_assumptions(deal)
+    entry = _entries(resolved)["opex.property_management_fee.base"]
+
+    assert _row(resolved, "Property Management Fee")["base_value"] == float(house.DEFAULT_MANAGEMENT_FEE_PCT_EGR)
+    assert (entry["source"], entry["review_required"]) == ("house:management_fee_pct_egr", True)
+    assert entry["detail"]["t12_annual_amount"] == 180_000.0
+
+
+def test_analyst_dollar_management_fee_is_not_converted(ingested):
+    deal = copy.deepcopy(ingested)
+    _row(deal, "Property Management Fee").update(calculation_type="fixed_annual", base_value=200_000.0)
+    resolved = resolve_assumptions(deal)
+    assert _row(resolved, "Property Management Fee")["calculation_type"] == "fixed_annual"
+    assert _entries(resolved)["opex.property_management_fee.base"]["source"] == "analyst"
+
+
+def _no_insurance(tmp_path):
+    return _ingest(t12=_t12_without(tmp_path, {"Property Insurance"}), year_built=1984)
+
+
+def test_zero_override_suppresses_a_house_line_and_null_restores_it(tmp_path):
+    deal = _no_insurance(tmp_path)
+    assert _entries(deal)["opex.insurance.base"]["source"] == "house:year1_insurance_floor"
+
+    suppressed = resolve_assumptions(deal, overrides={"opex.insurance.base": {"value": 0, "note": "self-insured"}})
+    rows = [r for r in suppressed["opex_table"] if r["category_name"] == "Insurance"]
+    assert len(rows) == 1 and rows[0]["base_value"] == 0.0  # zeroed, never re-added
+    entry = _entries(suppressed)["opex.insurance.base"]
+    assert entry["source"] == "analyst" and entry["value"] == 0
+    assert "Suppressed by the analyst" in entry["basis"]
+    assert _entries(suppressed)["insurance_per_unit"]["value"] == 0.0
+    assert resolve_assumptions(suppressed) == suppressed
+
+    restored = resolve_assumptions(suppressed, overrides={"opex.insurance.base": None})
+    assert _row(restored, "Insurance")["base_value"] == 600.0
+    entries = _entries(restored)
+    assert entries["opex.insurance.base"]["source"] == "house:year1_insurance_floor"
+    assert entries["opex.insurance.base"]["override"] is None
+    assert entries["insurance_per_unit"]["source"] == "house:year1_insurance_floor"
+    assert entries["insurance_per_unit"]["override"] is None
+    assert {k: v for k, v in restored.items() if k != "assumptions"} == {
+        k: v for k, v in deal.items() if k != "assumptions"
+    }
+
+
+def test_explicitly_deleted_t12_line_stays_deleted(ingested):
+    deal = copy.deepcopy(ingested)
+    deal["opex_table"] = [r for r in deal["opex_table"] if r["category_name"] != "Insurance"]
+    resolved = resolve_assumptions(deal)
+
+    rows = [r for r in resolved["opex_table"] if "insurance" in r["category_name"].lower()]
+    assert len(rows) == 1 and rows[0]["base_value"] == 0.0  # no house Insurance line re-added
+    entries = _entries(resolved)
+    assert entries["opex.insurance.base"]["source"] == "analyst"
+    assert "deleted from the opex_table" in entries["opex.insurance.base"]["override"]["note"]
+    assert entries["insurance_per_unit"]["source"] == "analyst"
+    assert entries["insurance_per_unit"]["value"] == 0.0
+    assert resolve_assumptions(resolved) == resolved
+
+
+def test_re_added_house_line_is_never_labelled_analyst(ingested):
+    deal = copy.deepcopy(ingested)
+    deal.pop("assumptions")  # no record of the line: the house default fills the gap
+    deal["opex_table"] = [r for r in deal["opex_table"] if r["category_name"] != "Property Management Fee"]
+    resolved = resolve_assumptions(deal)
+    entry = _entries(resolved)["opex.property_management_fee.base"]
+
+    assert entry["source"] == "house:management_fee_pct_egr"
+    assert entry["override"] is None and entry["review_required"] is True
+    assert resolve_assumptions(resolved) == resolved
