@@ -11,7 +11,8 @@ to run_underwriting() or generate_rediq_workbook.py --from-json.
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal
+from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -176,6 +177,69 @@ def promote_property_tax_evidence(
 # Sentinel: ``build_deal_from_documents(market=...)`` uses the default registry.
 DEFAULT_MARKET: Any = object()
 
+ANALYST_PROPERTY_TAX_SOURCE = "analyst"
+DEFAULT_PROPERTY_TAX_SOURCE_LOCATOR = "analyst_input:property_tax_millage"
+# OM intake flags an analyst millage settles.
+_PROPERTY_TAX_INTAKE_FLAGS = frozenset(
+    {
+        "missing_property_tax_millage",
+        "conflicting_property_tax_millage",
+        "conflicting_property_tax_assessment_ratio",
+    }
+)
+
+
+def analyst_property_tax_policy(
+    millage_mills: object,
+    assessment_ratio: object = None,
+    *,
+    source_locator: str = DEFAULT_PROPERTY_TAX_SOURCE_LOCATOR,
+) -> dict[str, Any]:
+    """``metadata.property_summary.property_tax_policy`` from an analyst millage.
+
+    ``millage_mills`` is the combined millage in mills per $1,000 of assessed
+    value. ``assessment_ratio`` defaults to 1.00; any other ratio is recorded
+    as an analyst override, as ``engine.property_tax`` requires. Raises
+    ``PropertyTaxPolicyError`` (a ``ValueError``) for an unusable value.
+    """
+    ratio = Decimal("1.00") if assessment_ratio is None else assessment_ratio
+    try:
+        is_override = Decimal(str(ratio).strip()) != Decimal("1.00")
+    except (InvalidOperation, ValueError):
+        is_override = False  # build_property_tax_policy reports the bad ratio
+    return build_property_tax_policy(
+        millage_rate=millage_mills,
+        unit="mills",
+        source=ANALYST_PROPERTY_TAX_SOURCE,
+        source_locator=source_locator,
+        assessment_ratio=ratio,
+        analyst_override=is_override,
+    )
+
+
+def apply_analyst_property_tax_policy(deal: dict[str, Any], policy: Mapping[str, Any]) -> dict[str, Any]:
+    """Set an analyst property-tax policy on ``deal`` (mutates and returns it).
+
+    The analyst value settles any OM tax evidence: the OM candidates stay in
+    ``property_summary`` as evidence and the OM millage intake flags are
+    dropped.
+    """
+    metadata = deal.setdefault("metadata", {})
+    summary = metadata.get("property_summary")
+    if not isinstance(summary, dict):
+        summary = {}
+        metadata["property_summary"] = summary
+    summary["property_tax_policy"] = dict(policy)
+    flags = [
+        flag for flag in metadata.get("intake_sanity_flags") or []
+        if flag not in _PROPERTY_TAX_INTAKE_FLAGS
+    ]
+    if flags:
+        metadata["intake_sanity_flags"] = flags
+    else:
+        metadata.pop("intake_sanity_flags", None)
+    return deal
+
 
 def build_deal_from_documents(
     property_id: str,
@@ -213,8 +277,14 @@ def build_deal_from_documents(
     msa: str | Mapping[str, Any] | None = None,
     submarket: str | Mapping[str, Any] | None = None,
     metro_slug: str | None = None,
+    asset_class: str | None = None,
+    star_tier: str | None = None,
     assumption_overrides: Mapping[str, Any] | None = None,
     market: Any = DEFAULT_MARKET,
+    # Property tax (engine/property_tax.py)
+    property_tax_millage: float | None = None,
+    property_tax_assessment_ratio: float | None = None,
+    property_tax_source_locator: str = DEFAULT_PROPERTY_TAX_SOURCE_LOCATOR,
 ) -> dict[str, Any]:
     """Build a canonical deal JSON from a rent roll, T12, and optional OM.
 
@@ -273,6 +343,9 @@ def build_deal_from_documents(
         msa: MSA name, five-digit CBSA code, or a ``deal_profile.msa`` mapping.
         submarket: Submarket name or a ``deal_profile.submarket`` mapping.
         metro_slug: Metro slug used by market-data providers.
+        asset_class: ``deal_profile.asset_class`` (``A``, ``B`` or ``C``).
+        star_tier: ``deal_profile.star_tier`` (``1_2``, ``3`` or ``4_5``); it
+            is part of the geography market-data providers are asked for.
         assumption_overrides: ``{key: value | {"value": ..., "note": ...}}``
             analyst overrides applied by the assumption resolver. They win over
             the explicit kwargs above for the same key.
@@ -281,6 +354,17 @@ def build_deal_from_documents(
             ``engine.market_data.default_registry()``; ``None`` uses no market
             data. Missing feeder data falls through to deal evidence and house
             policy.
+        property_tax_millage: Combined property-tax millage in mills per
+            $1,000 of assessed value. Builds
+            ``metadata.property_summary.property_tax_policy`` with source
+            ``analyst`` and ``property_tax_source_locator``; it wins over OM
+            tax evidence. A priced deal (``purchase_price``) needs it: the
+            validator reports ``PROPERTY_TAX_MILLAGE_MISSING`` without it.
+        property_tax_assessment_ratio: Assessed value / purchase price
+            (default 1.00). A ratio other than 1.00 is recorded as an analyst
+            override. Requires ``property_tax_millage``.
+        property_tax_source_locator: Stable provenance of the analyst millage
+            (e.g. ``cli:--millage``).
 
     Returns:
         Canonical deal inputs dict (schema_version 0.1) with ``deal_profile``
@@ -292,6 +376,15 @@ def build_deal_from_documents(
         a BLOCKED gate fails validation, assumed defaults only warn.
     """
     check_deal_type(deal_type)
+    analyst_tax_policy = None
+    if property_tax_millage is not None:
+        analyst_tax_policy = analyst_property_tax_policy(
+            property_tax_millage,
+            property_tax_assessment_ratio,
+            source_locator=property_tax_source_locator,
+        )
+    elif property_tax_assessment_ratio is not None:
+        raise ValueError("property_tax_assessment_ratio requires property_tax_millage")
     from engine.modules.time_grid import TimeGrid
     from engine.ingest.t12_parser import parse_t12_statement
     from engine.ingest.rent_roll_parser import parse_rent_roll
@@ -496,6 +589,9 @@ def build_deal_from_documents(
                 "om_extraction_unavailable"
             )
 
+    if analyst_tax_policy is not None:
+        apply_analyst_property_tax_policy(deal, analyst_tax_policy)
+
     # Explicit rate inputs are analyst overrides; omitted ones stay as
     # placeholders the assumption resolver fills with disclosed defaults.
     overrides: dict[str, Any] = {}
@@ -580,6 +676,8 @@ def build_deal_from_documents(
         metro_slug=metro_slug,
         year_built=resolved_year_built,
     )
+    if asset_class is not None or star_tier is not None:
+        profile = replace(profile, asset_class=asset_class, star_tier=star_tier)
     if market is DEFAULT_MARKET:
         from engine.market_data import default_registry
 

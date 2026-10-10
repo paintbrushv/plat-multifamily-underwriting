@@ -16,7 +16,13 @@ Usage:
       --t12 data/t12.xlsx \\
       --start 2026-05 --end 2031-04 \\
       --purchase-price 25000000 --ltv 0.75 --rate 0.065 --amort 30 \\
-      --exit-cap 0.055 --sponsor-pct 0.10 --pref-return 0.08
+      --exit-cap 0.055 --sponsor-pct 0.10 --pref-return 0.08 \\
+      --millage 22.5 --assessment-ratio 0.8
+
+    A purchase price makes the property-tax millage required: the engine taxes
+    price x assessment ratio x mills / 1000, so validation reports
+    PROPERTY_TAX_MILLAGE_MISSING until --millage (or OM tax evidence, or a
+    --partial-json property_tax_policy) supplies it.
 
     # With OM parsing (extracts purchase price, exit cap from PDF):
     python runs/ingest_deal.py \\
@@ -48,8 +54,9 @@ Manual / terminal-assisted workflows:
 
 Assumption layer (ADR 0003):
     # Value-add profile with geography and analyst assumption overrides:
-    python runs/ingest_deal.py ... --deal-type value_add \
+    python runs/ingest_deal.py ... --deal-type value_add --year-built 1984 \
       --msa "Synthetic Metro" --metro-slug synthetic_metro --submarket "Synthetic North" \
+      --star-tier 3 --asset-class B \
       --assumption-overrides data/assumption_overrides.json
 
     The overrides file is a JSON object {key: value | {"value": v, "note": "..."}}
@@ -87,6 +94,7 @@ from engine.assumptions import (
     overrides_from_patch,
     resolve_assumptions,
 )
+from engine.assumptions.profile import ASSET_CLASSES, STAR_TIERS
 from engine.assumptions.sheet import (
     has_assumptions,
     load_assumption_overrides,
@@ -95,9 +103,12 @@ from engine.assumptions.sheet import (
 )
 from engine.ingest.broker_om_snapshot import stable_property_tax_source_locator
 from engine.ingest.ingestion_pipeline import (
+    analyst_property_tax_policy,
+    apply_analyst_property_tax_policy,
     build_deal_from_documents,
     sync_ingest_gate_assumptions,
 )
+from engine.validator import PROPERTY_TAX_MILLAGE_MISSING
 
 PARTIAL_JSON_OVERRIDE_NOTE = "supplied by --partial-json"
 
@@ -164,21 +175,50 @@ def apply_partial_and_reresolve(base_deal: dict, partial: dict, *, market: objec
     return sync_ingest_gate_assumptions(resolved)
 
 
-def _profile_from_args(args: argparse.Namespace, *, year_built: int | None = None) -> DealProfile:
-    return DealProfile.from_inputs(
-        deal_type=args.deal_type or "stabilized",
+_PROFILE_FLAGS = ("deal_type", "msa", "submarket", "metro_slug", "year_built", "asset_class", "star_tier")
+MILLAGE_SOURCE_LOCATOR = "cli:--millage"
+MILLAGE_AND_RATIO_SOURCE_LOCATOR = "cli:--millage,--assessment-ratio"
+
+
+def _profile_from_args(
+    args: argparse.Namespace, *, base: object = None
+) -> DealProfile:
+    """The deal profile the flags describe, merged over ``base`` (an existing
+    ``deal_profile``) field by field: a flag wins, an omitted flag keeps the base."""
+    base = base if isinstance(base, dict) else {}
+    flags = DealProfile.from_inputs(
+        deal_type=args.deal_type or base.get("deal_type") or "stabilized",
         msa=args.msa,
         submarket=args.submarket,
         metro_slug=args.metro_slug,
-        year_built=year_built,
+    )
+    msa = {**(base.get("msa") or {}), **(flags.msa or {})}
+    submarket = {**(base.get("submarket") or {}), **(flags.submarket or {})}
+    return DealProfile(
+        deal_type=flags.deal_type,
+        msa=msa or None,
+        submarket=submarket or None,
+        year_built=args.year_built if args.year_built is not None else base.get("year_built"),
+        asset_class=args.asset_class or base.get("asset_class"),
+        star_tier=args.star_tier or base.get("star_tier"),
     )
 
 
 def _profile_flags_given(args: argparse.Namespace) -> bool:
-    return any(
-        value is not None
-        for value in (args.deal_type, args.msa, args.submarket, args.metro_slug)
-    )
+    return any(getattr(args, name) is not None for name in _PROFILE_FLAGS)
+
+
+def _property_tax_policy_from_args(args: argparse.Namespace) -> dict | None:
+    """``property_tax_policy`` from --millage/--assessment-ratio, or None.
+
+    Raises ValueError for --assessment-ratio without --millage or an unusable value.
+    """
+    if args.millage is None:
+        if args.assessment_ratio is not None:
+            raise ValueError("--assessment-ratio requires --millage")
+        return None
+    locator = MILLAGE_SOURCE_LOCATOR if args.assessment_ratio is None else MILLAGE_AND_RATIO_SOURCE_LOCATOR
+    return analyst_property_tax_policy(args.millage, args.assessment_ratio, source_locator=locator)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -218,8 +258,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Collection loss rate. If omitted, a house default is used (the vintage "
                         "framework floor when the year built is known) and flagged for review.")
     p.add_argument("--year-built", type=int, default=None,
-                   help="Subject year built. Drives the house vintage default for an omitted "
-                        "--collection-loss; otherwise an OM-extracted year built is used.")
+                   help="Subject year built (deal_profile.year_built). Drives the house vintage "
+                        "defaults; otherwise an OM-extracted year built is used.")
     p.add_argument("--scan-sidecar-workbooks", action="store_true",
                    help="Read sibling workbooks in the rent roll's folder (e.g. a Box Score) for "
                         "bed/bath labels. Off by default.")
@@ -242,6 +282,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Interest-only months (default 0)")
     p.add_argument("--term-months", type=int, default=None,
                    help="Loan term in months (default: analysis duration)")
+
+    # Property tax (engine/property_tax.py)
+    p.add_argument("--millage", type=float, default=None, metavar="MILLS",
+                   help="Combined property-tax millage in mills per $1,000 of assessed value "
+                        "(e.g. 22.5). Writes metadata.property_summary.property_tax_policy "
+                        "(source analyst). A priced deal fails validation without it "
+                        "(PROPERTY_TAX_MILLAGE_MISSING).")
+    p.add_argument("--assessment-ratio", type=float, default=None, metavar="RATIO",
+                   help="Assessed value / purchase price for the property tax (default 1.00; "
+                        "any other value is recorded as an analyst override). Requires --millage.")
 
     # Exit assumptions
     p.add_argument("--exit-cap", type=float, default=None,
@@ -274,6 +324,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Submarket name (deal_profile.submarket)")
     p.add_argument("--metro-slug", default=None,
                    help="Metro slug used by market-data providers (deal_profile.msa.metro_slug)")
+    p.add_argument("--star-tier", default=None, choices=list(STAR_TIERS),
+                   help="CoStar-style star tier (deal_profile.star_tier); part of the market-data geography")
+    p.add_argument("--asset-class", default=None, choices=list(ASSET_CLASSES),
+                   help="Asset class (deal_profile.asset_class)")
     p.add_argument("--no-market-data", action="store_true",
                    help="Resolve assumptions without market data. By default the market-data "
                         "registry (engine.market_data.default_registry) is used; missing feeder "
@@ -297,6 +351,12 @@ def main() -> int:
 
     if args.canonical_json and args.partial_json:
         print("Error: --canonical-json cannot be combined with --partial-json.", file=sys.stderr)
+        return 2
+
+    try:
+        analyst_tax_policy = _property_tax_policy_from_args(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 2
 
     if args.no_market_data:
@@ -356,11 +416,17 @@ def main() -> int:
         t12_path = None
         om_path_resolved = None
         om_source_locator = None
+        if analyst_tax_policy is not None:
+            apply_analyst_property_tax_policy(result, analyst_tax_policy)
         if assumption_overrides is not None or _profile_flags_given(args):
             try:
                 result = resolve_assumptions(
                     result,
-                    deal_profile=_profile_from_args(args) if _profile_flags_given(args) else None,
+                    deal_profile=(
+                        _profile_from_args(args, base=result.get("deal_profile"))
+                        if _profile_flags_given(args)
+                        else None
+                    ),
                     overrides=assumption_overrides,
                     market=market,
                 )
@@ -463,8 +529,15 @@ def main() -> int:
             msa=args.msa,
             submarket=args.submarket,
             metro_slug=args.metro_slug,
+            asset_class=args.asset_class,
+            star_tier=args.star_tier,
             assumption_overrides=assumption_overrides,
             market=market,
+            property_tax_millage=args.millage,
+            property_tax_assessment_ratio=args.assessment_ratio,
+            property_tax_source_locator=(
+                analyst_tax_policy["source_locator"] if analyst_tax_policy else MILLAGE_SOURCE_LOCATOR
+            ),
         )
         if partial_payload is not None:
             try:
@@ -580,6 +653,8 @@ def main() -> int:
             print(f"\n  Validation: FAIL ({len(errors)} errors, {len(warnings)} warnings)")
             for e in errors[:10]:
                 print(f"    ERROR [{e.code}] {e.path}: {e.message}")
+            if any(e.code == PROPERTY_TAX_MILLAGE_MISSING for e in errors):
+                print("    Fix: pass --millage <combined mills per $1,000> [--assessment-ratio R]")
 
     return 0
 
