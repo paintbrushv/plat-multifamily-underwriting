@@ -33,6 +33,13 @@ The result discloses resolved fees, benchmark, tax policy, inferred vintage,
 and the house adjustments actually applied. Defaults are model assumptions,
 not observed property facts or a claim of universal industry practice.
 
+Floors compare annual dollars: opex lines are annualized from their
+`calculation_type` first, and a floor replaces the analyst's matching line
+rather than being added beside it. Concessions are read as `pct_rent` or
+`free_months` (months / 12); any other concession type, or a percent-of-revenue
+opex line that a floor must read, refuses. Every analyst input the policy
+replaced is listed in `policy_overrides` with its original and applied value.
+
 All fields in `DEFAULTS`, plus `year_built` and `exit_cap_rate`, can be explicitly
 overridden. Unknown keys, unsupported versions, non-finite values, invalid
 dates, invalid iteration limits, and sub-cent price bounds refuse before
