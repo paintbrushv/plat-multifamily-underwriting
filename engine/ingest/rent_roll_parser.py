@@ -560,32 +560,18 @@ def _select_tabular_sheet(sheets: dict[str, Any]) -> tuple[str, Any]:
     """Pick the most likely rent-roll sheet from a pandas sheet mapping."""
     if not sheets:
         raise ValueError("Excel workbook contains no sheets")
-    if len(sheets) == 1:
-        return next(iter(sheets.items()))
-
-    def _name_matches(name: str, hints: tuple[str, ...]) -> bool:
-        n = name.lower()
-        return any(h in n for h in hints)
-
-    detail_candidates = [
-        (name, frame)
-        for name, frame in sheets.items()
-        if _name_matches(name, _DETAIL_SHEET_NAME_HINTS)
-    ]
-    if detail_candidates:
-        detail_candidates.sort(key=lambda pair: -len(pair[1].index))
-        return detail_candidates[0]
-
-    non_summary = [
-        (name, frame)
-        for name, frame in sheets.items()
-        if not _name_matches(name, _SUMMARY_SHEET_NAME_HINTS)
-    ]
-    if non_summary:
-        non_summary.sort(key=lambda pair: -len(pair[1].index))
-        return non_summary[0]
-
-    return next(iter(sheets.items()))
+    names = list(sheets)
+    idx = _rank_sheets(
+        [
+            (
+                name,
+                [tuple(row) for row in sheets[name].head(15).itertuples(index=False, name=None)],
+                len(sheets[name].index),
+            )
+            for name in names
+        ]
+    )
+    return names[idx], sheets[names[idx]]
 
 
 def _parse_excel_rows(all_rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
@@ -697,6 +683,11 @@ _DETAIL_SHEET_NAME_HINTS = (
     "report1",
     "report",
 )
+_PARAMETER_SHEET_NAME_HINTS = (
+    "parameter",
+    "criteria",
+    "filter",
+)
 _SUMMARY_SHEET_NAME_HINTS = (
     "floor plan",
     "floorplan",
@@ -710,36 +701,77 @@ _SUMMARY_SHEET_NAME_HINTS = (
 
 
 def _select_sheet(wb: Any) -> Any:
-    """Pick the sheet most likely to contain unit-level rent roll rows.
+    """Pick the sheet most likely to contain unit-level rent roll rows."""
+    sheets = list(wb.worksheets)
+    if not sheets:
+        raise ValueError("Excel workbook contains no sheets")
+    idx = _rank_sheets(
+        [
+            (sheet.title, list(sheet.iter_rows(values_only=True, max_row=15)), sheet.max_row or 0)
+            for sheet in sheets
+        ]
+    )
+    return sheets[idx]
+
+
+def _rank_sheets(sheets: list[tuple[str, list[tuple], int]]) -> int:
+    """Return the index of the unit-detail sheet among (name, first rows, row count).
 
     Rule:
-      1. If a sheet name matches a `_DETAIL_SHEET_NAME_HINTS` token
-         (case-insensitive substring), it's a candidate.
-      2. Among candidates, pick the one with the most rows. Ties: first
-         in workbook order.
-      3. If no candidate matches by name, exclude sheets matching
-         `_SUMMARY_SHEET_NAME_HINTS` and pick the largest of what remains.
-      4. Last resort: workbook's active sheet.
+      1. Never pick a sheet whose name matches `_PARAMETER_SHEET_NAME_HINTS`
+         (report parameters / criteria / filters). Entrata "Rent Roll 4.0"
+         exports pair the unit detail tab with a "Report Parameters" tab.
+      2. Drop `_SUMMARY_SHEET_NAME_HINTS` sheets unless nothing else is left.
+      3. Prefer a sheet with a recognizable header row, then a sheet whose
+         name matches `_DETAIL_SHEET_NAME_HINTS`, then the higher header
+         score, then the most rows. Ties: first in workbook order.
     """
-    sheets = list(wb.worksheets)
-    if len(sheets) == 1:
-        return sheets[0]
 
     def _name_matches(name: str, hints: tuple[str, ...]) -> bool:
         n = name.lower()
         return any(h in n for h in hints)
 
-    detail_candidates = [s for s in sheets if _name_matches(s.title, _DETAIL_SHEET_NAME_HINTS)]
-    if detail_candidates:
-        detail_candidates.sort(key=lambda s: -(s.max_row or 0))
-        return detail_candidates[0]
+    candidates = [
+        i for i, (name, _, _) in enumerate(sheets)
+        if not _name_matches(name, _PARAMETER_SHEET_NAME_HINTS)
+    ]
+    if not candidates:
+        raise ValueError(
+            "Workbook has only report-parameter sheets; no unit-detail sheet found: "
+            + ", ".join(name for name, _, _ in sheets)
+        )
+    non_summary = [i for i in candidates if not _name_matches(sheets[i][0], _SUMMARY_SHEET_NAME_HINTS)]
+    candidates = non_summary or candidates
 
-    non_summary = [s for s in sheets if not _name_matches(s.title, _SUMMARY_SHEET_NAME_HINTS)]
-    if non_summary:
-        non_summary.sort(key=lambda s: -(s.max_row or 0))
-        return non_summary[0]
+    def _key(i: int) -> tuple[bool, bool, int, int, int]:
+        name, rows, row_count = sheets[i]
+        score = max((_header_score(row) for row in rows), default=0)
+        return (score > 0, _name_matches(name, _DETAIL_SHEET_NAME_HINTS), score, row_count, -i)
 
-    return wb.active
+    return max(candidates, key=_key)
+
+
+def _header_score(row: tuple) -> int:
+    """Number of DISTINCT canonical column names in a candidate header row.
+
+    Counting distinct prevents rows with many duplicate cells (e.g. RedIQ's
+    row 7 "Status, Status, Rent, Rent, Rent...") from beating a cleaner row
+    whose every cell is a unique machine-readable header (e.g. RedIQ's row 8
+    'UnitID, PlanID, NetSF, UnitType, MktRent').
+    """
+    if not row:
+        return 0
+    canonical_lookup = {
+        c.strip().lower() for cands in _CANONICAL_COLUMNS.values() for c in cands
+    }
+    matched: set[str] = set()
+    for cell in row:
+        if cell is None:
+            continue
+        token = str(cell).strip().lower()
+        if token and token in canonical_lookup:
+            matched.add(token)
+    return len(matched)
 
 
 def _find_header_row(all_rows: list[tuple]) -> tuple[int, list[str]]:
@@ -750,11 +782,6 @@ def _find_header_row(all_rows: list[tuple]) -> tuple[int, list[str]]:
     row index with the highest score (tie-break: earliest row); falls
     back to row 0 if no row scores > 0.
     """
-    canonical_lookup: set[str] = set()
-    for cands in _CANONICAL_COLUMNS.values():
-        for c in cands:
-            canonical_lookup.add(c.strip().lower())
-
     best_idx = 0
     best_score = 0
     scan_limit = min(len(all_rows), 15)
@@ -762,19 +789,7 @@ def _find_header_row(all_rows: list[tuple]) -> tuple[int, list[str]]:
         row = all_rows[i]
         if not row:
             continue
-        # Score = number of DISTINCT canonical headers matched. Counting
-        # distinct prevents rows with many duplicate cells (e.g. RedIQ's
-        # row 7 "Status, Status, Rent, Rent, Rent...") from beating a
-        # cleaner row whose every cell is a unique machine-readable header
-        # (e.g. RedIQ's row 8 'UnitID, PlanID, NetSF, UnitType, MktRent').
-        matched: set[str] = set()
-        for cell in row:
-            if cell is None:
-                continue
-            token = str(cell).strip().lower()
-            if token and token in canonical_lookup:
-                matched.add(token)
-        score = len(matched)
+        score = _header_score(row)
         if score > best_score:
             best_score = score
             best_idx = i
