@@ -11,6 +11,8 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 from jsonschema.validators import extend
 
+from engine.assumptions.profile import SUPPORTED_DEAL_TYPES, unsupported_deal_type_message
+from engine.assumptions.registry import requires_review
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, month_id, parse_month
 from engine.property_tax import (
@@ -559,6 +561,47 @@ def _check_ingest_gate(inputs: Dict[str, Any]) -> List[ValidationIssue]:
         )
         for blocker in blockers
     )
+    return issues
+
+
+def _check_assumption_layer(inputs: Dict[str, Any]) -> List[ValidationIssue]:
+    """ADR 0003 §5 gates for the optional deal_profile and assumptions sections.
+
+    An unsupported deal_type is an ERROR. Every assumption entry sourced from a
+    house default or an engine fallback is a WARNING for analyst review; it
+    never blocks.
+    """
+    issues: List[ValidationIssue] = []
+    profile = inputs.get("deal_profile")
+    if isinstance(profile, Mapping):
+        deal_type = profile.get("deal_type")
+        if deal_type not in SUPPORTED_DEAL_TYPES:
+            issues.append(
+                ValidationIssue(
+                    severity="ERROR",
+                    code="DEAL_TYPE_UNSUPPORTED",
+                    message=unsupported_deal_type_message(deal_type),
+                    path="/deal_profile/deal_type",
+                )
+            )
+    assumptions = inputs.get("assumptions")
+    entries = assumptions.get("entries") if isinstance(assumptions, Mapping) else None
+    if isinstance(entries, Mapping):
+        for key in sorted(entries):
+            entry = entries[key]
+            if not isinstance(entry, Mapping):
+                continue
+            source = str(entry.get("source", ""))
+            if not (entry.get("review_required") or requires_review(source)):
+                continue
+            issues.append(
+                ValidationIssue(
+                    severity="WARNING",
+                    code="ASSUMPTION_REVIEW_REQUIRED",
+                    message=f"{key} = {entry.get('value')} ({source}): {entry.get('basis', '')}",
+                    path=f"/assumptions/entries/{key}",
+                )
+            )
     return issues
 
 
@@ -1547,6 +1590,7 @@ def validate_deal(
     issues.extend(_check_program_id_namespace_uniqueness(inputs))
     issues.extend(_check_required_revenue_quality_bridge(inputs))
     issues.extend(_check_ingest_gate(inputs))
+    issues.extend(_check_assumption_layer(inputs))
     issues.extend(_check_renovation_programs(inputs, month_ids))
     issues.extend(_check_growth_bounds(inputs))
     issues.extend(_check_vacancy_bounds(inputs))

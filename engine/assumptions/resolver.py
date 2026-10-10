@@ -1,0 +1,1347 @@
+"""Assumption resolver v1 (ADR 0003, slice 2).
+
+``resolve_assumptions`` gathers every candidate for each assumption key
+(analyst, deal evidence, market, house policy, engine fallback), records them
+with provenance in the canonical ``assumptions`` section, and writes the
+resolved value into the existing canonical field the engine reads.
+
+Slice 2 changes no numbers. Each key resolves to the value ingest and the
+engine produce today. Where the ADR 0003 §3 precedence would pick a different
+candidate, the entry's ``basis`` says so and today's value is kept. Market data
+is recorded as candidates only.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from copy import deepcopy
+from dataclasses import dataclass, field, is_dataclass, asdict
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Callable, Mapping, Optional
+
+from engine import backsolve_policy
+from engine import underwriting_policy as house
+from engine.assumptions.canonical_ops import (
+    concession_pct_rent,
+    ensure_year1_concession_schedule,
+    matching_opex_rows,
+    annual_opex_amount,
+    opex_bucket_for_policy,
+    sum_opex_bucket,
+    sum_units,
+    upsert_annual_opex,
+    upsert_annual_opex_by_match,
+)
+from engine.assumptions.profile import DealProfile, check_deal_type
+from engine.assumptions.registry import (
+    DEAL_PREFIX,
+    HOUSE_BACKSOLVE_POLICY,
+    HOUSE_PREFIX,
+    HOUSE_YEAR1_INSURANCE_FLOOR,
+    MARKET_PREFIX,
+    MODES,
+    RESOLVER_VERSION,
+    SOURCE_ANALYST,
+    SOURCE_DEAL_OM,
+    SOURCE_DEAL_RENT_ROLL,
+    SOURCE_DEAL_T12,
+    SOURCE_ENGINE_FALLBACK,
+    AssumptionEntry,
+    house_vintage_source,
+    market_source,
+    requires_review,
+)
+
+# Engine fallbacks that ingest applied before the assumption layer existed.
+ENGINE_FALLBACK_RENT_GROWTH = 0.03
+ENGINE_FALLBACK_COLLECTION_LOSS = 0.005
+# backsolve's exit cap when neither the analyst nor the canonical supplies one.
+ENGINE_FALLBACK_EXIT_CAP = 0.0625
+# engine/modules/metrics.py defaults when exit_assumptions omits a field.
+ENGINE_DEFAULT_SALE_COST = 0.02
+ENGINE_DEFAULT_EXIT_CAP = 0.05
+
+R_AND_M_ADJUSTMENT_CATEGORY = "Repairs & Maintenance Assumption Adjustment"
+
+# States of a canonical field before resolution.
+PRESENT = "present"          # field carries a value
+PLACEHOLDER = "placeholder"  # field exists with null: the resolver fills it
+ABSENT = "absent"            # section exists, field missing: engine default applies
+NO_SECTION = "no_section"    # containing section missing: not modeled
+NO_FIELD = "no_field"        # no canonical field; the engine does not consume it
+
+_NOTE_PRESENT = "present in the canonical before resolution"
+_NOTE_EDITED = "changed in the canonical after the last resolution"
+
+
+class AssumptionOverrideError(ValueError):
+    """An override names an unknown key or carries an unusable value."""
+
+
+@dataclass
+class _Current:
+    state: str
+    value: Any = None
+    cohort_overrides: Optional[dict[str, float]] = None
+
+
+@dataclass
+class _Choice:
+    source: str
+    value: Any
+    basis: str
+    as_of: Optional[str] = None
+    confidence: Optional[str] = None
+
+
+@dataclass
+class _Context:
+    canonical: dict[str, Any]
+    profile: DealProfile
+    mode: str
+    market: Any
+    year_built: Optional[int]
+    year_built_origin: Optional[str]
+    bucket: Optional[str]
+    ingested: bool
+    evidence: dict[str, Any]
+    units: int
+    start: str
+    end: str
+    om_confidence: Optional[str] = None
+    notes: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def strategy(self) -> str:
+        return self.profile.strategy
+
+
+@dataclass(frozen=True)
+class _Spec:
+    key: str
+    unit: str
+    read: Callable[[_Context], _Current]
+    write: Callable[[_Context, Any, Optional[dict[str, float]]], bool]
+    default: Callable[[_Context, str], _Choice]
+    gather: Callable[[_Context], list[dict[str, Any]]]
+    market_metrics: tuple[str, ...] = ()
+    patch_paths: tuple[tuple[str, ...], ...] = ()
+    adr_rank: Optional[Callable[[str], Optional[int]]] = None
+    cohort: bool = False
+    value_add_only: bool = False
+
+
+# ── small helpers ────────────────────────────────────────────────────────
+
+
+def _num(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _same(a: Any, b: Any) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        if not isinstance(a, (list, tuple)) or not isinstance(b, (list, tuple)) or len(a) != len(b):
+            return False
+        return all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, Mapping) or isinstance(b, Mapping):
+        if not isinstance(a, Mapping) or not isinstance(b, Mapping) or set(a) != set(b):
+            return False
+        return all(_same(a[k], b[k]) for k in a)
+    na, nb = _num(a), _num(b)
+    if na is not None and nb is not None:
+        return math.isclose(na, nb, rel_tol=1e-12, abs_tol=1e-12)
+    return a == b
+
+
+def _fmt(value: Any, unit: str) -> str:
+    number = _num(value)
+    if number is None:
+        return "none" if value is None else str(value)
+    if unit.startswith("decimal"):
+        return f"{number:.2%}"
+    if unit.startswith("usd"):
+        return f"${number:,.2f}"
+    return f"{number:g}"
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if is_dataclass(value) and not isinstance(value, type):
+        return _jsonable(asdict(value))
+    if isinstance(value, Mapping):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _candidate(source: str, value: Any, basis: str, **extra: Any) -> dict[str, Any]:
+    out = {"source": source, "value": _jsonable(value), "basis": basis}
+    out.update({k: _jsonable(v) for k, v in extra.items() if v is not None})
+    return out
+
+
+def _confidence_for(source: str, ctx: _Context) -> Optional[str]:
+    if source == SOURCE_DEAL_OM:
+        return ctx.om_confidence or "medium"
+    if source == SOURCE_ANALYST or source.startswith(DEAL_PREFIX):
+        return "high"
+    if source.startswith(HOUSE_PREFIX):
+        return "medium"
+    if source == SOURCE_ENGINE_FALLBACK:
+        return "low"
+    return None
+
+
+def _house_vintage(
+    ctx: _Context,
+    fn: Callable[..., Optional[Decimal]],
+    label: str,
+    unit: str,
+    *,
+    strategy: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    if ctx.bucket is None:
+        return None
+    strategy = strategy or ctx.strategy
+    value = fn(ctx.year_built, strategy=strategy)
+    if value is None:
+        return None
+    return _candidate(
+        house_vintage_source(ctx.bucket),
+        float(value),
+        f"Year built {ctx.year_built} ({ctx.year_built_origin}) maps to the {ctx.bucket} vintage "
+        f"bucket; house {label} {_fmt(value, unit)} (VINTAGE_FRAMEWORK_2026, {strategy} strategy).",
+    )
+
+
+def _choice_from(candidate: dict[str, Any], ctx: _Context, basis: Optional[str] = None) -> _Choice:
+    return _Choice(
+        source=candidate["source"],
+        value=candidate["value"],
+        basis=basis or candidate.get("basis", ""),
+        as_of=candidate.get("as_of"),
+        confidence=candidate.get("confidence") or _confidence_for(candidate["source"], ctx),
+    )
+
+
+def _fallback(value: Any, basis: str) -> _Choice:
+    return _Choice(SOURCE_ENGINE_FALLBACK, value, basis, confidence="low")
+
+
+def _get_path(data: Any, path: tuple[str, ...]) -> tuple[bool, Any]:
+    node = data
+    for part in path:
+        if not isinstance(node, Mapping) or part not in node:
+            return False, None
+        node = node[part]
+    return True, node
+
+
+# ── canonical readers and writers ────────────────────────────────────────
+
+
+def _scalar_reader(section: str, field_name: str) -> Callable[[_Context], _Current]:
+    def read(ctx: _Context) -> _Current:
+        container = ctx.canonical.get(section)
+        if not isinstance(container, Mapping):
+            return _Current(NO_SECTION)
+        if field_name not in container:
+            return _Current(ABSENT)
+        value = container[field_name]
+        if value is None:
+            return _Current(PLACEHOLDER)
+        return _Current(PRESENT, _num(value) if _num(value) is not None else value)
+
+    return read
+
+
+def _scalar_writer(section: str, field_name: str, *, create: Optional[Callable[[_Context], dict]] = None):
+    def write(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+        container = ctx.canonical.get(section)
+        if not isinstance(container, dict):
+            if create is None:
+                return False
+            container = create(ctx)
+            ctx.canonical[section] = container
+        container[field_name] = value
+        return True
+
+    return write
+
+
+def _read_collection_loss(ctx: _Context) -> _Current:
+    curve = [row for row in ctx.canonical.get("collection_loss_curve") or [] if isinstance(row, Mapping)]
+    if not curve:
+        return _Current(NO_SECTION)
+    rent_rows = [row for row in curve if row.get("applies_to") in ("ALL", "Rent")] or curve
+    first = sorted(rent_rows, key=lambda row: str(row.get("start_period", "")))[0]
+    if first.get("loss_rate") is None:
+        return _Current(PLACEHOLDER)
+    return _Current(PRESENT, _num(first["loss_rate"]))
+
+
+def _write_collection_loss(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    curve = ctx.canonical.get("collection_loss_curve")
+    if not curve:
+        ctx.canonical["collection_loss_curve"] = [
+            {"applies_to": "ALL", "start_period": ctx.start, "end_period": ctx.end, "loss_rate": value}
+        ]
+        return True
+    for row in curve:
+        row["loss_rate"] = value
+    return True
+
+
+def _cohort_units(ctx: _Context) -> dict[str, float]:
+    return {
+        str(c.get("cohort_id")): float(c.get("unit_count") or 0)
+        for c in ctx.canonical.get("unit_cohorts") or []
+        if isinstance(c, Mapping)
+    }
+
+
+def _cohort_reader(table: str, value_key: str) -> Callable[[_Context], _Current]:
+    def read(ctx: _Context) -> _Current:
+        rows = [row for row in ctx.canonical.get(table) or [] if isinstance(row, Mapping)]
+        if not rows:
+            return _Current(NO_SECTION)
+        first_by_cohort: dict[str, Any] = {}
+        for row in sorted(rows, key=lambda r: (str(r.get("cohort_id")), str(r.get("start_period", "")))):
+            first_by_cohort.setdefault(str(row.get("cohort_id")), row.get(value_key))
+        if any(v is None for v in first_by_cohort.values()):
+            return _Current(PLACEHOLDER)
+        units = _cohort_units(ctx)
+        weight: dict[float, float] = {}
+        for cohort_id, rate in first_by_cohort.items():
+            weight[float(rate)] = weight.get(float(rate), 0.0) + units.get(cohort_id, 0.0)
+        # Property-level value: the rate covering the most units (lowest on ties).
+        value = sorted(weight.items(), key=lambda item: (-item[1], item[0]))[0][0]
+        cohorts = {cid: float(rate) for cid, rate in first_by_cohort.items() if not _same(rate, value)}
+        return _Current(PRESENT, value, cohorts or None)
+
+    return read
+
+
+def _cohort_writer(table: str, value_key: str):
+    def write(ctx: _Context, value: Any, cohorts: Optional[dict[str, float]]) -> bool:
+        rows = ctx.canonical.get(table) or []
+        if not rows:
+            return False
+        for row in rows:
+            row[value_key] = (cohorts or {}).get(str(row.get("cohort_id")), value)
+        return True
+
+    return write
+
+
+def _read_concessions(ctx: _Context) -> _Current:
+    schedule = ctx.canonical.get("concession_schedule") or []
+    if not schedule:
+        return _Current(ABSENT)
+    try:
+        rate = max(concession_pct_rent(row) for row in schedule)
+    except ValueError as exc:
+        ctx.notes.setdefault("concessions", []).append(str(exc))
+        return _Current(PRESENT, None)
+    return _Current(PRESENT, float(rate))
+
+
+def _write_concessions(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    if _num(value) is None:
+        return False
+    ensure_year1_concession_schedule(ctx.canonical, rate=Decimal(str(value)))
+    for row in ctx.canonical.get("concession_schedule") or []:
+        row["concession_id"] = "assumption_year1_concessions"
+    return True
+
+
+def _per_unit(ctx: _Context, annual: Decimal) -> Optional[float]:
+    if not ctx.units:
+        return None
+    return float(annual / Decimal(str(ctx.units)))
+
+
+def _read_insurance(ctx: _Context) -> _Current:
+    rows = matching_opex_rows(ctx.canonical, "insurance")
+    if not rows:
+        return _Current(ABSENT)
+    try:
+        return _Current(PRESENT, _per_unit(ctx, annual_opex_amount(ctx.canonical, rows[0])))
+    except ValueError as exc:
+        ctx.notes.setdefault("insurance_per_unit", []).append(str(exc))
+        return _Current(PRESENT, None)
+
+
+def _write_insurance(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    if _num(value) is None or not ctx.units:
+        return False
+    upsert_annual_opex_by_match(
+        ctx.canonical,
+        name_fragment="insurance",
+        fallback_category_name="Insurance",
+        annual_amount=Decimal(str(value)) * Decimal(str(ctx.units)),
+    )
+    return True
+
+
+def _r_and_m_rows(canonical: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [
+        row
+        for row in canonical.get("opex_table") or []
+        if opex_bucket_for_policy(str(row.get("category_name", ""))) == "repairs_maintenance"
+    ]
+
+
+def _read_r_and_m(ctx: _Context) -> _Current:
+    if not _r_and_m_rows(ctx.canonical):
+        return _Current(ABSENT)
+    try:
+        return _Current(PRESENT, _per_unit(ctx, sum_opex_bucket(ctx.canonical, "repairs_maintenance")))
+    except ValueError as exc:
+        ctx.notes.setdefault("r_and_m_per_unit", []).append(str(exc))
+        return _Current(PRESENT, None)
+
+
+def _write_r_and_m(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    """Top the R&M bucket up (or down) to the target with one adjustment line."""
+    if _num(value) is None or not ctx.units:
+        return False
+    adjustment = R_AND_M_ADJUSTMENT_CATEGORY.lower()
+    others = Decimal("0")
+    for row in _r_and_m_rows(ctx.canonical):
+        if str(row.get("category_name", "")).lower() != adjustment:
+            others += annual_opex_amount(ctx.canonical, row)
+    delta = Decimal(str(value)) * Decimal(str(ctx.units)) - others
+    has_adjustment = any(
+        str(row.get("category_name", "")).lower() == adjustment for row in ctx.canonical.get("opex_table") or []
+    )
+    if delta == 0 and not has_adjustment:
+        return True
+    upsert_annual_opex(ctx.canonical, category_name=R_AND_M_ADJUSTMENT_CATEGORY, annual_amount=delta)
+    return True
+
+
+def _read_reserves(ctx: _Context) -> _Current:
+    rows = [row for row in ctx.canonical.get("replacement_reserves") or [] if isinstance(row, Mapping)]
+    if not rows:
+        return _Current(ABSENT)
+    first = sorted(rows, key=lambda r: str(r.get("start_period", "")))[0]
+    if first.get("annual_amount") is None:
+        return _Current(PLACEHOLDER)
+    return _Current(PRESENT, _per_unit(ctx, Decimal(str(first["annual_amount"]))))
+
+
+def _write_reserves(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    if _num(value) is None or not ctx.units:
+        return False
+    ctx.canonical["replacement_reserves"] = [
+        {
+            "start_period": ctx.start,
+            "end_period": ctx.end,
+            "annual_amount": float(Decimal(str(value)) * Decimal(str(ctx.units))),
+        }
+    ]
+    return True
+
+
+def _read_no_field(_ctx: _Context) -> _Current:
+    return _Current(NO_FIELD)
+
+
+def _write_nothing(_ctx: _Context, _value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    return False
+
+
+def _read_purchase_closing(ctx: _Context) -> _Current:
+    purchase = ctx.canonical.get("purchase_assumptions")
+    if not isinstance(purchase, Mapping):
+        return _Current(NO_SECTION)
+    if "closing_costs" not in purchase:
+        return _Current(ABSENT)
+    closing, price = purchase.get("closing_costs"), _num(purchase.get("purchase_price"))
+    if closing is None:
+        return _Current(PLACEHOLDER)
+    if not price:
+        return _Current(PRESENT, None)
+    return _Current(PRESENT, float(Decimal(str(closing)) / Decimal(str(price))))
+
+
+def _write_purchase_closing(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    purchase = ctx.canonical.get("purchase_assumptions")
+    price = _num((purchase or {}).get("purchase_price")) if isinstance(purchase, Mapping) else None
+    if not isinstance(purchase, dict) or not price or _num(value) is None:
+        return False
+    purchase["closing_costs"] = round(float(Decimal(str(value)) * Decimal(str(price))), 2)
+    return True
+
+
+def _new_exit_section(ctx: _Context) -> dict[str, Any]:
+    return {"exit_month": ctx.end}
+
+
+# ── defaults (today's behavior) and candidates per key ───────────────────
+
+
+def _not_modeled(section: str) -> _Choice:
+    return _fallback(None, f"The canonical has no {section}, so the engine does not model this assumption.")
+
+
+def _rent_growth_default(ctx: _Context, state: str) -> _Choice:
+    if state in (ABSENT, NO_SECTION):
+        return _fallback(
+            0.0,
+            "The canonical carries no growth_assumptions.annual_growth_rate; the engine applies no "
+            "market rent growth.",
+        )
+    return _fallback(
+        ENGINE_FALLBACK_RENT_GROWTH,
+        "No market or house rent-growth assumption was available; engine fallback of "
+        f"{ENGINE_FALLBACK_RENT_GROWTH:.2%} annual compound applied.",
+    )
+
+
+def _rent_growth_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    return [
+        _candidate(
+            SOURCE_ENGINE_FALLBACK,
+            ENGINE_FALLBACK_RENT_GROWTH,
+            "Ingest engine fallback (annual compound).",
+        )
+    ]
+
+
+def _t12_rate(ctx: _Context, field_name: str) -> Optional[float]:
+    t12 = ctx.evidence.get("t12") or {}
+    gpr, amount = _num(t12.get("gross_potential_rent")), _num(t12.get(field_name))
+    if not gpr or amount is None:
+        return None
+    return float(Decimal(str(abs(amount))) / Decimal(str(gpr)))
+
+
+def _collection_loss_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    t12_rate = _t12_rate(ctx, "bad_debt")
+    if t12_rate is not None:
+        out.append(_candidate(SOURCE_DEAL_T12, t12_rate, "T12 bad debt / gross potential rent."))
+    house_candidate = _house_vintage(
+        ctx, house.default_collection_loss_rate, "collection-loss floor", "decimal_of_rent"
+    )
+    if house_candidate:
+        out.append(house_candidate)
+    out.append(
+        _candidate(
+            SOURCE_ENGINE_FALLBACK,
+            ENGINE_FALLBACK_COLLECTION_LOSS,
+            "Ingest engine fallback when the year built is unknown.",
+        )
+    )
+    return out
+
+
+def _collection_loss_default(ctx: _Context, state: str) -> _Choice:
+    house_candidate = next(
+        (c for c in _collection_loss_candidates(ctx) if c["source"].startswith(HOUSE_PREFIX)), None
+    )
+    if house_candidate:
+        return _choice_from(house_candidate, ctx)
+    return _fallback(
+        ENGINE_FALLBACK_COLLECTION_LOSS,
+        "Year built unknown, so the house vintage framework could not be applied; engine "
+        f"fallback of {ENGINE_FALLBACK_COLLECTION_LOSS:.2%} applied.",
+    )
+
+
+def _vacancy_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    roll_rate = _num((ctx.evidence.get("rent_roll") or {}).get("physical_vacancy_rate"))
+    if roll_rate is not None:
+        out.append(_candidate(SOURCE_DEAL_RENT_ROLL, roll_rate, "Current physical vacancy from the rent roll."))
+    house_candidate = _house_vintage(
+        ctx, house.default_physical_vacancy_rate, "physical-vacancy floor", "decimal_of_units"
+    )
+    if house_candidate:
+        guardrails = house.revenue_guardrails(ctx.year_built, strategy=ctx.strategy)
+        low, high = guardrails["physical_vacancy_typical_low"], guardrails["physical_vacancy_typical_high"]
+        house_candidate["basis"] += f" Typical stabilized band {float(low):.2%}-{float(high):.2%}."
+        out.append(house_candidate)
+    return out
+
+
+def _vacancy_default(ctx: _Context, state: str) -> _Choice:
+    candidates = _vacancy_candidates(ctx)
+    for prefix in (SOURCE_DEAL_RENT_ROLL, HOUSE_PREFIX):
+        match = next((c for c in candidates if c["source"].startswith(prefix)), None)
+        if match:
+            return _choice_from(match, ctx)
+    return _fallback(None, "No rent-roll evidence and no year built; no vacancy default is available.")
+
+
+def _ltl_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    roll_ltl = _num((ctx.evidence.get("rent_roll") or {}).get("loss_to_lease_rate"))
+    if roll_ltl is not None:
+        out.append(
+            _candidate(SOURCE_DEAL_RENT_ROLL, roll_ltl, "Rent roll market vs in-place rent, unit-weighted.")
+        )
+    house_candidate = _house_vintage(
+        ctx, house.default_loss_to_lease_rate, "loss-to-lease floor", "decimal_of_market_rent"
+    )
+    if house_candidate:
+        out.append(house_candidate)
+    out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "Ingest writes a flat 0% loss to lease."))
+    return out
+
+
+def _ltl_default(ctx: _Context, state: str) -> _Choice:
+    return _fallback(0.0, "Ingest writes a flat 0% loss to lease; market rent and in-place rent carry the gap.")
+
+
+def _concession_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    t12_rate = _t12_rate(ctx, "concessions")
+    if t12_rate is not None:
+        out.append(_candidate(SOURCE_DEAL_T12, t12_rate, "T12 concessions / gross potential rent."))
+    house_candidate = _house_vintage(
+        ctx, house.default_year1_concessions_rate, "year-1 concessions floor", "decimal_of_rent"
+    )
+    if house_candidate:
+        out.append(house_candidate)
+    out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No concession_schedule: the engine applies none."))
+    return out
+
+
+def _concession_default(ctx: _Context, state: str) -> _Choice:
+    return _fallback(0.0, "No concession_schedule: the engine applies no concessions.")
+
+
+def _opex_evidence(ctx: _Context, field_name: str, label: str) -> Optional[dict[str, Any]]:
+    annual = _num((ctx.evidence.get("t12") or {}).get(field_name))
+    if annual is None or not ctx.units:
+        return None
+    return _candidate(
+        SOURCE_DEAL_T12,
+        _per_unit(ctx, Decimal(str(annual))),
+        f"T12 {label} annualized by calculation_type: ${annual:,.2f} / {ctx.units} units.",
+    )
+
+
+def _insurance_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    evidence = _opex_evidence(ctx, "insurance_annual", "insurance")
+    if evidence:
+        out.append(evidence)
+    out.append(
+        _candidate(
+            HOUSE_YEAR1_INSURANCE_FLOOR,
+            float(house.default_year1_insurance_per_unit(None)),
+            "House Year-1 insurance minimum per unit (a guardrail floor; backsolve applies "
+            "max(observed, floor) in pricing).",
+        )
+    )
+    out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No insurance opex line: the engine carries none."))
+    return out
+
+
+def _opex_default(field_name: str, label: str, absent_basis: str):
+    def default(ctx: _Context, state: str) -> _Choice:
+        if state != ABSENT:
+            evidence = _opex_evidence(ctx, field_name, label)
+            if evidence:
+                return _choice_from(evidence, ctx)
+        return _fallback(0.0, absent_basis)
+
+    return default
+
+
+def _r_and_m_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    evidence = _opex_evidence(ctx, "repairs_maintenance_annual", "repairs & maintenance bucket")
+    if evidence:
+        out.append(evidence)
+    house_candidate = _house_vintage(ctx, house.default_r_and_m_per_unit, "R&M per unit", "usd_per_unit_year")
+    if house_candidate:
+        out.append(house_candidate)
+    out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No R&M opex lines: the engine carries none."))
+    return out
+
+
+def _reserve_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    house_candidate = _house_vintage(
+        ctx, house.default_replacement_reserve_per_unit, "economic CapEx reserve per unit", "usd_per_unit_year"
+    )
+    if house_candidate:
+        out.append(house_candidate)
+    out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No replacement_reserves: the engine reserves nothing."))
+    return out
+
+
+def _reserve_default(ctx: _Context, state: str) -> _Choice:
+    return _fallback(0.0, "No replacement_reserves in the canonical: the engine reserves nothing.")
+
+
+def _turn_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    house_candidate = _house_vintage(
+        ctx, house.default_turn_capex_per_unit, "turn cost per turned unit", "usd_per_turn",
+        strategy="value_add",
+    )
+    return [house_candidate] if house_candidate else []
+
+
+def _turn_default(ctx: _Context, state: str) -> _Choice:
+    candidates = _turn_candidates(ctx)
+    note = " Informational: the engine does not consume a turn cost in this slice."
+    if candidates:
+        return _choice_from(candidates[0], ctx, candidates[0]["basis"] + note)
+    return _fallback(None, "Year built unknown, so no house turn cost is available." + note)
+
+
+def _exit_cap_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    om_cap = _num((ctx.evidence.get("om") or {}).get("exit_cap_rate"))
+    if om_cap is not None:
+        out.append(_candidate(SOURCE_DEAL_OM, om_cap, "Exit cap rate extracted from the offering memorandum."))
+    out.append(
+        _candidate(
+            SOURCE_ENGINE_FALLBACK,
+            ENGINE_FALLBACK_EXIT_CAP,
+            "backsolve fallback when no exit cap rate is supplied.",
+        )
+    )
+    return out
+
+
+def _exit_cap_default(ctx: _Context, state: str) -> _Choice:
+    if state == NO_SECTION:
+        return _not_modeled("exit_assumptions")
+    if state == ABSENT:
+        return _fallback(ENGINE_DEFAULT_EXIT_CAP, "exit_assumptions has no exit_cap_rate: engine default applies.")
+    om = next((c for c in _exit_cap_candidates(ctx) if c["source"] == SOURCE_DEAL_OM), None)
+    if om:
+        return _choice_from(om, ctx)
+    return _not_modeled("exit cap rate")
+
+
+def _policy_default(name: str) -> float:
+    return float(backsolve_policy.DEFAULTS[name])
+
+
+def _policy_candidates(name: str, engine_default: Optional[float], engine_basis: str):
+    def gather(ctx: _Context) -> list[dict[str, Any]]:
+        out = [
+            _candidate(
+                HOUSE_BACKSOLVE_POLICY,
+                _policy_default(name),
+                f"engine/backsolve_policy.DEFAULTS[{name!r}].",
+            )
+        ]
+        if engine_default is not None:
+            out.append(_candidate(SOURCE_ENGINE_FALLBACK, engine_default, engine_basis))
+        return out
+
+    return gather
+
+
+def _policy_default_choice(name: str, section: str, engine_default: float, engine_basis: str, *, ingest_fills: bool):
+    """Ingest fills ``ingest_fills`` fields from the policy defaults; others stay at the engine default."""
+
+    def default(ctx: _Context, state: str) -> _Choice:
+        if state == NO_SECTION:
+            return _not_modeled(section)
+        if state == PLACEHOLDER or (ingest_fills and state == PRESENT):
+            return _Choice(
+                HOUSE_BACKSOLVE_POLICY,
+                _policy_default(name),
+                f"House default from engine/backsolve_policy.DEFAULTS[{name!r}] "
+                f"({_policy_default(name):g}), the value ingest applies when the analyst omits it.",
+                confidence="medium",
+            )
+        return _fallback(engine_default, engine_basis)
+
+    return default
+
+
+def _fee_spec(name: str, section: str, field_name: str, unit: str, *, ingest_fills: bool) -> _Spec:
+    engine_basis = f"{section}.{field_name} not set: the engine applies 0."
+    return _Spec(
+        key=name,
+        unit=unit,
+        read=_scalar_reader(section, field_name),
+        write=_scalar_writer(section, field_name),
+        default=_policy_default_choice(name, section, 0.0, engine_basis, ingest_fills=ingest_fills),
+        gather=_policy_candidates(name, 0.0, engine_basis),
+        patch_paths=((section, field_name),),
+    )
+
+
+# ── ADR 0003 §3 precedence (used only to disclose where it would differ) ─
+
+
+def _generic_rank(source: str) -> Optional[int]:
+    if source.startswith(DEAL_PREFIX):
+        return 0
+    if source.startswith(MARKET_PREFIX):
+        return 1
+    if source.startswith(HOUSE_PREFIX):
+        return 2
+    if source == SOURCE_ENGINE_FALLBACK:
+        return 3
+    return None
+
+
+def _market_first_rank(source: str) -> Optional[int]:
+    if source.startswith(MARKET_PREFIX):
+        return 0
+    if source.startswith(DEAL_PREFIX):
+        return 1
+    if source.startswith(HOUSE_PREFIX):
+        return 2
+    if source == SOURCE_ENGINE_FALLBACK:
+        return 3
+    return None
+
+
+def _growth_rank(source: str) -> Optional[int]:
+    # Deal evidence is not used for growth (ADR 0003 §3).
+    if source.startswith(DEAL_PREFIX):
+        return None
+    return _market_first_rank(source)
+
+
+def _adr_pick(spec: _Spec, candidates: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    rank = spec.adr_rank or _generic_rank
+    ranked = [
+        (rank(c["source"]), i, c)
+        for i, c in enumerate(candidates)
+        if c.get("value") is not None and rank(c["source"]) is not None
+    ]
+    if not ranked:
+        return None
+    return sorted(ranked, key=lambda item: (item[0], item[1]))[0][2]
+
+
+# ── key registry ─────────────────────────────────────────────────────────
+
+
+def _specs() -> tuple[_Spec, ...]:
+    return (
+        _Spec(
+            key="rent_growth",
+            unit="decimal_yoy",
+            read=_scalar_reader("growth_assumptions", "annual_growth_rate"),
+            write=_scalar_writer(
+                "growth_assumptions",
+                "annual_growth_rate",
+                create=lambda ctx: {"growth_type": "annual_compound"},
+            ),
+            default=_rent_growth_default,
+            gather=_rent_growth_candidates,
+            market_metrics=("rent_growth_forecast",),
+            patch_paths=(("growth_assumptions", "annual_growth_rate"),),
+            adr_rank=_growth_rank,
+        ),
+        _Spec(
+            key="collection_loss",
+            unit="decimal_of_rent",
+            read=_read_collection_loss,
+            write=_write_collection_loss,
+            default=_collection_loss_default,
+            gather=_collection_loss_candidates,
+            patch_paths=(("collection_loss_curve",),),
+        ),
+        _Spec(
+            key="physical_vacancy",
+            unit="decimal_of_units",
+            read=_cohort_reader("physical_vacancy_curve", "vacancy_rate"),
+            write=_cohort_writer("physical_vacancy_curve", "vacancy_rate"),
+            default=_vacancy_default,
+            gather=_vacancy_candidates,
+            market_metrics=("vacancy_current", "vacancy_stabilized"),
+            patch_paths=(("physical_vacancy_curve",),),
+            cohort=True,
+        ),
+        _Spec(
+            key="loss_to_lease",
+            unit="decimal_of_market_rent",
+            read=_cohort_reader("loss_to_lease", "ltl_percent"),
+            write=_cohort_writer("loss_to_lease", "ltl_percent"),
+            default=_ltl_default,
+            gather=_ltl_candidates,
+            patch_paths=(("loss_to_lease",),),
+            cohort=True,
+        ),
+        _Spec(
+            key="concessions",
+            unit="decimal_of_rent",
+            read=_read_concessions,
+            write=_write_concessions,
+            default=_concession_default,
+            gather=_concession_candidates,
+            market_metrics=("concession_rate",),
+            patch_paths=(("concession_schedule",),),
+        ),
+        _Spec(
+            key="insurance_per_unit",
+            unit="usd_per_unit_year",
+            read=_read_insurance,
+            write=_write_insurance,
+            default=_opex_default(
+                "insurance_annual", "insurance", "No insurance opex line in the canonical: the engine carries none."
+            ),
+            gather=_insurance_candidates,
+            patch_paths=(("opex_table",),),
+        ),
+        _Spec(
+            key="r_and_m_per_unit",
+            unit="usd_per_unit_year",
+            read=_read_r_and_m,
+            write=_write_r_and_m,
+            default=_opex_default(
+                "repairs_maintenance_annual",
+                "repairs & maintenance bucket",
+                "No R&M opex lines in the canonical: the engine carries none.",
+            ),
+            gather=_r_and_m_candidates,
+            patch_paths=(("opex_table",),),
+        ),
+        _Spec(
+            key="replacement_reserve_per_unit",
+            unit="usd_per_unit_year",
+            read=_read_reserves,
+            write=_write_reserves,
+            default=_reserve_default,
+            gather=_reserve_candidates,
+            patch_paths=(("replacement_reserves",),),
+        ),
+        _Spec(
+            key="turn_cost_per_unit",
+            unit="usd_per_turn",
+            read=_read_no_field,
+            write=_write_nothing,
+            default=_turn_default,
+            gather=_turn_candidates,
+            value_add_only=True,
+        ),
+        _Spec(
+            key="exit_cap_rate",
+            unit="decimal",
+            read=_scalar_reader("exit_assumptions", "exit_cap_rate"),
+            write=_scalar_writer("exit_assumptions", "exit_cap_rate", create=_new_exit_section),
+            default=_exit_cap_default,
+            gather=_exit_cap_candidates,
+            market_metrics=("market_cap_rate",),
+            patch_paths=(("exit_assumptions", "exit_cap_rate"),),
+            adr_rank=_market_first_rank,
+        ),
+        _Spec(
+            key="sale_cost_percent",
+            unit="decimal_of_sale_price",
+            read=_scalar_reader("exit_assumptions", "sale_cost_percent"),
+            write=_scalar_writer("exit_assumptions", "sale_cost_percent"),
+            default=_policy_default_choice(
+                "sale_cost_percent",
+                "exit_assumptions",
+                ENGINE_DEFAULT_SALE_COST,
+                "exit_assumptions.sale_cost_percent not set: engine default applies.",
+                ingest_fills=True,
+            ),
+            gather=_policy_candidates(
+                "sale_cost_percent",
+                ENGINE_DEFAULT_SALE_COST,
+                "Engine default when exit_assumptions omits sale_cost_percent.",
+            ),
+            patch_paths=(("exit_assumptions", "sale_cost_percent"),),
+        ),
+        _fee_spec("acquisition_fee_pct", "fund_assumptions", "acquisition_fee_pct",
+                  "decimal_of_purchase_price", ingest_fills=True),
+        _fee_spec("asset_management_fee_pct", "fund_assumptions", "asset_management_fee_pct",
+                  "decimal_per_year", ingest_fills=True),
+        _fee_spec("disposition_fee_pct", "fund_assumptions", "disposition_fee_pct",
+                  "decimal_of_sale_price", ingest_fills=True),
+        _fee_spec("annual_partnership_expenses", "fund_assumptions", "annual_partnership_expenses",
+                  "usd_per_year", ingest_fills=False),
+        _fee_spec("partnership_closing_costs", "fund_assumptions", "partnership_closing_costs",
+                  "usd", ingest_fills=False),
+        _Spec(
+            key="purchase_closing_cost_pct",
+            unit="decimal_of_purchase_price",
+            read=_read_purchase_closing,
+            write=_write_purchase_closing,
+            default=_policy_default_choice(
+                "purchase_closing_cost_pct",
+                "purchase_assumptions",
+                0.0,
+                "Ingest writes purchase_assumptions.closing_costs = 0; the engine applies none.",
+                ingest_fills=False,
+            ),
+            gather=_policy_candidates(
+                "purchase_closing_cost_pct",
+                0.0,
+                "Ingest writes purchase_assumptions.closing_costs = 0.",
+            ),
+            patch_paths=(("purchase_assumptions", "closing_costs"),),
+        ),
+        _fee_spec("loan_closing_costs", "debt_terms", "loan_closing_costs", "usd", ingest_fills=False),
+    )
+
+
+ASSUMPTION_KEYS = tuple(spec.key for spec in _specs())
+
+
+def _specs_for(profile: DealProfile) -> tuple[_Spec, ...]:
+    return tuple(
+        spec for spec in _specs() if not spec.value_add_only or profile.deal_type == "value_add"
+    )
+
+
+# ── market candidates ────────────────────────────────────────────────────
+
+
+def _attr(item: Any, name: str) -> Any:
+    if isinstance(item, Mapping):
+        return item.get(name)
+    return getattr(item, name, None)
+
+
+def _market_candidate(metric: str, item: Any) -> dict[str, Any]:
+    source = _attr(item, "source")
+    if not (isinstance(source, str) and source.startswith(MARKET_PREFIX)):
+        provenance = _attr(item, "provenance")
+        provider = (
+            _attr(item, "provider")
+            or (provenance.get("provider") if isinstance(provenance, Mapping) else None)
+            or "unknown"
+        )
+        source = market_source(re.sub(r"[^A-Za-z0-9_.\-]", "_", str(provider)) or "unknown")
+    return _candidate(
+        source,
+        _attr(item, "value"),
+        f"Market metric {metric!r}; recorded only, market data is not applied in this slice.",
+        metric=metric,
+        unit=_attr(item, "unit"),
+        as_of=_attr(item, "as_of"),
+        confidence=_attr(item, "confidence"),
+        horizon=_attr(item, "horizon"),
+        provenance=_attr(item, "provenance"),
+    )
+
+
+def _market_candidates(ctx: _Context, spec: _Spec) -> list[dict[str, Any]]:
+    if ctx.market is None:
+        return []
+    out: list[dict[str, Any]] = []
+    geo = ctx.profile.geo()
+    for metric in spec.market_metrics:
+        observation, candidates = ctx.market.resolve(metric, geo, as_of=None)
+        items = list(candidates or [])
+        if observation is not None and not any(item is observation for item in items):
+            items.insert(0, observation)
+        out.extend(_market_candidate(metric, item) for item in items)
+    return out
+
+
+# ── overrides ────────────────────────────────────────────────────────────
+
+
+def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -> dict[str, Any]:
+    if isinstance(raw, Mapping):
+        if "value" not in raw:
+            raise AssumptionOverrideError(f"override for {key!r} must carry a value")
+        unknown = set(raw) - {"value", "note", "cohort_overrides"}
+        if unknown:
+            raise AssumptionOverrideError(f"override for {key!r} has unknown fields: {sorted(unknown)}")
+        value, note = raw["value"], raw.get("note") or note
+        cohorts = raw.get("cohort_overrides")
+    else:
+        value, cohorts = raw, None
+    number = _num(value)
+    if number is None or not math.isfinite(number):
+        raise AssumptionOverrideError(f"override for {key!r} must be a finite number")
+    out: dict[str, Any] = {"value": number, "note": note}
+    if cohorts:
+        if not isinstance(cohorts, Mapping):
+            raise AssumptionOverrideError(f"cohort_overrides for {key!r} must be an object")
+        cleaned = {}
+        for cohort_id, cohort_value in cohorts.items():
+            cohort_number = _num(cohort_value)
+            if cohort_number is None or not math.isfinite(cohort_number):
+                raise AssumptionOverrideError(f"cohort override {key}.{cohort_id} must be a finite number")
+            cleaned[str(cohort_id)] = cohort_number
+        out["cohort_overrides"] = cleaned
+    return out
+
+
+def normalize_overrides(overrides: Optional[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Validate ``{key: value | {"value": ..., "note": ...}}`` and return the dict form."""
+    if not overrides:
+        return {}
+    if not isinstance(overrides, Mapping):
+        raise AssumptionOverrideError("assumption overrides must be an object keyed by assumption key")
+    unknown = sorted(set(overrides) - set(ASSUMPTION_KEYS))
+    if unknown:
+        raise AssumptionOverrideError(
+            f"unknown assumption keys {unknown}; known keys: {list(ASSUMPTION_KEYS)}"
+        )
+    return {key: _normalize_override(key, raw) for key, raw in overrides.items()}
+
+
+def overrides_from_patch(
+    patch: Mapping[str, Any],
+    canonical: Mapping[str, Any],
+    *,
+    note: str = "supplied by a partial canonical patch",
+) -> dict[str, dict[str, Any]]:
+    """Analyst overrides for every assumption a partial canonical patch touches.
+
+    ``canonical`` is the canonical after the patch was merged; the override
+    value is what the merged canonical now carries for the key.
+    """
+    profile = _profile_for(canonical, None)
+    ctx = _context(deepcopy(dict(canonical)), profile, "underwrite", None)
+    out: dict[str, dict[str, Any]] = {}
+    for spec in _specs_for(profile):
+        if not any(_get_path(patch, path)[0] for path in spec.patch_paths):
+            continue
+        current = spec.read(ctx)
+        if current.state != PRESENT or _num(current.value) is None:
+            continue
+        override: dict[str, Any] = {"value": current.value, "note": note}
+        if current.cohort_overrides:
+            override["cohort_overrides"] = dict(current.cohort_overrides)
+        out[spec.key] = override
+    return out
+
+
+# ── resolution ───────────────────────────────────────────────────────────
+
+
+def _normalize_year(value: Any) -> Optional[int]:
+    from engine.ingest.om_parser import _normalize_year_built
+
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        return _normalize_year_built(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _profile_for(canonical: Mapping[str, Any], deal_profile: Any) -> DealProfile:
+    if isinstance(deal_profile, DealProfile):
+        profile = deal_profile
+    elif isinstance(deal_profile, Mapping):
+        check_deal_type(deal_profile.get("deal_type", "stabilized"))
+        profile = DealProfile.from_dict(deal_profile)
+    elif deal_profile is None and isinstance(canonical.get("deal_profile"), Mapping):
+        stored = canonical["deal_profile"]
+        check_deal_type(stored.get("deal_type"))
+        profile = DealProfile.from_dict(stored)
+    elif deal_profile is None:
+        profile = DealProfile()
+    else:
+        raise TypeError("deal_profile must be a DealProfile, a mapping, or None")
+    return profile
+
+
+def _year_built(canonical: Mapping[str, Any], profile: DealProfile) -> tuple[Optional[int], Optional[str]]:
+    metadata = canonical.get("metadata") or {}
+    property_summary = metadata.get("property_summary") or {}
+    for value, origin in (
+        (profile.year_built, "deal_profile.year_built"),
+        (metadata.get("year_built"), "metadata.year_built"),
+        (property_summary.get("year_built"), "metadata.property_summary.year_built"),
+    ):
+        year = _normalize_year(value)
+        if year is not None:
+            return year, origin
+    return None, None
+
+
+def _context(canonical: dict[str, Any], profile: DealProfile, mode: str, market: Any) -> _Context:
+    year, origin = _year_built(canonical, profile)
+    metadata = canonical.get("metadata") or {}
+    gate = metadata.get("ingest_gate")
+    evidence = dict(gate.get("evidence") or {}) if isinstance(gate, Mapping) else {}
+    year_evidence = evidence.get("year_built") or {}
+    if year is not None and year_evidence.get("value") == year and year_evidence.get("origin"):
+        origin = str(year_evidence["origin"])
+    time_grid = canonical.get("time_grid") or {}
+    return _Context(
+        canonical=canonical,
+        profile=profile,
+        mode=mode,
+        market=market,
+        year_built=year,
+        year_built_origin=origin,
+        bucket=house.vintage_bucket(year),
+        ingested=isinstance(gate, Mapping),
+        evidence=evidence,
+        units=sum_units(canonical),
+        start=str(time_grid.get("analysis_start_date", ""))[:7],
+        end=str(time_grid.get("analysis_end_date", ""))[:7],
+        om_confidence=metadata.get("om_extraction_confidence"),
+    )
+
+
+def _same_current(current: _Current, prior: Mapping[str, Any]) -> bool:
+    return _same(current.value, prior.get("value")) and _same(
+        current.cohort_overrides or None, prior.get("cohort_overrides") or None
+    )
+
+
+def _resolve_key(
+    spec: _Spec,
+    ctx: _Context,
+    prior: Optional[Mapping[str, Any]],
+    explicit: Optional[dict[str, Any]],
+) -> AssumptionEntry:
+    current = spec.read(ctx)
+    default = spec.default(ctx, current.state)
+    candidates = spec.gather(ctx) + _market_candidates(ctx, spec)
+
+    override: Optional[dict[str, Any]] = None
+    if explicit is not None:
+        override = deepcopy(explicit)
+    elif prior is not None:
+        if current.state == PRESENT and not _same_current(current, prior):
+            override = {"value": current.value, "note": _NOTE_EDITED}
+            if current.cohort_overrides:
+                override["cohort_overrides"] = dict(current.cohort_overrides)
+        elif prior.get("override"):
+            override = deepcopy(dict(prior["override"]))
+    elif current.state == PRESENT:
+        is_default = ctx.ingested and _same(current.value, default.value) and not current.cohort_overrides
+        if not is_default:
+            override = {"value": current.value, "note": _NOTE_PRESENT}
+            if current.cohort_overrides:
+                override["cohort_overrides"] = dict(current.cohort_overrides)
+
+    notes: list[str] = list(ctx.notes.get(spec.key, []))
+    if override is not None:
+        value = override["value"]
+        cohorts = override.get("cohort_overrides") or None
+        source, confidence, as_of = SOURCE_ANALYST, _confidence_for(SOURCE_ANALYST, ctx), None
+        basis = (
+            f"Analyst override ({override.get('note') or 'analyst override'}); the resolver default is "
+            f"{_fmt(default.value, spec.unit)} from {default.source}."
+        )
+        candidates = [_candidate(SOURCE_ANALYST, value, override.get("note") or "analyst override")] + candidates
+    else:
+        value, cohorts = default.value, None
+        source, confidence, as_of = default.source, default.confidence, default.as_of
+        basis = default.basis
+        pick = _adr_pick(spec, candidates) if value is not None else None
+        if pick is not None and not _same(pick["value"], value):
+            notes.append(
+                f"ADR 0003 precedence would select {pick['source']} "
+                f"({_fmt(pick['value'], spec.unit)}); today's {_fmt(value, spec.unit)} is kept "
+                "because slice 2 changes no numbers."
+            )
+
+    write_needed = False
+    if current.state == PLACEHOLDER:
+        write_needed = True
+    elif current.state == NO_FIELD:
+        write_needed = False
+    elif override is not None:
+        write_needed = current.state != PRESENT or not _same_current(
+            current, {"value": value, "cohort_overrides": cohorts}
+        )
+    elif current.state == PRESENT and not _same(current.value, value):
+        write_needed = True
+    if write_needed and not spec.write(ctx, value, cohorts):
+        notes.append("Not written: the canonical has no field the engine reads for this value.")
+
+    if notes:
+        basis = f"{basis} {' '.join(notes)}"
+
+    return AssumptionEntry(
+        value=_jsonable(value),
+        unit=spec.unit,
+        source=source,
+        basis=basis,
+        as_of=as_of,
+        confidence=confidence,
+        candidates=candidates,
+        default_value=_jsonable(default.value),
+        override=_jsonable(override),
+        review_required=requires_review(source),
+        cohort_overrides=_jsonable(cohorts),
+    )
+
+
+def resolve_assumptions(
+    canonical: Mapping[str, Any],
+    *,
+    deal_profile: DealProfile | Mapping[str, Any] | None = None,
+    overrides: Optional[Mapping[str, Any]] = None,
+    mode: str = "underwrite",
+    market: Any = None,
+) -> dict[str, Any]:
+    """Resolve every v1 assumption key and return a NEW canonical.
+
+    The input is never mutated. The result carries ``deal_profile`` and an
+    ``assumptions`` section (provenance, candidates, overrides) and has the
+    resolved values written into the canonical fields the engine reads.
+
+    Args:
+        canonical: Canonical deal inputs (schema v0.1).
+        deal_profile: Profile to resolve with; defaults to the canonical's
+            ``deal_profile``, else a stabilized profile. ``lease_up`` and
+            ``distressed`` raise ``UnsupportedDealTypeError``.
+        overrides: ``{key: value | {"value": ..., "note": ...}}``. An overridden
+            entry keeps ``default_value``, records ``override``, and its value
+            wins. Overrides already recorded in the canonical are preserved.
+        mode: ``"underwrite"`` or ``"pricing"``. Recorded only in this slice;
+            guardrail enforcement arrives with ADR 0003 slice 6.
+        market: Optional market source exposing
+            ``resolve(metric, geo, as_of=None) -> (observation | None, candidates)``.
+            Results are recorded as candidates; they never change a value here.
+    """
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+    out = deepcopy(dict(canonical))
+    explicit = normalize_overrides(overrides)
+    profile = _profile_for(out, deal_profile)
+    ctx = _context(out, profile, mode, market)
+    profile = profile.with_year_built(ctx.year_built)
+    ctx.profile = profile
+
+    prior_section = out.get("assumptions") if isinstance(out.get("assumptions"), Mapping) else {}
+    prior_entries = prior_section.get("entries") if isinstance(prior_section.get("entries"), Mapping) else {}
+
+    specs = _specs_for(profile)
+    inapplicable = sorted(set(explicit) - {spec.key for spec in specs})
+    if inapplicable:
+        raise AssumptionOverrideError(
+            f"assumption keys {inapplicable} do not apply to deal_type {profile.deal_type!r}"
+        )
+
+    entries: dict[str, Any] = {}
+    for spec in specs:
+        entry = _resolve_key(spec, ctx, prior_entries.get(spec.key), explicit.get(spec.key))
+        entries[spec.key] = entry.to_dict()
+
+    out["deal_profile"] = profile.to_dict()
+    out["assumptions"] = {
+        "resolver_version": RESOLVER_VERSION,
+        "mode": mode,
+        "entries": entries,
+    }
+    return out
