@@ -3,6 +3,8 @@
 One module (engine/assumptions/guardrails.py) defines the house floors.
 Underwrite mode warns and never changes a value; pricing mode raises each
 value below its floor (per segment for curves) and discloses the raise.
+Backsolve uses the same floors, and its solved canonical carries a pricing-mode
+``assumptions`` section that matches the priced values.
 
 Synthetic deals only.
 """
@@ -14,6 +16,7 @@ from decimal import Decimal
 
 import pytest
 
+from engine import backsolve
 from engine import underwriting_policy as house
 from engine.assumptions import (
     AssumptionEntry,
@@ -292,10 +295,98 @@ def test_pricing_entries_without_an_override_keep_value_equal_to_default(minimal
         assert all(e["override"] is not None for e in enforced)
 
 
+# ── backsolve ────────────────────────────────────────────────────────────
+
+BENCHMARK = {"rate": "0.04", "as_of": "2026-10-03", "source": "synthetic:test"}
+POLICY = {"version": "plat.backsolve-policy/1", "strategy": "cashflow", "exit_cap_rate": "0.06"}
+
+
+@pytest.fixture
+def pricing_deal(minimal_deal_inputs):
+    """A resolved (underwrite-mode) synthetic deal with values below several floors."""
+    deal = _below_floor_deal(minimal_deal_inputs)
+    deal["opex_table"] = [r for r in deal["opex_table"] if r["calculation_type"] != "percent_egr"]
+    return resolve_assumptions(deal, deal_profile=PROFILE)
+
+
+def _solve(deal):
+    return backsolve.backsolve_price(
+        copy.deepcopy(deal), target_coc="0.06", policy=POLICY, benchmark=BENCHMARK,
+        min_price="1000000.00", max_price="40000000.00",
+    )
+
+
+def test_backsolve_solved_canonical_carries_pricing_assumptions(pricing_deal):
+    assert pricing_deal["assumptions"]["mode"] == "underwrite"
+    result = _solve(pricing_deal)
+    assert result["status"] == "converged"
+    case = result["case"]
+    section = case["assumptions"]
+    entries = section["entries"]
+
+    assert section["mode"] == "pricing"
+    assert case["deal_profile"]["deal_type"] == "stabilized"
+    assert case["deal_profile"]["year_built"] == YEAR
+    # Entries match the values actually priced.
+    assert {r["vacancy_rate"] for r in case["physical_vacancy_curve"]} >= {0.05}
+    assert entries["replacement_reserve_per_unit"]["value"] == pytest.approx(
+        case["replacement_reserves"][0]["annual_amount"] / 100)
+    assert entries["collection_loss"]["value"] == case["collection_loss_curve"][0]["loss_rate"] == 0.02
+    assert entries["concessions"]["value"] == case["concession_schedule"][0]["amount"] == 0.0075
+    # The enforced floors are shown.
+    enforced = {k for k, e in entries.items() if (e.get("guardrail") or {}).get("action") == "enforced"}
+    assert enforced == {"physical_vacancy", "concessions", "r_and_m_per_unit", "replacement_reserve_per_unit"}
+    assert entries["r_and_m_per_unit"]["guardrail"]["original"] == 750.0
+    assert entries["physical_vacancy"]["guardrail"]["segments"] == [
+        {"cohort_id": "1BR", "start_period": "2027-07", "end_period": "2031-06", "original": 0.03, "applied": 0.05},
+        {"cohort_id": "2BR", "start_period": "2026-07", "end_period": "2031-06", "original": 0.04, "applied": 0.05},
+    ]
+    findings = result["summary"]["policy_summary"]["guardrails"]["findings"]
+    assert {f["key"] for f in findings} == enforced
+    overrides = result["summary"]["policy_summary"]["policy_overrides"]
+    assert {o["assumption"] for o in overrides if "assumption" in o} == enforced
+    _assert_no_silent_override(case)
+    assert validate_schema(case) == []
+    assert not [i for i in validate_deal(case).issues if i.code == "GUARDRAIL_BELOW_FLOOR"]
+    json.dumps(case)
+
+
+def test_backsolve_assumptions_refresh_changes_no_priced_number(pricing_deal):
+    result = _solve(pricing_deal)
+    case = result["case"]
+    without = {k: v for k, v in case.items() if k not in ("assumptions", "deal_profile")}
+    original = {k: v for k, v in pricing_deal.items() if k not in ("assumptions", "deal_profile")}
+    assert set(without) >= set(original) - {"metadata"}
+    # The shared guardrails find nothing left to enforce in the priced case.
+    profile = GuardrailProfile("cashflow", YEAR)
+    assert enforce_floors(copy.deepcopy(case), mode="pricing", profile=profile) == []
+    # Engine output is the same with or without the refreshed sections.
+    from engine.engine import run_underwriting
+    assert run_underwriting(copy.deepcopy(without)) == result["results"]
+
+
+def test_backsolve_house_policy_matches_generic_pricing_floors(pricing_deal):
+    """apply_guardrails(pricing) on backsolve's prepared canonical raises nothing:
+    backsolve already enforced every shared floor."""
+    values = {k: Decimal(v) if isinstance(v, str) else v for k, v in {
+        "agency_spread": "0.015", "sale_cost_percent": "0.02", "purchase_closing_cost_pct": "0.015",
+        "partnership_closing_costs": "50000", "acquisition_fee_pct": "0.01",
+        "asset_management_fee_pct": "0.015", "annual_partnership_expenses": "25000",
+        "disposition_fee_pct": "0.01", "loan_closing_costs": "0",
+    }.items()}
+    prepared, summary = backsolve._prepare_house_assumptions(
+        copy.deepcopy(pricing_deal), year_built=None, strategy="cashflow", target_coc=Decimal("0.06"),
+        benchmark_treasury=Decimal("0.04"), exit_cap_rate=Decimal("0.06"), **values,
+    )
+    assert summary["guardrails"]["profile"]["year_built"] == YEAR
+    _, findings = apply_guardrails(prepared, mode="pricing", profile=GuardrailProfile("cashflow", YEAR))
+    assert findings == []
+
+
 # ── determinism ──────────────────────────────────────────────────────────
 
 
-def test_guardrails_are_deterministic(minimal_deal_inputs):
+def test_guardrails_are_deterministic(minimal_deal_inputs, pricing_deal):
     deal = _below_floor_deal(minimal_deal_inputs)
     for mode in ("underwrite", "pricing"):
         first = apply_guardrails(deal, mode=mode, profile=PROFILE)
@@ -304,3 +395,6 @@ def test_guardrails_are_deterministic(minimal_deal_inputs):
         assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
     assert resolve_assumptions(deal, deal_profile=PROFILE, mode="pricing") == resolve_assumptions(
         copy.deepcopy(deal), deal_profile=PROFILE, mode="pricing")
+    first, second = _solve(pricing_deal), _solve(pricing_deal)
+    assert first["case"] == second["case"]
+    assert first["summary"] == second["summary"]

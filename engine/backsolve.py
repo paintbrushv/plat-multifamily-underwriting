@@ -27,6 +27,16 @@ from engine.assumptions.canonical_ops import (
     upsert_annual_opex_by_match as _upsert_annual_opex_by_match,
     upsert_annual_opex as _upsert_annual_opex,
 )
+from engine.assumptions import guardrails
+from engine.assumptions.guardrails import (
+    GuardrailProfile,
+    cohort_rents as _cohort_rents,
+    parse_percent_note as _parse_percent_note,
+    status_count as _status_count,
+    vacancy_anchor_summary as _vacancy_anchor_summary,
+    year1_insurance_per_unit as _year1_insurance_per_unit,
+)
+from engine.assumptions.resolver import resolve_assumptions
 from engine.property_tax import (
     apply_property_tax_policy,
     normalize_property_tax_purchase_price,
@@ -43,13 +53,6 @@ from engine.underwriting_policy import (
     DEFAULT_PURCHASE_CLOSING_COST_PCT,
     DEFAULT_YEAR1_INSURANCE_PER_UNIT,
     PRIMARY_COC_TARGET_PCT,
-    default_collection_loss_rate,
-    default_loss_to_lease_rate,
-    default_physical_vacancy_rate,
-    default_r_and_m_per_unit,
-    default_replacement_reserve_per_unit,
-    default_year1_concessions_rate,
-    default_year1_insurance_per_unit,
     insurance_requires_claim_review,
 )
 from engine.ingest.om_parser import _normalize_year_built
@@ -80,19 +83,6 @@ def _first_nonempty(*values: Any) -> Any:
         if value not in (None, ""):
             return value
     return None
-
-def _status_count(status_counts: dict[str, Any], *names: str) -> int:
-    wanted = {name.strip().lower().replace("_", " ").replace("-", " ") for name in names}
-    total = 0
-    for key, value in (status_counts or {}).items():
-        normalized = " ".join(str(key).strip().lower().replace("_", " ").replace("-", " ").split())
-        # Status variants such as "Vacant Unrented" / "Notice Rented" count
-        # toward their leading status.
-        if any(normalized == w or normalized.startswith(w + " ") for w in wanted):
-            total += int(value or 0)
-    return total
-
-
 
 def _address_text(value: Any) -> str:
     if isinstance(value, str):
@@ -175,11 +165,7 @@ def _market_vacancy_for_case(
     canonical: dict[str, Any],
     broker_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    benchmark = ((canonical.get("metadata") or {}).get("property_summary") or {}).get("market_vacancy_benchmark")
-    if benchmark is None:
-        return None
-    checked = validate_benchmark(benchmark)
-    return {**checked, "vacancy_rate": checked["rate"]}
+    return guardrails.market_vacancy_benchmark(canonical, broker_snapshot)
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -555,120 +541,8 @@ def _rebase_to_house_box_score(
     }
 
 
-def _parse_percent_note(text: str | None) -> Decimal | None:
-    if not text:
-        return None
-    match = re.search(r"(\d+(?:\.\d+)?)\s*%", str(text))
-    if not match:
-        return None
-    return Decimal(match.group(1)) / Decimal("100")
-
-
-def _extract_t12_vacancy_rate(trailing_actuals: dict[str, Any] | None) -> Decimal | None:
-    if not trailing_actuals:
-        return None
-    gpr = dec(trailing_actuals.get("gross_potential_rent", 0))
-    # Statements carry vacancy loss as a negative revenue line.
-    vacancy = abs(dec(trailing_actuals.get("vacancy_loss", 0)))
-    if gpr <= 0 or vacancy <= 0:
-        return None
-    return vacancy / gpr
-
-
-def _extract_broker_vacancy_rate(broker_snapshot: dict[str, Any] | None) -> Decimal | None:
-    if not broker_snapshot:
-        return None
-    revenue = broker_snapshot.get("revenue_assumptions") or {}
-    gpr = dec(revenue.get("gross_potential_rent", 0))
-    vacancy = abs(dec(revenue.get("vacancy_loss", 0)))
-    if (gpr <= 0 or vacancy <= 0) and broker_snapshot.get("income_table"):
-        for row in broker_snapshot.get("income_table") or []:
-            line = str(row.get("line", "")).lower()
-            amount = dec(row.get("annual_amount", 0))
-            if "current market rent" in line or "gross potential" in line:
-                gpr += amount
-            elif "value-add rent growth" in line:
-                gpr += amount
-            elif "vacancy" in line:
-                vacancy += abs(amount)
-    if gpr <= 0 or vacancy <= 0:
-        return None
-    return vacancy / gpr
-
-
-def _vacancy_anchor_summary(
-    canonical: dict[str, Any],
-    *,
-    default_vacancy: Decimal,
-    broker_vacancy: Decimal | None,
-    trailing_actuals: dict[str, Any] | None,
-    broker_snapshot: dict[str, Any] | None,
-) -> tuple[Decimal, dict[str, Any]]:
-    property_summary = (canonical.get("metadata") or {}).get("property_summary") or {}
-    house_box = property_summary.get("house_box_score") or {}
-    status_counts = house_box.get("status_counts") or {}
-    total_units = Decimal(str(house_box.get("total_units") or _sum_units(canonical) or 0))
-    vacant_units = Decimal(str(_status_count(status_counts, "Vacant", "Non-Revenue", "Non Revenue")))
-    notice_units = Decimal(str(_status_count(status_counts, "Notice")))
-    rent_roll_vacant = vacant_units / total_units if total_units else None
-    vacant_plus_notice = (vacant_units + notice_units) / total_units if total_units else None
-    t12_vacancy = _extract_t12_vacancy_rate(trailing_actuals)
-    broker_table_vacancy = _extract_broker_vacancy_rate(broker_snapshot)
-    broker_anchor = broker_vacancy if broker_vacancy is not None else broker_table_vacancy
-    market = _market_vacancy_for_case(canonical, broker_snapshot)
-    market_vacancy = (
-        Decimal(str(market["vacancy_rate"]))
-        if market and market.get("vacancy_rate") is not None
-        else None
-    )
-    cohort_rates = [
-        Decimal(str(row.get("vacancy_rate", 0)))
-        for row in canonical.get("physical_vacancy_curve") or []
-    ]
-    worst_cohort = max(cohort_rates) if cohort_rates else None
-
-    base_candidates = {
-        "broker_om": broker_anchor,
-        "rent_roll_vacant": rent_roll_vacant,
-        "t12_vacancy_gpr": t12_vacancy,
-        "vintage_house_floor": default_vacancy,
-        "supplied_market_benchmark": market_vacancy,
-    }
-    conservative_candidates = {
-        "broker_om": broker_anchor,
-        "rent_roll_vacant_plus_notice": vacant_plus_notice,
-        "t12_vacancy_gpr": t12_vacancy,
-        "vintage_house_floor": default_vacancy,
-        "supplied_market_benchmark": market_vacancy,
-    }
-    usable_base = {k: v for k, v in base_candidates.items() if v is not None}
-    usable_conservative = {k: v for k, v in conservative_candidates.items() if v is not None}
-    base_rate = max(usable_base.values()) if usable_base else Decimal("0")
-    conservative_rate = max(usable_conservative.values()) if usable_conservative else base_rate
-
-    def fmt_candidates(values: dict[str, Decimal | None]) -> dict[str, float | None]:
-        return {k: (float(v) if v is not None else None) for k, v in values.items()}
-
-    return base_rate, {
-        "method": "base_case_max_property_level_anchors",
-        "base_case_candidates": fmt_candidates(base_candidates),
-        "base_case_selected_rate": float(base_rate),
-        "base_case_selected_anchor": [
-            k for k, v in usable_base.items() if v == base_rate
-        ],
-        "conservative_downside_candidates": fmt_candidates(conservative_candidates),
-        "conservative_downside_selected_rate": float(conservative_rate),
-        "conservative_downside_selected_anchor": [
-            k for k, v in usable_conservative.items() if v == conservative_rate
-        ],
-        "stress_flag_worst_cohort_vacancy": float(worst_cohort) if worst_cohort is not None else None,
-        "stress_flag_note": (
-            "Worst cohort vacancy is logged for review/stress only and is not "
-            "applied property-wide unless explicitly selected."
-        ),
-        "observed_status_counts": status_counts,
-        "market_vacancy_benchmark_source": market,
-    }
+_extract_t12_vacancy_rate = guardrails.t12_vacancy_rate
+_extract_broker_vacancy_rate = guardrails.broker_vacancy_rate
 
 
 def _apply_house_revenue_policy(
@@ -680,93 +554,68 @@ def _apply_house_revenue_policy(
     broker_snapshot: dict[str, Any] | None = None,
     trailing_actuals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """House revenue policy for pricing; the floors come from the shared guardrails.
+
+    Backsolve first normalizes three inputs (its pricing policy, unchanged):
+    loss to lease is re-derived from market vs in-place rent, collection loss
+    becomes one ALL row at the worst current rate, and concessions become a
+    year-1 pct_rent schedule at the highest current rate. Then
+    ``guardrails.enforce_floors`` in pricing mode raises every value below its
+    house floor (vacancy per segment against the property-level anchor) and
+    lists each raise in ``policy_overrides``.
+    """
     broker_notes = (broker_snapshot or {}).get("underwriting_notes", {})
-    default_ltl = default_loss_to_lease_rate(year_built, strategy=strategy) or Decimal("0")
-    default_vacancy = default_physical_vacancy_rate(
-        year_built, strategy=strategy, deferred=deferred
-    ) or Decimal("0")
-    default_collection = default_collection_loss_rate(
-        year_built, strategy=strategy, deferred=deferred
-    ) or Decimal("0")
-    default_concessions = default_year1_concessions_rate(
-        year_built, strategy=strategy, deferred=deferred
-    ) or Decimal("0")
+    profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=deferred)
+    context: dict[str, Any] = {"broker_snapshot": broker_snapshot, "trailing_actuals": trailing_actuals}
+    floors, vacancy_summary = guardrails.house_floors(canonical, profile, context)
 
     broker_ltl = _parse_percent_note(broker_notes.get("loss_to_lease"))
     broker_vacancy = _parse_percent_note(broker_notes.get("vacancy"))
     broker_bad_debt = _parse_percent_note(broker_notes.get("bad_debt"))
     broker_concessions = _parse_percent_note(broker_notes.get("concessions"))
 
-    applied_ltls: list[float] = []
+    # Loss to lease: the house value is derived from market vs in-place rent.
     for row in canonical.get("loss_to_lease") or []:
-        cohort_id = row["cohort_id"]
-        cohort = next((c for c in canonical.get("unit_cohorts") or [] if c["cohort_id"] == cohort_id), {})
-        market = next(
-            (
-                mr["market_rent"]
-                for mr in canonical.get("market_rent_curve") or []
-                if mr["cohort_id"] == cohort_id
-            ),
-            cohort.get("target_monthly_rent") or cohort.get("initial_inplace_rent") or 0,
-        )
-        inplace = cohort.get("initial_inplace_rent") or 0
+        market_dec, inplace_dec = _cohort_rents(canonical, row["cohort_id"])
         derived = Decimal("0")
-        if market:
-            market_dec = Decimal(str(market))
-            inplace_dec = Decimal(str(inplace))
+        if market_dec > inplace_dec:
             derived = max(Decimal("0"), Decimal("1") - (inplace_dec / market_dec))
-        else:
-            market_dec = Decimal("0")
-            inplace_dec = Decimal(str(inplace))
-        if market_dec <= inplace_dec:
-            applied = Decimal("0")
-        else:
-            applied = max(derived, default_ltl, broker_ltl or Decimal("0"))
-        row["ltl_percent"] = float(applied)
-        applied_ltls.append(float(applied))
+        row["ltl_percent"] = float(derived)
 
-    overrides: list[dict[str, Any]] = []
-
-    applied_vacancy, vacancy_summary = _vacancy_anchor_summary(
-        canonical,
-        default_vacancy=default_vacancy,
-        broker_vacancy=broker_vacancy,
-        trailing_actuals=trailing_actuals,
-        broker_snapshot=broker_snapshot,
-    )
-    # The anchor is a per-segment floor: a segment below it is raised to it, a
-    # segment at or above it keeps the analyst's rate. The curve keeps its
-    # shape, and one cohort's higher rate never spreads to other cohorts.
-    applied_curve: list[dict[str, Any]] = []
-    for row in canonical.get("physical_vacancy_curve") or []:
-        if Decimal(str(row.get("vacancy_rate", 0))) < applied_vacancy:
-            overrides.append({
-                "input": "physical_vacancy_curve",
-                "cohort_id": row.get("cohort_id"),
-                "start_period": row.get("start_period"),
-                "end_period": row.get("end_period"),
-                "original": row.get("vacancy_rate"),
-                "applied": float(applied_vacancy),
-            })
-            row["vacancy_rate"] = float(applied_vacancy)
-        applied_curve.append({
-            "cohort_id": row.get("cohort_id"),
-            "start_period": row.get("start_period"),
-            "end_period": row.get("end_period"),
-            "vacancy_rate": float(row.get("vacancy_rate", 0)),
-        })
-
+    # Concessions: one year-1 pct_rent schedule at the highest current rate.
     original_concessions = deepcopy(canonical.get("concession_schedule") or [])
     current_concessions = max(
         (_concession_pct_rent(row) for row in original_concessions),
         default=Decimal("0"),
     )
-    applied_concessions = max(
-        current_concessions,
-        default_concessions,
-        broker_concessions or Decimal("0"),
+    _ensure_year1_concession_schedule(canonical, rate=current_concessions)
+
+    # Collection loss: one ALL row at the worst current rate.
+    current_collection = Decimal("0")
+    if canonical.get("collection_loss_curve"):
+        current_collection = max(
+            Decimal(str(row.get("loss_rate", 0))) for row in canonical["collection_loss_curve"]
+        )
+    canonical["collection_loss_curve"] = [
+        {
+            "applies_to": "ALL",
+            "start_period": str(canonical["time_grid"]["analysis_start_date"])[:7],
+            "end_period": str(canonical["time_grid"]["analysis_end_date"])[:7],
+            "loss_rate": float(current_collection),
+        }
+    ]
+
+    # The vacancy anchor is a per-segment floor: a segment below it is raised
+    # to it, a segment at or above it keeps the analyst's rate. The curve keeps
+    # its shape, and one cohort's higher rate never spreads to other cohorts.
+    overrides: list[dict[str, Any]] = []
+    findings = guardrails.enforce_floors(
+        canonical,
+        mode=guardrails.MODE_PRICING,
+        profile=profile,
+        context={**context, "policy_overrides": overrides},
+        keys=("physical_vacancy", "loss_to_lease", "collection_loss", "concessions"),
     )
-    _ensure_year1_concession_schedule(canonical, rate=applied_concessions)
     if original_concessions and original_concessions != (canonical.get("concession_schedule") or []):
         overrides.append({
             "input": "concession_schedule",
@@ -774,24 +623,19 @@ def _apply_house_revenue_policy(
             "applied": canonical.get("concession_schedule") or [],
         })
 
-    current_collection = Decimal("0")
-    if canonical.get("collection_loss_curve"):
-        current_collection = max(
-            Decimal(str(row.get("loss_rate", 0))) for row in canonical["collection_loss_curve"]
-        )
-    applied_collection = max(
-        current_collection,
-        default_collection,
-        broker_bad_debt or Decimal("0"),
-    )
-    canonical["collection_loss_curve"] = [
+    applied_ltls = [float(row["ltl_percent"]) for row in canonical.get("loss_to_lease") or []]
+    applied_vacancy = floors["physical_vacancy"].value
+    applied_curve = [
         {
-            "applies_to": "ALL",
-            "start_period": str(canonical["time_grid"]["analysis_start_date"])[:7],
-            "end_period": str(canonical["time_grid"]["analysis_end_date"])[:7],
-            "loss_rate": float(applied_collection),
+            "cohort_id": row.get("cohort_id"),
+            "start_period": row.get("start_period"),
+            "end_period": row.get("end_period"),
+            "vacancy_rate": float(row.get("vacancy_rate", 0)),
         }
+        for row in canonical.get("physical_vacancy_curve") or []
     ]
+    applied_concessions = max(current_concessions, floors["concessions"].value or Decimal("0"))
+    applied_collection = max(current_collection, floors["collection_loss"].value or Decimal("0"))
 
     annualized_house_gpr = Decimal("0")
     for cohort in canonical.get("unit_cohorts") or []:
@@ -826,6 +670,7 @@ def _apply_house_revenue_policy(
         "broker_gpr_reference": float(broker_gpr) if broker_gpr else None,
         "market_rent_requires_comp_support": market_rent_requires_comp_support,
         "policy_overrides": overrides,
+        "guardrail_findings": findings,
     }
 
 
@@ -1147,14 +992,17 @@ def _prepare_house_assumptions(
                     continue
     rebase_summary = _rebase_to_house_box_score(prepared, grouped_comps=grouped_comps)
     units = _sum_units(prepared)
+    guardrail_profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=False)
+    guardrail_findings: list[dict[str, Any]] = []
     observed_insurance = _find_annual_opex(prepared, "insurance")
     observed_insurance_per_unit = (
         observed_insurance / Decimal(str(units)) if units and observed_insurance > 0 else None
     )
+    insurance_floor = guardrail_profile.insurance_per_unit()
     insurance_per_unit = (
         insurance_per_unit_override
         if insurance_per_unit_override is not None
-        else default_year1_insurance_per_unit(observed_insurance_per_unit)
+        else _year1_insurance_per_unit(observed_insurance_per_unit)
     )
     applied_insurance = insurance_per_unit * Decimal(str(units))
     # Replace the same line _find_annual_opex read so the floor never stacks
@@ -1167,19 +1015,46 @@ def _prepare_house_assumptions(
     )
     policy_overrides: list[dict[str, Any]] = []
     if observed_insurance != applied_insurance:
-        policy_overrides.append({
+        insurance_override: dict[str, Any] = {
             "input": "opex_table.insurance",
             "category_name": insurance_category,
             "original_annual": float(observed_insurance),
             "applied_annual": float(applied_insurance),
-        })
+        }
+        raised_to_floor = (
+            insurance_per_unit_override is None
+            and units
+            and (observed_insurance_per_unit or Decimal("0")) < insurance_floor
+        )
+        if raised_to_floor:
+            finding = {
+                "key": "insurance_per_unit",
+                "input": "opex_table.insurance",
+                "status": guardrails.STATUS_BELOW_FLOOR,
+                "action": guardrails.ACTION_ENFORCED,
+                "floor": float(insurance_floor),
+                "floor_source": guardrails.HOUSE_YEAR1_INSURANCE_FLOOR,
+                "category_name": insurance_category,
+                "original_annual": float(observed_insurance),
+                "original": float(observed_insurance_per_unit or 0),
+                "applied": float(insurance_floor),
+                "applied_annual": float(applied_insurance),
+            }
+            guardrail_findings.append(finding)
+            insurance_override = guardrails.policy_override(finding)
+        policy_overrides.append(insurance_override)
 
-    reserve_per_unit = default_replacement_reserve_per_unit(
-        year_built,
-        strategy=strategy,
-        deferred=False,
-    )
+    # Reserves: the house vintage reserve replaces the analyst's reserves. The
+    # shared guardrail first records any segment it raises.
+    reserve_per_unit = guardrail_profile.replacement_reserve_per_unit()
     if reserve_per_unit is not None:
+        guardrail_findings += guardrails.enforce_floors(
+            prepared,
+            mode=guardrails.MODE_PRICING,
+            profile=guardrail_profile,
+            context={"policy_overrides": policy_overrides},
+            keys=("replacement_reserve_per_unit",),
+        )
         annual_reserve = reserve_per_unit * Decimal(str(units))
         prepared["replacement_reserves"] = [
             {
@@ -1190,27 +1065,21 @@ def _prepare_house_assumptions(
         ]
 
     observed_r_and_m = _sum_opex_bucket(prepared, "repairs_maintenance")
-    r_and_m_per_unit = default_r_and_m_per_unit(
-        year_built,
-        strategy=strategy,
-        deferred=False,
-    )
+    r_and_m_per_unit = guardrail_profile.r_and_m_per_unit()
     r_and_m_floor_annual = None
     r_and_m_top_up = Decimal("0")
     if r_and_m_per_unit is not None and units:
         r_and_m_floor_annual = r_and_m_per_unit * Decimal(str(units))
         if observed_r_and_m < r_and_m_floor_annual:
             r_and_m_top_up = r_and_m_floor_annual - observed_r_and_m
-            _upsert_annual_opex(
-                prepared,
-                category_name="Repairs & Maintenance Vintage Floor Top-Up",
-                annual_amount=r_and_m_top_up,
-            )
-            policy_overrides.append({
-                "input": "opex_table.repairs_maintenance",
-                "original_annual": float(observed_r_and_m),
-                "applied_annual": float(r_and_m_floor_annual),
-            })
+    # The R&M floor tops the bucket up with one line (shared guardrail).
+    guardrail_findings += guardrails.enforce_floors(
+        prepared,
+        mode=guardrails.MODE_PRICING,
+        profile=guardrail_profile,
+        context={"policy_overrides": policy_overrides},
+        keys=("r_and_m_per_unit",),
+    )
 
     if metadata.get("address"):
         property_summary["address"] = metadata["address"]
@@ -1270,6 +1139,7 @@ def _prepare_house_assumptions(
         trailing_actuals=trailing_actuals,
     )
     revenue_summary["policy_overrides"] = policy_overrides + revenue_summary["policy_overrides"]
+    guardrail_findings += revenue_summary.pop("guardrail_findings")
     if rebase_summary.get("unsupported_upside_units", 0):
         revenue_summary["market_rent_requires_comp_support"] = True
     bridge_required, bridge_required_reason = _ancillary_income_bridge_required(
@@ -1328,6 +1198,11 @@ def _prepare_house_assumptions(
         "revenue_quality_bridge_required_reason": bridge_required_reason,
         "revenue_quality_bridge": revenue_quality_summary,
         **revenue_summary,
+        "guardrails": {
+            "mode": guardrails.MODE_PRICING,
+            "profile": guardrail_profile.to_dict(),
+            "findings": guardrail_findings,
+        },
     }
     return prepared, policy_summary
 
@@ -1426,6 +1301,30 @@ def _evaluate_case(case: dict[str, Any]) -> tuple[dict[str, Any], Decimal]:
     if coc is None:
         raise RuntimeError("Engine did not produce cash_on_cash_year_1 for backsolve case.")
     return results, dec(coc)
+
+
+def _with_pricing_assumptions(
+    case: dict[str, Any],
+    *,
+    strategy: str,
+    year_built: int | None,
+    findings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Re-resolve the solved case's ``assumptions`` in pricing mode (ADR 0003 slice 6).
+
+    The case was built from a copy whose floors backsolve already enforced, so
+    its ``assumptions`` section (if any) still described the pre-floor inputs.
+    The re-resolution records the priced values and the enforced floors and
+    enforces nothing again. Only ``assumptions`` and ``deal_profile`` are taken
+    from it, so every priced number in the case is unchanged.
+    """
+    resolved = resolve_assumptions(
+        case,
+        deal_profile=guardrails.pricing_profile(case, strategy=strategy, year_built=year_built),
+        mode=guardrails.MODE_PRICING,
+        guardrail_context={"enforced": findings},
+    )
+    return {**case, "deal_profile": resolved["deal_profile"], "assumptions": resolved["assumptions"]}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -1551,6 +1450,12 @@ def backsolve_price(
             infeasible_case, infeasible_coc = case, coc
     status = "ceiling_feasible" if search_ceiling_reached else (
         "converged" if hi - lo <= _PRICE_CENT else "iteration_limit")
+    solved_case = _with_pricing_assumptions(
+        solved_case,
+        strategy=values["strategy"],
+        year_built=values["year_built"],
+        findings=(policy_summary.get("guardrails") or {}).get("findings") or [],
+    )
     solved_by_year = solved_results["cashflow"]["by_year"]
     solved_projected_noi = dec(solved_by_year[1 if len(solved_by_year) >= 2 else 0]["net_operating_income"])
     summary = {
