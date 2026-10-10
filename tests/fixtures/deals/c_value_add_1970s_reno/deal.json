@@ -1,0 +1,328 @@
+{
+  "slug": "c_value_add_1970s_reno",
+  "property_id": "SYN-C-CORVANE",
+  "property_name": "Corvane Gardens (synthetic)",
+  "summary": "Value-add 1974 garden deal, 150 units, market data and an interior renovation program.",
+  "synthetic": true,
+  "documents": {
+    "rent_roll": "rent_roll.csv",
+    "t12": "t12.csv"
+  },
+  "analysis": {
+    "start": "2026-11",
+    "end": "2031-10"
+  },
+  "deal_profile": {
+    "deal_type": "value_add",
+    "year_built": 1974,
+    "msa": {
+      "name": "Corvane Synthetic MSA",
+      "metro_slug": "corvane_sx",
+      "cbsa_code": "99903"
+    },
+    "metro_slug": "corvane_sx",
+    "submarket": "Corvane East"
+  },
+  "economics": {
+    "purchase_price": 18210000,
+    "ltv": 0.65,
+    "loan_rate": 0.0625,
+    "amort_years": 30,
+    "io_months": 36,
+    "exit_month": "2031-10",
+    "sale_cost_pct": 0.02,
+    "exit_cap_rate": null
+  },
+  "analyst_inputs": {
+    "metadata": {
+      "property_summary": {
+        "property_tax_policy": {
+          "millage_rate_mills": 22.0,
+          "assessment_ratio": 0.6,
+          "source": "synthetic_tax_bill",
+          "source_locator": "tests/fixtures/deals/c_value_add_1970s_reno/deal.json",
+          "analyst_override": true
+        }
+      }
+    },
+    "renovation_programs": [
+      {
+        "program_id": "interior_1br",
+        "program_name": "1BR interior renovation",
+        "target_cohort": "1br1ba",
+        "output_cohort": "1br1ba_reno",
+        "renovation_cost_per_unit": 11500,
+        "rent_premium_monthly": 175.0,
+        "downtime_days": 30,
+        "strategy": "proactive",
+        "start_month": "2027-01",
+        "monthly_pace": 3,
+        "max_units": 50
+      },
+      {
+        "program_id": "interior_2br",
+        "program_name": "2BR/1BA interior renovation",
+        "target_cohort": "2br1ba",
+        "output_cohort": "2br1ba_reno",
+        "renovation_cost_per_unit": 13500,
+        "rent_premium_monthly": 175.0,
+        "downtime_days": 30,
+        "strategy": "proactive",
+        "start_month": "2027-02",
+        "monthly_pace": 2,
+        "max_units": 40
+      }
+    ]
+  },
+  "market_data": {
+    "provider": "synthetic",
+    "as_of": "2026-09-30",
+    "confidence": "high",
+    "observations": [
+      {
+        "metric": "rent_growth_forecast",
+        "level": "submarket",
+        "value": {
+          "2026Q4": 0.02,
+          "2027Q1": 0.022,
+          "2027Q2": 0.025,
+          "2027Q3": 0.028,
+          "2027Q4": 0.03,
+          "2028Q1": 0.031,
+          "2028Q2": 0.032,
+          "2028Q3": 0.033,
+          "2028Q4": 0.034
+        }
+      },
+      {
+        "metric": "rent_growth_forecast",
+        "level": "msa",
+        "value": {
+          "2026Q4": 0.017,
+          "2027Q1": 0.019,
+          "2027Q2": 0.022,
+          "2027Q3": 0.025,
+          "2027Q4": 0.027,
+          "2028Q1": 0.028,
+          "2028Q2": 0.029,
+          "2028Q3": 0.03,
+          "2028Q4": 0.031
+        }
+      },
+      {
+        "metric": "rent_growth_long_run",
+        "level": "msa",
+        "value": 0.027
+      },
+      {
+        "metric": "vacancy_stabilized",
+        "level": "submarket",
+        "value": 0.065
+      },
+      {
+        "metric": "vacancy_stabilized",
+        "level": "msa",
+        "value": 0.068
+      },
+      {
+        "metric": "concession_rate",
+        "level": "submarket",
+        "value": 0.012
+      },
+      {
+        "metric": "market_cap_rate",
+        "level": "submarket",
+        "value": {
+          "2026Q4": 0.059,
+          "2027Q4": 0.0595,
+          "2028Q4": 0.0598,
+          "2029Q4": 0.06,
+          "2030Q4": 0.06,
+          "2031Q1": 0.0598,
+          "2031Q2": 0.06,
+          "2031Q3": 0.0602,
+          "2031Q4": 0.0604
+        }
+      },
+      {
+        "metric": "renovation_premium",
+        "level": "submarket",
+        "value": 175.0
+      }
+    ]
+  },
+  "expected": {
+    "documents": {
+      "units": 150,
+      "rent_roll_physical_vacancy": 0.08,
+      "rent_roll_loss_to_lease": 0.059745,
+      "rent_roll_gpr_annual": 2350200.0,
+      "t12_gpr_annual": 2332573.5,
+      "t12_total_income": 2128623.74,
+      "t12_total_opex": 1017144.07,
+      "t12_opex_to_egi": 0.477841,
+      "t12_opex_by_category": {
+        "Payroll": 172500.0,
+        "Repairs & Maintenance": 202500.0,
+        "Turnover / Make-Ready": 49500.0,
+        "Landscaping / Grounds": 21000.0,
+        "Pest Control": 7500.0,
+        "Utilities": 127500.0,
+        "Office Supplies": 13500.0,
+        "Telephone": 10500.0,
+        "Marketing / Advertising": 15000.0,
+        "Insurance": 102000.0,
+        "Real Estate Taxes": 221142.24,
+        "Property Management Fee": 74501.83
+      }
+    },
+    "ingest_gate": "PASS",
+    "sources": {
+      "rent_growth": "market:synthetic",
+      "physical_vacancy": "market:synthetic",
+      "loss_to_lease": "house:vintage_1970s",
+      "concessions": "deal:t12",
+      "collection_loss": "deal:t12",
+      "exit_cap_rate": "market:synthetic",
+      "insurance_per_unit": "deal:t12",
+      "r_and_m_per_unit": "deal:t12",
+      "replacement_reserve_per_unit": "engine_fallback",
+      "turn_cost_per_unit": "house:vintage_1970s",
+      "sale_cost_percent": "analyst"
+    },
+    "bands": {
+      "rent_growth": [
+        [
+          0.028,
+          0.032
+        ],
+        [
+          0.032,
+          0.036
+        ],
+        [
+          0.029,
+          0.032
+        ],
+        [
+          0.026,
+          0.028
+        ]
+      ],
+      "vacancy_start": [
+        0.07,
+        0.09
+      ],
+      "vacancy_stabilized": [
+        0.06,
+        0.07
+      ],
+      "loss_to_lease_start": [
+        0.05,
+        0.07
+      ],
+      "loss_to_lease_floor": [
+        0.02,
+        0.02
+      ],
+      "concessions_year1": [
+        0.008,
+        0.012
+      ],
+      "concessions_stabilized": [
+        0.01,
+        0.014
+      ],
+      "collection_loss": [
+        0.015,
+        0.021
+      ],
+      "exit_cap_rate": [
+        0.0595,
+        0.0605
+      ],
+      "insurance_per_unit": [
+        680,
+        760
+      ],
+      "r_and_m_per_unit": [
+        1300,
+        1400
+      ]
+    },
+    "opex_growth": {
+      "Payroll": [
+        0.035,
+        0.035
+      ],
+      "Repairs & Maintenance": [
+        0.03,
+        0.03
+      ],
+      "Turnover / Make-Ready": [
+        0.03,
+        0.03
+      ],
+      "Landscaping / Grounds": [
+        0.03,
+        0.03
+      ],
+      "Pest Control": [
+        0.03,
+        0.03
+      ],
+      "Utilities": [
+        0.035,
+        0.035
+      ],
+      "Office Supplies": [
+        0.025,
+        0.03
+      ],
+      "Telephone": [
+        0.025,
+        0.03
+      ],
+      "Marketing / Advertising": [
+        0.025,
+        0.025
+      ],
+      "Insurance": [
+        0.05,
+        0.05
+      ],
+      "Real Estate Taxes": [
+        0.0,
+        0.0
+      ],
+      "Property Management Fee": [
+        0.03,
+        0.03
+      ]
+    },
+    "results": {
+      "unlevered_irr": [
+        0.05,
+        0.12
+      ],
+      "levered_irr": [
+        0.04,
+        0.2
+      ],
+      "minimum_dscr": [
+        1.0,
+        2.0
+      ],
+      "going_in_cap_rate": [
+        0.05,
+        0.066
+      ]
+    },
+    "guardrail_warnings": [
+      "physical_vacancy",
+      "concessions",
+      "r_and_m_per_unit",
+      "replacement_reserve_per_unit"
+    ]
+  }
+}

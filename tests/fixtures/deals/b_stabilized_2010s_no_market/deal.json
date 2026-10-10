@@ -1,0 +1,220 @@
+{
+  "slug": "b_stabilized_2010s_no_market",
+  "property_id": "SYN-B-TESSALINE",
+  "property_name": "Tessaline Court (synthetic)",
+  "summary": "Stabilized 2014 mid-rise deal, 120 units, no market data (house fallback path).",
+  "synthetic": true,
+  "documents": {
+    "rent_roll": "rent_roll.csv",
+    "t12": "t12.csv"
+  },
+  "analysis": {
+    "start": "2026-11",
+    "end": "2031-10"
+  },
+  "deal_profile": {
+    "deal_type": "stabilized",
+    "year_built": 2014,
+    "msa": {
+      "name": "Tessaline Synthetic MSA",
+      "metro_slug": "tessaline_sx"
+    },
+    "metro_slug": "tessaline_sx",
+    "submarket": "Tessaline Uptown"
+  },
+  "economics": {
+    "purchase_price": 30880000,
+    "ltv": 0.6,
+    "loan_rate": 0.0575,
+    "amort_years": 30,
+    "io_months": 36,
+    "exit_month": "2031-10",
+    "sale_cost_pct": 0.02,
+    "exit_cap_rate": 0.0575
+  },
+  "analyst_inputs": {
+    "metadata": {
+      "property_summary": {
+        "property_tax_policy": {
+          "millage_rate_mills": 22.0,
+          "assessment_ratio": 0.65,
+          "source": "synthetic_tax_bill",
+          "source_locator": "tests/fixtures/deals/b_stabilized_2010s_no_market/deal.json",
+          "analyst_override": true
+        }
+      }
+    }
+  },
+  "market_data": null,
+  "expected": {
+    "documents": {
+      "units": 120,
+      "rent_roll_physical_vacancy": 0.05,
+      "rent_roll_loss_to_lease": 0.022477,
+      "rent_roll_gpr_annual": 2750400.0,
+      "t12_gpr_annual": 2729772.0,
+      "t12_total_income": 2631411.6,
+      "t12_total_opex": 988047.15,
+      "t12_opex_to_egi": 0.375482,
+      "t12_opex_by_category": {
+        "Payroll": 168000.0,
+        "Repairs & Maintenance": 66000.0,
+        "Turnover / Make-Ready": 30000.0,
+        "Landscaping / Grounds": 24000.0,
+        "Pest Control": 4800.0,
+        "Utilities": 90000.0,
+        "Office Supplies": 9600.0,
+        "Telephone": 8400.0,
+        "Marketing / Advertising": 21600.0,
+        "Insurance": 67200.0,
+        "Real Estate Taxes": 419504.8,
+        "Property Management Fee": 78942.35
+      }
+    },
+    "ingest_gate": "PASS",
+    "sources": {
+      "rent_growth": "house:long_run_rent_growth",
+      "physical_vacancy": "house:vintage_2010s",
+      "loss_to_lease": "house:vintage_2010s",
+      "concessions": "deal:t12",
+      "collection_loss": "deal:t12",
+      "exit_cap_rate": "analyst",
+      "insurance_per_unit": "deal:t12",
+      "r_and_m_per_unit": "deal:t12",
+      "replacement_reserve_per_unit": "engine_fallback",
+      "sale_cost_percent": "analyst"
+    },
+    "bands": {
+      "rent_growth": [
+        [
+          0.025,
+          0.025
+        ],
+        [
+          0.025,
+          0.025
+        ],
+        [
+          0.025,
+          0.025
+        ],
+        [
+          0.025,
+          0.025
+        ]
+      ],
+      "vacancy_start": [
+        0.045,
+        0.055
+      ],
+      "vacancy_stabilized": [
+        0.05,
+        0.055
+      ],
+      "loss_to_lease_start": [
+        0.015,
+        0.03
+      ],
+      "loss_to_lease_floor": [
+        0.005,
+        0.005
+      ],
+      "concessions_year1": [
+        0.012,
+        0.018
+      ],
+      "concessions_stabilized": [
+        0.01,
+        0.01
+      ],
+      "collection_loss": [
+        0.004,
+        0.006
+      ],
+      "exit_cap_rate": [
+        0.0575,
+        0.0575
+      ],
+      "insurance_per_unit": [
+        540,
+        580
+      ],
+      "r_and_m_per_unit": [
+        500,
+        600
+      ]
+    },
+    "opex_growth": {
+      "Payroll": [
+        0.035,
+        0.035
+      ],
+      "Repairs & Maintenance": [
+        0.03,
+        0.03
+      ],
+      "Turnover / Make-Ready": [
+        0.03,
+        0.03
+      ],
+      "Landscaping / Grounds": [
+        0.03,
+        0.03
+      ],
+      "Pest Control": [
+        0.03,
+        0.03
+      ],
+      "Utilities": [
+        0.035,
+        0.035
+      ],
+      "Office Supplies": [
+        0.025,
+        0.03
+      ],
+      "Telephone": [
+        0.025,
+        0.03
+      ],
+      "Marketing / Advertising": [
+        0.025,
+        0.025
+      ],
+      "Insurance": [
+        0.05,
+        0.05
+      ],
+      "Real Estate Taxes": [
+        0.0,
+        0.0
+      ],
+      "Property Management Fee": [
+        0.03,
+        0.03
+      ]
+    },
+    "results": {
+      "unlevered_irr": [
+        0.04,
+        0.09
+      ],
+      "levered_irr": [
+        0.03,
+        0.14
+      ],
+      "minimum_dscr": [
+        1.1,
+        2.0
+      ],
+      "going_in_cap_rate": [
+        0.045,
+        0.058
+      ]
+    },
+    "guardrail_warnings": [
+      "insurance_per_unit",
+      "replacement_reserve_per_unit"
+    ]
+  }
+}
