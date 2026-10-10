@@ -540,6 +540,16 @@ def default_bad_debt_rate(year_built: Optional[int]) -> Decimal:
         return HOUSE_DEFAULT_COLLECTION_LOSS
     return VINTAGE_FRAMEWORK_2026[bucket]["bad_debt_typical_low"]
 
+# Exit cap rate when an exit is modeled but neither the analyst nor market
+# data supplies one (ADR 0003 §3): the going-in cap rate (trailing T12 NOI /
+# purchase price) plus this spread. 50 bps of cap-rate expansion over a
+# typical 5-year hold is the conservative house assumption: it prices the exit
+# on an older asset in a market that may not stay as tight as today's.
+HOUSE_EXIT_CAP_SPREAD = Decimal("0.0050")
+# A trailing NOI / purchase price above this is not a usable going-in cap rate
+# (the price or the T12 is not comparable), so the house spread is not applied.
+HOUSE_EXIT_CAP_GOING_IN_MAX = Decimal("0.25")
+
 
 def typical_physical_vacancy_rate(year_built: Optional[int]) -> Optional[Decimal]:
     """House stabilized vacancy: midpoint of the vintage typical physical-vacancy band."""

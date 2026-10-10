@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -134,8 +135,9 @@ def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
         ("insurance_per_unit", "deal:t12", 25_200.0,
          ["deal:t12", "house:year1_insurance_floor", "engine_fallback"]),
         ("r_and_m_per_unit", "deal:t12", 19_500.0, ["deal:t12", "house:vintage_1980s", "engine_fallback"]),
-        ("replacement_reserve_per_unit", "engine_fallback", 0.0, ["house:vintage_1980s", "engine_fallback"]),
-        ("exit_cap_rate", "analyst", 0.055, ["analyst", "engine_fallback"]),
+        # The house vintage reserve is written when the canonical carries none.
+        ("replacement_reserve_per_unit", "house:vintage_1980s", 1_000.0, ["house:vintage_1980s", "engine_fallback"]),
+        ("exit_cap_rate", "analyst", 0.055, ["analyst", "house:exit_cap_spread", "engine_fallback"]),
         ("sale_cost_percent", "house:backsolve_policy", 0.02, ["house:backsolve_policy", "engine_fallback"]),
         ("acquisition_fee_pct", "house:backsolve_policy", 0.01, ["house:backsolve_policy", "engine_fallback"]),
         ("asset_management_fee_pct", "house:backsolve_policy", 0.015,
@@ -143,7 +145,8 @@ def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
         ("disposition_fee_pct", "house:backsolve_policy", 0.01, ["house:backsolve_policy", "engine_fallback"]),
         ("annual_partnership_expenses", "engine_fallback", 0.0, ["house:backsolve_policy", "engine_fallback"]),
         ("partnership_closing_costs", "engine_fallback", 0.0, ["house:backsolve_policy", "engine_fallback"]),
-        ("purchase_closing_cost_pct", "engine_fallback", 0.0, ["house:backsolve_policy", "engine_fallback"]),
+        ("purchase_closing_cost_pct", "house:backsolve_policy", 0.015,
+         ["house:backsolve_policy", "engine_fallback"]),
         ("loan_closing_costs", "engine_fallback", 0.0, ["house:backsolve_policy", "engine_fallback"]),
     ],
 )
@@ -181,17 +184,14 @@ def test_deal_evidence_candidates_come_from_the_documents(full_deal):
 
 def test_where_adr_precedence_would_change_a_number_the_basis_says_so(full_deal):
     entries = _entries(full_deal)
-    for key in (
-        "replacement_reserve_per_unit",
-        "annual_partnership_expenses",
-        "partnership_closing_costs",
-        "purchase_closing_cost_pct",
-    ):
+    for key in ("annual_partnership_expenses", "partnership_closing_costs"):
         assert "ADR 0003 precedence would select" in entries[key]["basis"], key
-        assert "today's" in entries[key]["basis"], key
-    # Slice 4 resolves these keys by the ADR precedence itself.
+        assert "does not fill this field outside pricing" in entries[key]["basis"], key
+    # These keys resolve by the ADR precedence itself (reserves and closing costs
+    # now take the house value), so no note is left.
     for key in ("physical_vacancy", "insurance_per_unit", "r_and_m_per_unit", "rent_growth",
-                "collection_loss", "loss_to_lease", "concessions"):
+                "collection_loss", "loss_to_lease", "concessions", "replacement_reserve_per_unit",
+                "purchase_closing_cost_pct"):
         assert "ADR 0003 precedence" not in entries[key]["basis"], key
 
 
@@ -227,7 +227,7 @@ def test_value_add_profile_uses_value_add_house_values_and_adds_turn_cost():
         "submarket": {"name": "Synthetic North"},
         "year_built": 1984,
     }
-    assert _v1_keys(entries) == STABILIZED_KEYS | {"turn_cost_per_unit"}
+    assert _v1_keys(entries) == STABILIZED_KEYS | {"turn_cost_per_unit", "renovation_premium"}
     # Slice 4: T12 bad debt wins; value_add stabilizes over 24 months to a higher LTL floor.
     assert entries["collection_loss"]["value"] == pytest.approx(0.015)
     assert entries["collection_loss"]["source"] == "deal:t12"
@@ -389,7 +389,7 @@ def test_override_validation():
         resolve_assumptions(deal, overrides={"turn_cost_per_unit": 4_000})
     with pytest.raises(ValueError, match="mode"):
         resolve_assumptions(deal, mode="stress")
-    assert set(ASSUMPTION_KEYS) == STABILIZED_KEYS | {"turn_cost_per_unit"}
+    assert set(ASSUMPTION_KEYS) == STABILIZED_KEYS | {"turn_cost_per_unit", "renovation_premium"}
 
 
 def test_input_is_not_mutated(minimal_deal_inputs):
@@ -496,8 +496,9 @@ def test_ingest_economics_are_unchanged(full_deal):
     assert full_deal["exit_assumptions"] == {
         "exit_cap_rate": 0.055, "exit_month": "2031-07", "sale_cost_percent": 0.02,
     }
+    # Closing costs: the house 1.5% of price (ingest's 0.0 is a placeholder).
     assert full_deal["purchase_assumptions"] == {
-        "purchase_price": 25_000_000, "equity_contribution": 6_250_000.0, "closing_costs": 0.0,
+        "purchase_price": 25_000_000, "equity_contribution": 6_250_000.0, "closing_costs": 375_000.0,
     }
     assert full_deal["debt_terms"]["commitment"] == pytest.approx(18_750_000)
     fund = full_deal["fund_assumptions"]
@@ -676,3 +677,204 @@ def test_cli_rejects_reserved_deal_type(tmp_path, monkeypatch, capsys):
     ])
     assert ingest_deal.main() == 2
     assert "reserved" in capsys.readouterr().err
+
+
+# ── gap fill: reserves, closing costs, exit cap, renovation premium ──────
+
+
+def test_house_reserve_is_written_when_the_canonical_has_none():
+    deal = _ingest(year_built=1984, deal_type="value_add")
+    entry = _entries(deal)["replacement_reserve_per_unit"]
+    per_unit = float(house.default_replacement_reserve_per_unit(1984, strategy="value_add"))
+
+    assert per_unit == 1_750.0  # value-add: midpoint of the 1980s economic CapEx band
+    assert (entry["source"], entry["value"], entry["review_required"]) == ("house:vintage_1980s", per_unit, True)
+    assert deal["replacement_reserves"] == [
+        {"start_period": "2026-08", "end_period": "2031-07", "annual_amount": per_unit * 10}
+    ]
+    assert "ADR 0003 precedence" not in entry["basis"]
+    assert resolve_assumptions(deal) == deal
+    # No guardrail warning: the house reserve is the floor.
+    assert "guardrail" not in entry
+
+
+def test_analyst_reserve_and_closing_costs_win(minimal_deal_inputs):
+    deal = copy.deepcopy(minimal_deal_inputs)
+    deal["metadata"]["year_built"] = 1984
+    resolved = resolve_assumptions(deal)
+    entries = _entries(resolved)
+
+    assert resolved["replacement_reserves"] == minimal_deal_inputs["replacement_reserves"]
+    assert entries["replacement_reserve_per_unit"]["source"] == "analyst"
+    assert resolved["purchase_assumptions"]["closing_costs"] == 150_000
+    assert entries["purchase_closing_cost_pct"]["source"] == "analyst"
+    assert entries["purchase_closing_cost_pct"]["default_value"] == 0.015
+
+    explicit = _ingest(year_built=1984, purchase_price=10_000_000,
+                       assumption_overrides={"purchase_closing_cost_pct": 0.01})
+    assert explicit["purchase_assumptions"]["closing_costs"] == 100_000.0
+    assert _entries(explicit)["purchase_closing_cost_pct"]["source"] == "analyst"
+
+
+def test_house_closing_costs_fill_a_purchase_section_without_them(minimal_deal_inputs):
+    deal = _ingest(purchase_price=10_000_000)
+    entry = _entries(deal)["purchase_closing_cost_pct"]
+    assert deal["purchase_assumptions"]["closing_costs"] == 150_000.0
+    assert (entry["source"], entry["value"], entry["review_required"]) == ("house:backsolve_policy", 0.015, True)
+    assert resolve_assumptions(deal) == deal
+
+    hand = copy.deepcopy(minimal_deal_inputs)
+    hand["purchase_assumptions"].pop("closing_costs")
+    resolved = resolve_assumptions(hand)
+    assert resolved["purchase_assumptions"]["closing_costs"] == 13_500_000 * 0.015
+    assert _entries(resolved)["purchase_closing_cost_pct"]["source"] == "house:backsolve_policy"
+
+
+def test_exit_cap_falls_back_to_going_in_plus_the_house_spread():
+    deal = _ingest(year_built=1984, purchase_price=25_000_000, exit_month="2031-07", market=None)
+    entry = _entries(deal)["exit_cap_rate"]
+    going_in = (6_381_000 - 3_087_000) / 25_000_000  # T12 NOI / price
+
+    assert house.HOUSE_EXIT_CAP_SPREAD == Decimal("0.0050")
+    assert entry["source"] == "house:exit_cap_spread"
+    assert entry["value"] == pytest.approx(going_in + 0.005)
+    assert entry["review_required"] is True
+    assert deal["exit_assumptions"]["exit_cap_rate"] == entry["value"]
+    assert "going-in cap" in entry["basis"] and "50 bps" in entry["basis"]
+    assert validate_schema(deal) == []
+    assert resolve_assumptions(deal) == deal
+
+    # The analyst still wins, and no exit means no exit cap.
+    analyst = _ingest(purchase_price=25_000_000, exit_cap_rate=0.06, market=None)
+    assert _entries(analyst)["exit_cap_rate"]["source"] == "analyst"
+    assert "exit_assumptions" not in _ingest(purchase_price=25_000_000, market=None)
+
+
+_PROGRAM = {
+    "program_id": "interior_1br", "program_name": "1BR interior", "target_cohort": "1br1ba",
+    "output_cohort": "1br1ba_reno", "renovation_cost_per_unit": 9_000, "rent_premium_monthly": 150.0,
+    "downtime_days": 30, "strategy": "proactive", "start_month": "2027-01", "monthly_pace": 1, "max_units": 2,
+}
+
+
+class _PremiumMarket:
+    """A registry stand-in with only a renovation premium."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def resolve(self, metric, geo, as_of=None):
+        from datetime import date
+
+        from engine.market_data import SyntheticProvider
+
+        if metric != "renovation_premium":
+            return None, []
+        provider = SyntheticProvider({(metric, geo): self.value}, as_of=date(2026, 6, 30), confidence="medium")
+        return provider.get(metric, geo), []
+
+
+def test_renovation_premium_without_programs_is_flagged():
+    deal = _ingest(year_built=1984, deal_type="value_add", market=None)
+    entry = _entries(deal)["renovation_premium"]
+    assert (entry["source"], entry["value"], entry["review_required"]) == ("engine_fallback", None, True)
+    assert "no renovation_programs" in entry["basis"] and "no house premium" in entry["basis"]
+    assert "renovation_premium" not in _entries(_ingest(year_built=1984))  # value-add only
+
+    with_market = _ingest(year_built=1984, deal_type="value_add", metro_slug="synthetic_metro",
+                          market=_PremiumMarket(180.0))
+    entry = _entries(with_market)["renovation_premium"]
+    assert entry["value"] == 180.0 and entry["source"].startswith("market:")
+    assert entry["review_required"] is True  # still no program to apply it to
+    assert "no renovation_programs" in entry["basis"]
+
+
+def test_renovation_premium_precedence_program_then_comps_then_market():
+    base = _ingest(year_built=1984, deal_type="value_add", metro_slug="synthetic_metro", market=None)
+    market = _PremiumMarket(180.0)
+
+    # A program with its own premium is the analyst's value.
+    deal = copy.deepcopy(base)
+    deal["renovation_programs"] = [dict(_PROGRAM)]
+    entry = _entries(resolve_assumptions(deal, market=market))["renovation_premium"]
+    assert (entry["source"], entry["value"], entry["default_value"]) == ("analyst", 150.0, 180.0)
+
+    # A program without a premium is filled: comps evidence, else the market metric.
+    deal["renovation_programs"][0]["rent_premium_monthly"] = None
+    resolved = resolve_assumptions(deal, market=market)
+    assert resolved["renovation_programs"][0]["rent_premium_monthly"] == 180.0
+    entry = _entries(resolved)["renovation_premium"]
+    assert entry["source"].startswith("market:") and entry["review_required"] is False
+
+    deal["metadata"]["ingest_gate"]["evidence"]["comps"] = {
+        "renovated_effective_rent": 1_400.0, "classic_effective_rent": 1_235.0,
+    }
+    resolved = resolve_assumptions(deal, market=market)
+    assert resolved["renovation_programs"][0]["rent_premium_monthly"] == 165.0
+    assert _entries(resolved)["renovation_premium"]["source"] == "deal:comps"
+    assert resolve_assumptions(resolved, market=market) == resolved
+
+    # An override sets every program's premium.
+    overridden = resolve_assumptions(resolved, overrides={"renovation_premium": 200}, market=market)
+    assert overridden["renovation_programs"][0]["rent_premium_monthly"] == 200.0
+    assert _entries(overridden)["renovation_premium"]["source"] == "analyst"
+
+
+# ── null clears an override; cohort overrides only where supported ──────
+
+
+@pytest.mark.parametrize("cleared", [None, {"value": None}, {"value": None, "note": "back to default"}])
+def test_null_override_clears_the_override(cleared):
+    deal = _ingest(year_built=1984)
+    overridden = resolve_assumptions(deal, overrides={"rent_growth": 0.04, "collection_loss": 0.03})
+    assert _entries(overridden)["rent_growth"]["source"] == "analyst"
+
+    cleared_deal = resolve_assumptions(overridden, overrides={"rent_growth": cleared})
+    growth = _entries(cleared_deal)["rent_growth"]
+    assert growth["override"] is None
+    assert growth["source"] == "house:long_run_rent_growth"
+    assert growth["value"] == growth["default_value"] == [0.025, 0.025, 0.025, 0.025]
+    assert cleared_deal["growth_assumptions"]["annual_growth_rates"] == [0.025] * 4
+    # Only the cleared key moves; a later plain re-resolve keeps it cleared.
+    assert _entries(cleared_deal)["collection_loss"]["override"]["value"] == 0.03
+    assert resolve_assumptions(cleared_deal) == cleared_deal
+    assert {k: v for k, v in cleared_deal.items() if k != "assumptions"} == {
+        k: v for k, v in resolve_assumptions(deal, overrides={"collection_loss": 0.03}).items()
+        if k != "assumptions"
+    }
+
+
+def test_null_override_reverts_a_hand_authored_value(minimal_deal_inputs):
+    resolved = resolve_assumptions(minimal_deal_inputs, overrides={"collection_loss": None})
+    entry = _entries(resolved)["collection_loss"]
+    assert entry["override"] is None
+    assert entry["source"] == "house:default_collection_loss"
+    assert {row["loss_rate"] for row in resolved["collection_loss_curve"]} == {entry["default_value"]}
+
+
+def test_normalize_overrides_marks_a_clear_and_rejects_unsupported_cohorts():
+    from engine.assumptions import normalize_overrides
+    from engine.assumptions.resolver import COHORT_OVERRIDE_KEYS
+
+    assert normalize_overrides({"rent_growth": None})["rent_growth"]["clear"] is True
+    assert COHORT_OVERRIDE_KEYS == {"physical_vacancy", "loss_to_lease"}
+    with pytest.raises(AssumptionOverrideError, match="does not support cohort_overrides"):
+        normalize_overrides({"concessions": {"value": 0.01, "cohort_overrides": {"1br1ba": 0.02}}})
+    accepted = normalize_overrides({"physical_vacancy": {"value": 0.05, "cohort_overrides": {"1br1ba": 0.08}}})
+    assert accepted["physical_vacancy"]["cohort_overrides"] == {"1br1ba": 0.08}
+
+
+# ── asset class -> star tier ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("asset_class, star_tier", [("A", "4_5"), ("B", "3"), ("C", "1_2")])
+def test_asset_class_defaults_the_star_tier(asset_class, star_tier):
+    from engine.assumptions.curves import profile_geo
+
+    profile = DealProfile(asset_class=asset_class, msa={"metro_slug": "synthetic_metro"})
+    assert profile.star_tier == star_tier
+    assert profile.to_dict()["star_tier"] == star_tier
+    assert DealProfile.from_dict(profile.to_dict()) == profile
+    assert profile_geo(profile).star_tier is not None
+    # An explicit star tier wins.
+    assert DealProfile(asset_class=asset_class, star_tier="3").star_tier == "3"

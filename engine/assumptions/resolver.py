@@ -1,16 +1,39 @@
-"""Assumption resolver v1 (ADR 0003, slice 2).
+"""Assumption resolver v1 (ADR 0003).
 
 ``resolve_assumptions`` gathers every candidate for each assumption key
 (analyst, deal evidence, market, house policy, engine fallback), records them
 with provenance in the canonical ``assumptions`` section, and writes the
 resolved value into the existing canonical field the engine reads.
 
-Slice 2 changed no numbers. Slice 4 (``engine/assumptions/curves.py``) applies
-the ADR 0003 §3 precedence to rent_growth, physical_vacancy, loss_to_lease,
-concessions, collection_loss and exit_cap_rate, and reads market data through
-an ``engine.market_data`` registry. Every other key still resolves to the value
-ingest and the engine produced before the assumption layer; where the ADR
-precedence would pick a different candidate, the entry's ``basis`` says so.
+Semantics (v1):
+
+- Precedence is ADR 0003 §3: analyst override > deal evidence > submarket >
+  MSA > house default for (deal type, vintage) > engine fallback. The curve
+  keys (rent_growth, physical_vacancy, loss_to_lease, concessions,
+  collection_loss, exit_cap_rate) live in ``engine/assumptions/curves.py``;
+  per-line opex in ``engine/assumptions/opex.py``.
+- A value already in a canonical the resolver did not write is the analyst's
+  (``source: analyst``) and is kept. Ingested and hand-authored canonicals are
+  treated alike: where a field the engine reads is missing, the resolver
+  fills it with the resolved default and flags house or fallback values
+  ``review_required``. That covers rent growth (a ``growth_assumptions``
+  section is created when there is none), opex growth rates, the
+  replacement reserve (house vintage reserve x units over the analysis
+  window), purchase closing costs (house percent of price), the exit cap rate
+  of a modeled exit (market, else going-in cap + house spread) and a
+  renovation program's missing rent premium.
+- Overrides: ``{key: value | {"value", "note"[, "cohort_overrides"]}}``. A
+  ``null`` value (``{key: None}`` or ``{key: {"value": None}}``) clears the
+  key's override: the entry reverts to its resolved default and source.
+  ``cohort_overrides`` are accepted only by ``physical_vacancy`` and
+  ``loss_to_lease`` (``COHORT_OVERRIDE_KEYS``); any other key raises
+  ``AssumptionOverrideError``. ``opex.<slug>.base`` takes the line in annual
+  dollars (a percent for percent-of-revenue lines); ``0`` suppresses the line
+  (kept at $0 so house defaults never re-add it).
+- Only engine fallbacks remain where neither deal, market nor house supplies
+  a value; where ADR 0003 precedence would pick a house value the resolver
+  does not write (fund partnership expenses and closing costs outside
+  pricing), the entry's ``basis`` says so.
 """
 
 from __future__ import annotations
@@ -44,7 +67,9 @@ from engine.assumptions.registry import (
     MARKET_PREFIX,
     MODES,
     RESOLVER_VERSION,
+    HOUSE_EXIT_CAP_SPREAD,
     SOURCE_ANALYST,
+    SOURCE_DEAL_COMPS,
     SOURCE_DEAL_OM,
     SOURCE_DEAL_RENT_ROLL,
     SOURCE_DEAL_T12,
@@ -94,6 +119,8 @@ class _Choice:
     basis: str
     as_of: Optional[str] = None
     confidence: Optional[str] = None
+    # Forces review_required on (True) beyond the source rule; None follows the source.
+    review: Optional[bool] = None
 
 
 @dataclass
@@ -438,10 +465,26 @@ def _write_r_and_m(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float
     return True
 
 
+def _prior_entry(ctx: _Context, key: str) -> Optional[Mapping[str, Any]]:
+    """The entry ``key`` had at the last resolution, if any."""
+    section = ctx.canonical.get("assumptions")
+    entries = section.get("entries") if isinstance(section, Mapping) else None
+    entry = entries.get(key) if isinstance(entries, Mapping) else None
+    return entry if isinstance(entry, Mapping) else None
+
+
+def _house_reserve(ctx: _Context) -> Optional[Decimal]:
+    if ctx.bucket is None:
+        return None
+    return house.default_replacement_reserve_per_unit(ctx.year_built, strategy=ctx.strategy)
+
+
 def _read_reserves(ctx: _Context) -> _Current:
     rows = [row for row in ctx.canonical.get("replacement_reserves") or [] if isinstance(row, Mapping)]
     if not rows:
-        return _Current(ABSENT)
+        # No reserves: the resolver fills the house vintage reserve when it has one.
+        fillable = _house_reserve(ctx) is not None and ctx.units and len(ctx.start) == 7 and len(ctx.end) == 7
+        return _Current(PLACEHOLDER if fillable else ABSENT)
     first = sorted(rows, key=lambda r: str(r.get("start_period", "")))[0]
     if first.get("annual_amount") is None:
         return _Current(PLACEHOLDER)
@@ -473,13 +516,15 @@ def _read_purchase_closing(ctx: _Context) -> _Current:
     purchase = ctx.canonical.get("purchase_assumptions")
     if not isinstance(purchase, Mapping):
         return _Current(NO_SECTION)
-    if "closing_costs" not in purchase:
-        return _Current(ABSENT)
     closing, price = purchase.get("closing_costs"), _num(purchase.get("purchase_price"))
     if closing is None:
-        return _Current(PLACEHOLDER)
+        # No closing costs: the house percent of price is filled when there is a price.
+        return _Current(PLACEHOLDER if price else ABSENT)
     if not price:
         return _Current(PRESENT, None)
+    if ctx.ingested and _num(closing) == 0 and _prior_entry(ctx, "purchase_closing_cost_pct") is None:
+        # Ingest writes closing_costs = 0.0 as a placeholder; the analyst never set it.
+        return _Current(PLACEHOLDER)
     return _Current(PRESENT, float(Decimal(str(closing)) / Decimal(str(price))))
 
 
@@ -698,7 +743,15 @@ def _reserve_candidates(ctx: _Context) -> list[dict[str, Any]]:
 
 
 def _reserve_default(ctx: _Context, state: str) -> _Choice:
-    return _fallback(0.0, "No replacement_reserves in the canonical: the engine reserves nothing.")
+    candidate = next((c for c in _reserve_candidates(ctx) if c["source"].startswith(HOUSE_PREFIX)), None)
+    if candidate is not None:
+        return _choice_from(
+            candidate,
+            ctx,
+            candidate["basis"] + " Written as replacement_reserves = reserve per unit x units over the "
+            "analysis window when the canonical carries none.",
+        )
+    return _fallback(0.0, "Year built unknown, so no house vintage reserve is available: the engine reserves nothing.")
 
 
 def _turn_candidates(ctx: _Context) -> list[dict[str, Any]]:
@@ -717,11 +770,170 @@ def _turn_default(ctx: _Context, state: str) -> _Choice:
     return _fallback(None, "Year built unknown, so no house turn cost is available." + note)
 
 
+# ── renovation premium (value-add only, ADR 0003 §3) ─────────────────────
+
+
+def _renovation_programs(ctx: _Context) -> list[dict[str, Any]]:
+    return [p for p in ctx.canonical.get("renovation_programs") or [] if isinstance(p, dict)]
+
+
+def _program_premium(programs: list[dict[str, Any]]) -> float:
+    """One property-level premium: the programs' common premium, else the max_units-weighted mean."""
+    premiums = [float(_num(p["rent_premium_monthly"])) for p in programs]
+    if len(set(premiums)) == 1:
+        return premiums[0]
+    weights = [float(_num(p.get("max_units")) or 0) for p in programs]
+    if sum(weights) > 0:
+        return round(sum(w * v for w, v in zip(weights, premiums)) / sum(weights), 2)
+    return round(sum(premiums) / len(premiums), 2)
+
+
+def _read_renovation_premium(ctx: _Context) -> _Current:
+    programs = _renovation_programs(ctx)
+    if not programs:
+        return _Current(NO_FIELD)
+    if any(_num(p.get("rent_premium_monthly")) is None for p in programs):
+        return _Current(PLACEHOLDER)
+    return _Current(PRESENT, _program_premium(programs))
+
+
+def _write_renovation_premium(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    """Fill programs without a premium; an override sets every program's premium."""
+    programs = _renovation_programs(ctx)
+    if not programs or _num(value) is None:
+        return False
+    missing = [p for p in programs if _num(p.get("rent_premium_monthly")) is None]
+    for program in missing or programs:
+        program["rent_premium_monthly"] = float(value)
+    return True
+
+
+def _comps_premium(ctx: _Context) -> Optional[tuple[float, str]]:
+    comps = ctx.evidence.get("comps")
+    if not isinstance(comps, Mapping):
+        return None
+    premium = _num(comps.get("renovation_premium"))
+    if premium is not None:
+        return premium, f"Comp evidence: renovated-unit premium ${premium:,.2f}/unit/month."
+    renovated, classic = _num(comps.get("renovated_effective_rent")), _num(comps.get("classic_effective_rent"))
+    if renovated is None or classic is None:
+        return None
+    premium = round(renovated - classic, 2)
+    return premium, (
+        f"Comp evidence: renovated effective rent ${renovated:,.2f} - classic ${classic:,.2f} "
+        f"= ${premium:,.2f}/unit/month."
+    )
+
+
+def _renovation_premium_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    comps = _comps_premium(ctx)
+    if comps is not None:
+        out.append(_candidate(SOURCE_DEAL_COMPS, comps[0], comps[1]))
+    out.append(_candidate(
+        SOURCE_ENGINE_FALLBACK, None,
+        "No house renovation premium exists: without a program, comp or market premium none is modeled.",
+    ))
+    return out
+
+
+_NO_PROGRAMS = (
+    " This value-add deal has no renovation_programs, so no premium is modeled: add a renovation "
+    "program (or confirm the business plan has none)."
+)
+
+
+def _renovation_premium_default(ctx: _Context, state: str) -> _Choice:
+    no_programs = state == NO_FIELD
+    choice: Optional[_Choice] = None
+    comps = _comps_premium(ctx)
+    if comps is not None:
+        choice = _Choice(SOURCE_DEAL_COMPS, comps[0], comps[1], confidence="high")
+    else:
+        pick = _curves().market_pick(ctx, "renovation_premium")
+        if pick is not None:
+            value = round(float(pick.observation.scalar), 2)
+            choice = _Choice(
+                pick.source, value,
+                f"{pick.level} market renovation_premium ${value:,.2f}/unit/month from "
+                f"{pick.observation.provenance.provider} (renovated vs classic rent).",
+                as_of=pick.as_of, confidence=pick.observation.confidence,
+            )
+    if choice is None:
+        basis = (
+            "No renovation program premium, comp evidence or market renovation_premium is available, and "
+            "there is no house premium: the analyst must supply the premium."
+        )
+        return _Choice(SOURCE_ENGINE_FALLBACK, None, basis + (_NO_PROGRAMS if no_programs else ""),
+                       confidence="low", review=True)
+    if no_programs:
+        choice.basis += _NO_PROGRAMS
+        choice.review = True
+    return choice
+
+
+def _no_adr(_source: str) -> Optional[int]:
+    return None
+
+
+def _t12_total(gate: Mapping[str, Any], section: str) -> Optional[float]:
+    recon = gate.get("t12_reconciliation")
+    totals = recon.get(section) if isinstance(recon, Mapping) else None
+    if not isinstance(totals, Mapping):
+        return None
+    for name in ("statement_total", "parsed_total"):
+        value = _num(totals.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def t12_egi(canonical: Mapping[str, Any]) -> Optional[float]:
+    """Trailing EGI (T12 total income) from the ingest gate's reconciliation, else None."""
+    gate = (canonical.get("metadata") or {}).get("ingest_gate")
+    return _t12_total(gate, "income") if isinstance(gate, Mapping) else None
+
+
+def _going_in_cap(ctx: _Context) -> Optional[tuple[float, str]]:
+    """Going-in cap rate on trailing NOI: (T12 total income - T12 total opex) / purchase price."""
+    purchase = ctx.canonical.get("purchase_assumptions")
+    price = _num(purchase.get("purchase_price")) if isinstance(purchase, Mapping) else None
+    gate = (ctx.canonical.get("metadata") or {}).get("ingest_gate")
+    if not price or not isinstance(gate, Mapping):
+        return None
+    income, opex = _t12_total(gate, "income"), _t12_total(gate, "opex")
+    if income is None or opex is None:
+        return None
+    rate = (income - opex) / price
+    if not 0 < rate <= float(house.HOUSE_EXIT_CAP_GOING_IN_MAX):
+        return None
+    basis = f"going-in cap {rate:.2%} = T12 NOI ${income - opex:,.2f} / purchase price ${price:,.2f}"
+    return rate, basis
+
+
+def _house_exit_cap(ctx: _Context) -> Optional[dict[str, Any]]:
+    going_in = _going_in_cap(ctx)
+    if going_in is None:
+        return None
+    rate, going_in_basis = going_in
+    spread = float(house.HOUSE_EXIT_CAP_SPREAD)
+    value = round(rate + spread, 6)
+    return _candidate(
+        HOUSE_EXIT_CAP_SPREAD,
+        value,
+        f"No analyst or market exit cap rate: {going_in_basis}, plus the house spread "
+        f"{spread * 10_000:g} bps (HOUSE_EXIT_CAP_SPREAD) = {value:.2%}.",
+    )
+
+
 def _exit_cap_candidates(ctx: _Context) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     om_cap = _num((ctx.evidence.get("om") or {}).get("exit_cap_rate"))
     if om_cap is not None:
         out.append(_candidate(SOURCE_DEAL_OM, om_cap, "Exit cap rate extracted from the offering memorandum."))
+    spread = _house_exit_cap(ctx)
+    if spread is not None:
+        out.append(spread)
     out.append(
         _candidate(
             SOURCE_ENGINE_FALLBACK,
@@ -735,11 +947,17 @@ def _exit_cap_candidates(ctx: _Context) -> list[dict[str, Any]]:
 def _exit_cap_default(ctx: _Context, state: str) -> _Choice:
     if state == NO_SECTION:
         return _not_modeled("exit_assumptions")
+    candidates = _exit_cap_candidates(ctx)
+    for source in (SOURCE_DEAL_OM, HOUSE_EXIT_CAP_SPREAD):
+        match = next((c for c in candidates if c["source"] == source), None)
+        if match:
+            return _choice_from(match, ctx)
     if state == ABSENT:
-        return _fallback(ENGINE_DEFAULT_EXIT_CAP, "exit_assumptions has no exit_cap_rate: engine default applies.")
-    om = next((c for c in _exit_cap_candidates(ctx) if c["source"] == SOURCE_DEAL_OM), None)
-    if om:
-        return _choice_from(om, ctx)
+        return _fallback(
+            ENGINE_DEFAULT_EXIT_CAP,
+            "exit_assumptions has no exit_cap_rate and no going-in cap rate is available (no T12 "
+            "reconciliation or purchase price): engine default applies.",
+        )
     return _not_modeled("exit cap rate")
 
 
@@ -780,6 +998,22 @@ def _policy_default_choice(name: str, section: str, engine_default: float, engin
         return _fallback(engine_default, engine_basis)
 
     return default
+
+
+def _closing_default(ctx: _Context, state: str) -> _Choice:
+    if state == NO_SECTION:
+        return _not_modeled("purchase_assumptions")
+    if state == ABSENT:
+        return _fallback(0.0, "purchase_assumptions has no purchase price: the engine applies no closing costs.")
+    pct = _policy_default("purchase_closing_cost_pct")
+    return _Choice(
+        HOUSE_BACKSOLVE_POLICY,
+        pct,
+        f"House purchase closing costs {pct:.2%} of the purchase price (DEFAULT_PURCHASE_CLOSING_COST_PCT, "
+        "engine/backsolve_policy.DEFAULTS['purchase_closing_cost_pct']), written to "
+        "purchase_assumptions.closing_costs when the canonical carries none.",
+        confidence="medium",
+    )
 
 
 def _fee_spec(name: str, section: str, field_name: str, unit: str, *, ingest_fills: bool) -> _Spec:
@@ -951,6 +1185,18 @@ def _base_specs() -> tuple[_Spec, ...]:
             value_add_only=True,
         ),
         _Spec(
+            key="renovation_premium",
+            unit="usd_per_unit_month",
+            read=_read_renovation_premium,
+            write=_write_renovation_premium,
+            default=_renovation_premium_default,
+            gather=_renovation_premium_candidates,
+            market_metrics=("renovation_premium",),
+            patch_paths=(("renovation_programs",),),
+            adr_rank=_no_adr,
+            value_add_only=True,
+        ),
+        _Spec(
             key="exit_cap_rate",
             unit="decimal",
             read=_scalar_reader("exit_assumptions", "exit_cap_rate"),
@@ -995,17 +1241,11 @@ def _base_specs() -> tuple[_Spec, ...]:
             unit="decimal_of_purchase_price",
             read=_read_purchase_closing,
             write=_write_purchase_closing,
-            default=_policy_default_choice(
-                "purchase_closing_cost_pct",
-                "purchase_assumptions",
-                0.0,
-                "Ingest writes purchase_assumptions.closing_costs = 0; the engine applies none.",
-                ingest_fills=False,
-            ),
+            default=_closing_default,
             gather=_policy_candidates(
                 "purchase_closing_cost_pct",
                 0.0,
-                "Ingest writes purchase_assumptions.closing_costs = 0.",
+                "No closing costs: the engine applies none.",
             ),
             patch_paths=(("purchase_assumptions", "closing_costs"),),
         ),
@@ -1030,6 +1270,11 @@ def _specs() -> tuple[_Spec, ...]:
 
 
 ASSUMPTION_KEYS = tuple(spec.key for spec in _specs())
+# Keys whose override may carry ``cohort_overrides: {cohort_id: value}`` (a
+# per-cohort flat curve); every other key rejects them.
+COHORT_OVERRIDE_KEYS = frozenset(spec.key for spec in _specs() if spec.cohort)
+# Marker a normalized override carries when the caller passed ``null``.
+CLEAR = "clear"
 
 
 def _specs_for(profile: DealProfile) -> tuple[_Spec, ...]:
@@ -1049,6 +1294,11 @@ def _market_candidates(ctx: _Context, spec: _Spec) -> list[dict[str, Any]]:
 # ── overrides ────────────────────────────────────────────────────────────
 
 
+def is_clear(override: Optional[Mapping[str, Any]]) -> bool:
+    """Whether a normalized override is the "clear this key's override" marker."""
+    return isinstance(override, Mapping) and override.get(CLEAR) is True
+
+
 def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -> dict[str, Any]:
     if isinstance(raw, Mapping):
         if "value" not in raw:
@@ -1060,6 +1310,13 @@ def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -
         cohorts = raw.get("cohort_overrides")
     else:
         value, cohorts = raw, None
+    if value is None:
+        # null clears the key's override: the entry reverts to its resolved default.
+        return {CLEAR: True, "note": note}
+    if cohorts and key not in COHORT_OVERRIDE_KEYS:
+        raise AssumptionOverrideError(
+            f"{key!r} does not support cohort_overrides; only {sorted(COHORT_OVERRIDE_KEYS)} do"
+        )
     # Slice 4: a scalar, a per-year vector, or the curve shape the key writes.
     value = _curves().normalize_override_value(key, value)
     out: dict[str, Any] = {"value": value, "note": note}
@@ -1079,7 +1336,15 @@ def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -
 
 
 def normalize_overrides(overrides: Optional[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Validate ``{key: value | {"value": ..., "note": ...}}`` and return the dict form."""
+    """Validate ``{key: value | {"value": ..., "note": ...}}`` and return the dict form.
+
+    A ``null`` value (``{key: None}`` or ``{key: {"value": None}}``) becomes
+    ``{"clear": True, "note": ...}``: resolving with it drops the key's
+    recorded override, so the entry reverts to its resolved default and the
+    default's source. ``cohort_overrides`` are accepted only for
+    ``COHORT_OVERRIDE_KEYS`` (physical_vacancy, loss_to_lease); other keys
+    raise ``AssumptionOverrideError``.
+    """
     if not overrides:
         return {}
     if not isinstance(overrides, Mapping):
@@ -1217,7 +1482,10 @@ def _resolve_key(
     default, candidates = _curves().carry_market_default(ctx, current, prior, default, candidates)
 
     override: Optional[dict[str, Any]] = None
-    if explicit is not None:
+    cleared = is_clear(explicit)
+    if cleared:
+        pass  # null override: drop any recorded or edited override, use the default
+    elif explicit is not None:
         override = deepcopy(explicit)
     elif prior is not None:
         if current.state == PRESENT and not _same_current(current, prior):
@@ -1252,7 +1520,7 @@ def _resolve_key(
             notes.append(
                 f"ADR 0003 precedence would select {pick['source']} "
                 f"({_fmt(pick['value'], spec.unit)}); today's {_fmt(value, spec.unit)} is kept "
-                "because slice 2 changes no numbers."
+                "because the resolver does not fill this field outside pricing."
             )
 
     write_needed = False
@@ -1260,6 +1528,8 @@ def _resolve_key(
         write_needed = True
     elif current.state == NO_FIELD:
         write_needed = False
+    elif cleared and value is None:
+        notes.append("No resolved default exists, so the canonical value is kept.")
     elif override is not None:
         write_needed = current.state != PRESENT or not _same_current(
             current, {"value": value, "cohort_overrides": cohorts}
@@ -1282,7 +1552,7 @@ def _resolve_key(
         candidates=candidates,
         default_value=_jsonable(default.value),
         override=_jsonable(override),
-        review_required=requires_review(source),
+        review_required=requires_review(source) or (override is None and default.review is True),
         cohort_overrides=_jsonable(cohorts),
     )
 
@@ -1340,6 +1610,14 @@ def resolve_assumptions(
         overrides: ``{key: value | {"value": ..., "note": ...}}``. An overridden
             entry keeps ``default_value``, records ``override``, and its value
             wins. Overrides already recorded in the canonical are preserved.
+            A ``null`` value (``{key: None}`` / ``{key: {"value": None}}``)
+            clears the key's override: the entry reverts to its resolved
+            default and that default's source. ``cohort_overrides`` are
+            supported by ``physical_vacancy`` and ``loss_to_lease`` only
+            (``COHORT_OVERRIDE_KEYS``); on any other key they raise
+            ``AssumptionOverrideError``. ``opex.<slug>.base`` takes annual
+            dollars (the percent for a percent-of-revenue line); ``0``
+            suppresses the line.
         mode: ``"underwrite"`` or ``"pricing"`` (ADR 0003 §5). Underwrite
             never changes a value for a house floor; each value below its
             floor gets a ``guardrail`` record (``action: "warned"``). Pricing

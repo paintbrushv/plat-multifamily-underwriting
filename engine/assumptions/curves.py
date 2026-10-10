@@ -32,7 +32,9 @@ results into curves the engine reads:
     ``bad_debt_typical_low``, 2.0% when the year built is unknown).
 ``exit_cap_rate``
     The exit-year ``market_cap_rate`` (submarket, else MSA) when an exit is
-    modeled, else resolver v1 behavior (OM, engine default).
+    modeled, else the OM rate, else the going-in cap rate (T12 NOI / price)
+    plus ``HOUSE_EXIT_CAP_SPREAD`` (``house:exit_cap_spread``), else the
+    engine default.
 
 Analyst overrides keep resolver v1 semantics and always win. A curve already
 in a canonical that the resolver did not write is recorded as an analyst
@@ -79,6 +81,7 @@ from engine.assumptions.resolver import (
     _Current,
     _exit_cap_default,
     _fallback,
+    _house_exit_cap,
     _ltl_candidates,
     _num,
     _read_concessions,
@@ -940,8 +943,9 @@ _read_exit_scalar = _scalar_reader("exit_assumptions", "exit_cap_rate")
 
 def _read_exit_cap(ctx: _Context) -> _Current:
     current = _read_exit_scalar(ctx)
-    # A modeled exit without a cap rate takes the market rate when one exists.
-    if current.state == ABSENT and _market_exit_cap(ctx) is not None:
+    # A modeled exit without a cap rate takes the market rate when one exists,
+    # else the going-in cap rate plus the house spread (ADR 0003 §3).
+    if current.state == ABSENT and (_market_exit_cap(ctx) is not None or _house_exit_cap(ctx) is not None):
         return _Current(PLACEHOLDER)
     return current
 

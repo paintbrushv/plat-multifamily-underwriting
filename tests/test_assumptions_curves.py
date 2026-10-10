@@ -470,7 +470,11 @@ def test_curve_object_overrides_round_trip_and_are_idempotent():
         ({"physical_vacancy": {"value": {"start": 0.1, "stabilized": 0.05, "window_months": 1.5}}}, "whole number"),
         ({"loss_to_lease": {"value": {"start": 0.1, "floor": 0.01, "burn_off_months": 12, "x": 1}}}, "unknown"),
         ({"concessions": {"value": {"year1": math.inf, "stabilized": 0.0}}}, "finite number"),
-        ({"rent_growth": {"value": [0.02], "cohort_overrides": {"A": 0.03}}}, "scalar value"),
+        ({"physical_vacancy": {"value": {"start": 0.1, "stabilized": 0.05, "window_months": 12},
+                               "cohort_overrides": {"A": 0.03}}}, "scalar value"),
+        # Only physical_vacancy and loss_to_lease take cohort overrides.
+        ({"rent_growth": {"value": [0.02], "cohort_overrides": {"A": 0.03}}}, "does not support cohort_overrides"),
+        ({"collection_loss": {"value": 0.02, "cohort_overrides": {"A": 0.03}}}, "does not support cohort_overrides"),
     ],
 )
 def test_override_shapes_are_validated(overrides, message):
