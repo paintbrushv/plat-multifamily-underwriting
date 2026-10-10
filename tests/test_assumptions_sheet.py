@@ -18,12 +18,14 @@ from engine.assumptions import resolve_assumptions
 from engine.assumptions.sheet import (
     DEFAULT_EDIT_NOTE,
     ROW_FIELDS,
+    SHEET_FIELDS,
     SHEET_TITLE,
     SHEET_VERSION,
     TABLE_NAME,
     add_assumptions_sheet,
     assumptions_document,
     delta,
+    document_rows,
     load_assumption_overrides,
     read_assumption_overrides,
     read_assumption_overrides_xlsx,
@@ -245,8 +247,8 @@ def test_json_round_trip_preserves_vectors_and_dicts(synthetic_canonical, tmp_pa
     assert document["sheet_version"] == SHEET_VERSION
     assert document["resolver_version"] == "plat.assumptions/1"
     assert document["deal_id"] == "Synthetic Sheet"
-    assert document["columns"] == list(ROW_FIELDS)
-    assert document["rows"] == sheet_rows(synthetic_canonical)
+    assert document["columns"] == list(SHEET_FIELDS)
+    assert document["rows"] == document_rows(synthetic_canonical)
 
     # Unedited, exactly the recorded overrides come back.
     recorded = {
@@ -266,10 +268,85 @@ def test_json_round_trip_preserves_vectors_and_dicts(synthetic_canonical, tmp_pa
 
     assert read_assumption_overrides(path) == {
         "rent_growth": {"value": [0.02, 0.025, 0.025], "note": DEFAULT_EDIT_NOTE},
+        "collection_loss": None,  # the exported override was cleared
         "physical_vacancy": {"value": [0.09, 0.07, 0.05], "note": "slow lease-up"},
         "opex.payroll.base": {"value": 1800.0, "note": "new payroll plan"},
         "zz_custom_mix": {"value": {"1br": 0.45, "2br": 0.55}, "note": DEFAULT_EDIT_NOTE},
     }
+
+
+def _edited_document(synthetic_canonical, tmp_path, edit):
+    path = write_assumptions_json(synthetic_canonical, tmp_path / "assumptions.json")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    edit({row["key"]: row for row in document["rows"]})
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return read_assumption_overrides(path)
+
+
+def test_the_sheet_carries_each_rows_exported_override(synthetic_canonical):
+    rows = {row["key"]: row for row in assumptions_document(synthetic_canonical)["rows"]}
+    assert rows["collection_loss"]["exported_override"] == 0.01
+    assert rows["physical_vacancy"]["exported_override"] == [0.08, 0.06, 0.05]
+    assert rows["rent_growth"]["exported_override"] is None
+    # The entry rows (and the deal-library goldens built from them) do not carry it.
+    assert all("exported_override" not in row for row in sheet_rows(synthetic_canonical))
+
+
+def test_a_blanked_override_clears_it(synthetic_canonical, tmp_path):
+    def edit(rows):
+        rows["collection_loss"]["override_value"] = None
+        rows["collection_loss"]["override_note"] = None
+
+    overrides = _edited_document(synthetic_canonical, tmp_path, edit)
+    assert overrides["collection_loss"] is None
+    assert "collection_loss" in overrides
+    # Rows that had no override and were not edited stay out.
+    assert "rent_growth" not in overrides and "zz_custom_mix" not in overrides
+
+
+def test_an_edited_value_wins_while_the_override_is_as_exported(synthetic_canonical, tmp_path):
+    def edit(rows):
+        rows["collection_loss"]["value"] = 0.015  # override_value still 0.01, as exported
+        rows["physical_vacancy"]["value"] = [0.1, 0.07, 0.05]
+
+    overrides = _edited_document(synthetic_canonical, tmp_path, edit)
+    assert overrides["collection_loss"] == {"value": 0.015, "note": "T12 bad debt"}
+    assert overrides["physical_vacancy"] == {"value": [0.1, 0.07, 0.05], "note": "slow lease-up"}
+
+
+def test_an_edited_override_still_wins_over_an_edited_value(synthetic_canonical, tmp_path):
+    def edit(rows):
+        rows["collection_loss"]["value"] = 0.015
+        rows["collection_loss"]["override_value"] = 0.02
+
+    overrides = _edited_document(synthetic_canonical, tmp_path, edit)
+    assert overrides["collection_loss"] == {"value": 0.02, "note": "T12 bad debt"}
+
+
+def test_a_blanked_override_with_an_edited_value_takes_the_value(synthetic_canonical, tmp_path):
+    def edit(rows):
+        rows["collection_loss"]["override_value"] = None
+        rows["collection_loss"]["value"] = 0.012
+        rows["physical_vacancy"]["override_value"] = None
+        rows["physical_vacancy"]["value"] = [0.07, 0.06, 0.05]  # back to the default
+
+    overrides = _edited_document(synthetic_canonical, tmp_path, edit)
+    assert overrides["collection_loss"] == {"value": 0.012, "note": "T12 bad debt"}
+    assert overrides["physical_vacancy"] is None
+
+
+def test_version_one_rows_keep_the_version_one_rules(synthetic_canonical):
+    """Rows without exported_override (an older sheet) cannot tell a clear from no override."""
+    from engine.assumptions.sheet import overrides_from_rows
+
+    rows = sheet_rows(synthetic_canonical)
+    by_key = {row["key"]: row for row in rows}
+    by_key["collection_loss"]["override_value"] = None
+    by_key["physical_vacancy"]["value"] = [0.1, 0.07, 0.05]  # loses to the set override
+    overrides = overrides_from_rows(rows)
+    # The blanked override is not a clear: the value (still the old override) differs from the default.
+    assert overrides["collection_loss"] == {"value": 0.01, "note": "T12 bad debt"}
+    assert overrides["physical_vacancy"] == {"value": [0.08, 0.06, 0.05], "note": "slow lease-up"}
 
 
 def test_override_column_wins_over_an_edited_value(tmp_path):
@@ -364,7 +441,7 @@ def test_excel_round_trip_preserves_every_row_shape(synthetic_canonical, tmp_pat
     assert payroll.value == 1650.0 and payroll.number_format == '"$"#,##0.00'
     assert ws.freeze_panes == "B5"
 
-    assert read_assumption_rows_xlsx(path) == sheet_rows(synthetic_canonical)
+    assert read_assumption_rows_xlsx(path) == document_rows(synthetic_canonical)
     assert read_assumption_overrides_xlsx(path) == {
         "collection_loss": {"value": 0.01, "note": "T12 bad debt"},
         "physical_vacancy": {"value": [0.08, 0.06, 0.05], "note": "slow lease-up"},
@@ -407,12 +484,63 @@ def test_excel_value_edit_and_text_cells_are_decoded(resolved_deal, tmp_path):
     assert read_assumption_overrides_xlsx(path)["rent_growth"] == {"value": 0.025, "note": DEFAULT_EDIT_NOTE}
 
 
+def test_excel_blanked_override_cell_clears_and_value_edit_wins(synthetic_canonical, tmp_path):
+    path = write_assumptions_xlsx(synthetic_canonical, tmp_path / "sheet.xlsx")
+    _, _, exported = _cell_for(path, "collection_loss", "Exported Override")
+    assert exported.value == 0.01 and exported.number_format == "0.00%"
+
+    wb, ws, cell = _cell_for(path, "collection_loss", "Override")
+    cell.value = None  # blank the override
+    wb.save(path)
+    wb, ws, cell = _cell_for(path, "physical_vacancy", "Value")
+    cell.value = "[0.1, 0.07, 0.05]"  # the Override cell keeps its exported value
+    wb.save(path)
+
+    overrides = read_assumption_overrides_xlsx(path)
+    assert overrides["collection_loss"] is None
+    assert overrides["physical_vacancy"] == {"value": [0.1, 0.07, 0.05], "note": "slow lease-up"}
+    assert overrides["opex.payroll.base"] == {"value": 1800.0, "note": "new payroll plan"}
+    assert "rent_growth" not in overrides
+
+
+def _resolver_clears_overrides() -> bool:
+    """True once resolve_assumptions accepts ``{key: None}`` (clear the override)."""
+    from engine.assumptions import AssumptionOverrideError
+
+    try:
+        resolve_assumptions(_ingest(), overrides={"sale_cost_percent": None})
+    except (AssumptionOverrideError, TypeError, ValueError):
+        return False
+    return True
+
+
+def test_sheet_clear_round_trips_through_the_resolver(resolved_deal, tmp_path):
+    """End to end: a blanked Override returns the entry to its resolver default."""
+    if not _resolver_clears_overrides():
+        pytest.skip("resolve_assumptions does not accept {key: None} (clear an override) in this "
+                    "base yet; the resolver side of the null-clears-override contract lands separately")
+    deal = resolve_assumptions(resolved_deal, overrides={"collection_loss": 0.02})
+    entry = deal["assumptions"]["entries"]["collection_loss"]
+    assert entry["override"]["value"] == 0.02
+
+    path = write_assumptions_xlsx(deal, tmp_path / "deal.xlsx")
+    wb, _, cell = _cell_for(path, "collection_loss", "Override")
+    cell.value = None
+    wb.save(path)
+    overrides = read_assumption_overrides_xlsx(path)
+    assert overrides["collection_loss"] is None
+
+    cleared = resolve_assumptions(deal, overrides=overrides)["assumptions"]["entries"]["collection_loss"]
+    assert cleared["override"] is None
+    assert cleared["value"] == cleared["default_value"] == entry["default_value"]
+
+
 def test_excel_reader_falls_back_to_the_tab_when_the_table_is_dropped(synthetic_canonical, tmp_path):
     path = write_assumptions_xlsx(synthetic_canonical, tmp_path / "sheet.xlsx")
     wb = load_workbook(path)
     del wb[SHEET_TITLE].tables[TABLE_NAME]
     wb.save(path)
-    assert read_assumption_rows_xlsx(path) == sheet_rows(synthetic_canonical)
+    assert read_assumption_rows_xlsx(path) == document_rows(synthetic_canonical)
 
 
 def test_excel_with_no_entries_still_has_a_valid_table(tmp_path):
@@ -439,7 +567,7 @@ def test_underwriting_workbook_carries_the_assumptions_tab(minimal_deal_inputs, 
     path = tmp_path / "model.xlsx"
     write_results_to_workbook(results, path, inputs)
     assert SHEET_TITLE in load_workbook(path).sheetnames
-    assert _norm(read_assumption_rows_xlsx(path)) == _norm(sheet_rows(inputs))
+    assert _norm(read_assumption_rows_xlsx(path)) == _norm(document_rows(inputs))
 
     plain = tmp_path / "plain.xlsx"
     write_results_to_workbook(results, plain, minimal_deal_inputs)
@@ -672,6 +800,6 @@ def test_row_order_and_json_bytes_are_deterministic(synthetic_canonical, resolve
     first = write_assumptions_json(resolved_deal, tmp_path / "a.json").read_bytes()
     second = write_assumptions_json(copy.deepcopy(resolved_deal), tmp_path / "b.json").read_bytes()
     assert first == second
-    assert read_assumption_rows_xlsx(write_assumptions_xlsx(shuffled, tmp_path / "s.xlsx")) == sheet_rows(
+    assert read_assumption_rows_xlsx(write_assumptions_xlsx(shuffled, tmp_path / "s.xlsx")) == document_rows(
         synthetic_canonical
     )
