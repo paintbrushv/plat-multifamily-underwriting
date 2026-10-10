@@ -125,9 +125,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--analyst", default="", help="Analyst name for metadata")
 
     # Revenue/OpEx assumptions
-    p.add_argument("--rent-growth", type=float, default=0.03, help="Annual rent growth rate (default 3%%)")
+    p.add_argument("--rent-growth", type=float, default=None,
+                   help="Annual rent growth rate. If omitted, 3%% is used and the ingest gate is BLOCKED.")
     p.add_argument("--vacancy", type=float, default=None, help="Vacancy rate override (0-1)")
-    p.add_argument("--collection-loss", type=float, default=0.005, help="Collection loss rate (default 0.5%%)")
+    p.add_argument("--collection-loss", type=float, default=None,
+                   help="Collection loss rate. If omitted, 0.5%% is used and the ingest gate is BLOCKED.")
+    p.add_argument("--scan-sidecar-workbooks", action="store_true",
+                   help="Read sibling workbooks in the rent roll's folder (e.g. a Box Score) for "
+                        "bed/bath labels. Off by default.")
 
     # OM parsing
     p.add_argument("--om", type=Path, default=None,
@@ -304,6 +309,7 @@ def main() -> int:
             acq_fee_pct=args.acq_fee,
             am_fee_pct=args.am_fee,
             disposition_fee_pct=args.disp_fee,
+            scan_sidecar_workbooks=args.scan_sidecar_workbooks,
         )
         if partial_payload is not None:
             result = _apply_partial_json(result, partial_payload)
@@ -366,6 +372,22 @@ def main() -> int:
     else:
         print("\n  Note: No deal economics provided. Add --purchase-price, --ltv, --rate,")
         print("        --amort, --exit-cap, --sponsor-pct for engine-runnable JSON.")
+
+    gate = result.get("metadata", {}).get("ingest_gate")
+    if isinstance(gate, dict):
+        recon = gate.get("t12_reconciliation") or {}
+        for side in ("opex", "income"):
+            entry = recon.get(side) or {}
+            if entry.get("statement_total") is None:
+                print(f"  T12 {side}: {entry.get('status', 'UNVERIFIED')} (no statement total found)")
+            else:
+                print(
+                    f"  T12 {side}: {entry['status']} parsed ${entry['parsed_total']:,.0f} vs "
+                    f"statement ${entry['statement_total']:,.0f}"
+                )
+        print(f"  Ingest gate: {gate.get('status')}")
+        for blocker in gate.get("blockers") or []:
+            print(f"    BLOCKER [{blocker.get('code')}] {blocker.get('message')}")
 
     if not args.canonical_json and om_path_resolved:
         confidence = result["metadata"].get("om_extraction_confidence", "unknown")

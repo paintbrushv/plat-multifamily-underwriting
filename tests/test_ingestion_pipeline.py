@@ -28,6 +28,9 @@ def _build(**kwargs):
         t12_path=T12,
         analysis_start="2026-05",
         analysis_end="2031-04",
+        # Explicit policy inputs: omitted rates now BLOCK the ingest gate.
+        rent_growth_rate=0.03,
+        collection_loss_rate=0.005,
     )
     defaults.update(kwargs)
     return build_deal_from_documents(**defaults)
