@@ -462,10 +462,9 @@ def _rebase_to_house_box_score(
         if unavailable > 0:
             observed_vacancy = Decimal(str(unavailable)) / Decimal(str(total_units))
 
-    existing_vacancy = {
-        _normalized_code(row.get("cohort_id")): deepcopy(row)
-        for row in canonical.get("physical_vacancy_curve") or []
-    }
+    vacancy_by_cohort: dict[str, list[dict]] = {}
+    for row in canonical.get("physical_vacancy_curve") or []:
+        vacancy_by_cohort.setdefault(_normalized_code(row.get("cohort_id")), []).append(deepcopy(row))
     canonical["physical_vacancy_curve"] = []
     start_period = str(canonical["time_grid"]["analysis_start_date"])[:7]
     end_period = str(canonical["time_grid"]["analysis_end_date"])[:7]
@@ -521,18 +520,19 @@ def _rebase_to_house_box_score(
                     "ltl_percent": 0.0,
                 }
             )
-        vacancy_row = existing_vacancy.get(key, {})
-        vacancy_rate = dec(vacancy_row.get("vacancy_rate", 0))
-        if observed_vacancy is not None:
-            vacancy_rate = max(vacancy_rate, observed_vacancy)
-        canonical["physical_vacancy_curve"].append(
-            {
-                "cohort_id": cohort_id,
-                "start_period": start_period,
-                "end_period": end_period,
-                "vacancy_rate": float(vacancy_rate),
-            }
-        )
+        # Keep the analyst's vacancy segments as entered. The observed
+        # unavailable rate is the rent_roll_vacant anchor, which
+        # _apply_house_revenue_policy applies per segment as a floor and
+        # discloses against the analyst's original rate.
+        for vacancy_row in vacancy_by_cohort.get(key) or [{}]:
+            canonical["physical_vacancy_curve"].append(
+                {
+                    "cohort_id": cohort_id,
+                    "start_period": vacancy_row.get("start_period") or start_period,
+                    "end_period": vacancy_row.get("end_period") or end_period,
+                    "vacancy_rate": float(dec(vacancy_row.get("vacancy_rate", 0))),
+                }
+            )
 
     return {
         "applied": True,
@@ -963,8 +963,12 @@ def _apply_house_revenue_policy(
         trailing_actuals=trailing_actuals,
         broker_snapshot=broker_snapshot,
     )
+    # The anchor is a per-segment floor: a segment below it is raised to it, a
+    # segment at or above it keeps the analyst's rate. The curve keeps its
+    # shape, and one cohort's higher rate never spreads to other cohorts.
+    applied_curve: list[dict[str, Any]] = []
     for row in canonical.get("physical_vacancy_curve") or []:
-        if Decimal(str(row.get("vacancy_rate", 0))) != applied_vacancy:
+        if Decimal(str(row.get("vacancy_rate", 0))) < applied_vacancy:
             overrides.append({
                 "input": "physical_vacancy_curve",
                 "cohort_id": row.get("cohort_id"),
@@ -973,7 +977,13 @@ def _apply_house_revenue_policy(
                 "original": row.get("vacancy_rate"),
                 "applied": float(applied_vacancy),
             })
-        row["vacancy_rate"] = float(applied_vacancy)
+            row["vacancy_rate"] = float(applied_vacancy)
+        applied_curve.append({
+            "cohort_id": row.get("cohort_id"),
+            "start_period": row.get("start_period"),
+            "end_period": row.get("end_period"),
+            "vacancy_rate": float(row.get("vacancy_rate", 0)),
+        })
 
     original_concessions = deepcopy(canonical.get("concession_schedule") or [])
     current_concessions = max(
@@ -1033,6 +1043,7 @@ def _apply_house_revenue_policy(
             round(sum(applied_ltls) / len(applied_ltls), 6) if applied_ltls else 0.0
         ),
         "physical_vacancy_rate_applied": float(applied_vacancy),
+        "physical_vacancy_curve_applied": applied_curve,
         "physical_vacancy_anchor_summary": vacancy_summary,
         "collection_loss_rate_applied": float(applied_collection),
         "year1_concessions_rate_applied": float(applied_concessions),

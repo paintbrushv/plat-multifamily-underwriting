@@ -9,7 +9,9 @@ floor $600/unit). Each case used to produce a wrong price with no error:
    make-ready, so the R&M floor was stacked on top of it;
 4. the vacancy anchor ignored "Vacant ..." status variants and a negative
    T12 vacancy loss;
-5. a time-varying vacancy curve was flattened with no disclosure.
+5. a time-varying vacancy curve was flattened to one property-wide rate with
+   no disclosure; the vacancy anchor now floors each segment and keeps the
+   analyst's curve shape.
 """
 from __future__ import annotations
 
@@ -163,18 +165,77 @@ def test_vacancy_anchor_reads_vacant_status_variants_and_negative_t12_loss():
     assert summary["physical_vacancy_rate_applied"] == pytest.approx(41 / UNITS)
 
 
-def test_overridden_time_varying_vacancy_curve_is_disclosed():
-    canonical = _canonical(physical_vacancy_curve=[
-        {"cohort_id": "a1", "start_period": "2026-09", "end_period": "2027-08", "vacancy_rate": 0.09},
-        {"cohort_id": "a1", "start_period": "2027-09", "end_period": "2028-08", "vacancy_rate": 0.06},
-        {"cohort_id": "a1", "start_period": "2028-09", "end_period": "2031-08", "vacancy_rate": 0.05},
-    ])
-    original = deepcopy(canonical["physical_vacancy_curve"])
-    summary = _revenue_policy(canonical)
-
-    applied = summary["physical_vacancy_rate_applied"]
-    overrides = [o for o in summary["policy_overrides"] if o["input"] == "physical_vacancy_curve"]
-    assert [(o["original"], o["applied"]) for o in overrides] == [
-        (seg["vacancy_rate"], applied) for seg in original if seg["vacancy_rate"] != applied
+def _time_varying_curve(*rates):
+    periods = [("2026-09", "2027-08"), ("2027-09", "2028-08"), ("2028-09", "2031-08")]
+    return [
+        {"cohort_id": "a1", "start_period": start, "end_period": end, "vacancy_rate": rate}
+        for (start, end), rate in zip(periods, rates)
     ]
-    assert overrides and all(o["start_period"] for o in overrides)
+
+
+def _vacancy_overrides(summary):
+    return [o for o in summary["policy_overrides"] if o["input"] == "physical_vacancy_curve"]
+
+
+def test_overridden_time_varying_vacancy_curve_is_disclosed():
+    # T12 vacancy of 6.25% outranks the 1984 vintage floor, so the anchor
+    # sits between the analyst's 9% / 6% / 5% segments.
+    canonical = _canonical(physical_vacancy_curve=_time_varying_curve(0.09, 0.06, 0.05))
+    summary = _revenue_policy(
+        canonical,
+        trailing_actuals={"gross_potential_rent": 6_000_000.0, "vacancy_loss": -375_000.0},
+    )
+
+    anchor = summary["physical_vacancy_rate_applied"]
+    assert anchor == pytest.approx(0.0625)
+    expected = _time_varying_curve(0.09, anchor, anchor)
+    assert canonical["physical_vacancy_curve"] == expected
+    assert summary["physical_vacancy_curve_applied"] == expected
+    # Only the raised segments are listed, with their own periods.
+    assert [
+        (o["start_period"], o["end_period"], o["original"], o["applied"])
+        for o in _vacancy_overrides(summary)
+    ] == [
+        ("2027-09", "2028-08", 0.06, anchor),
+        ("2028-09", "2031-08", 0.05, anchor),
+    ]
+
+
+def test_vacancy_segment_above_the_anchor_is_never_lowered():
+    canonical = _canonical(physical_vacancy_curve=_time_varying_curve(0.15, 0.12, 0.10))
+    original = deepcopy(canonical["physical_vacancy_curve"])
+    summary = _revenue_policy(
+        canonical,
+        trailing_actuals={"gross_potential_rent": 6_000_000.0, "vacancy_loss": -375_000.0},
+    )
+
+    assert summary["physical_vacancy_rate_applied"] == pytest.approx(0.0625)
+    assert canonical["physical_vacancy_curve"] == original
+    assert summary["physical_vacancy_curve_applied"] == original
+    assert _vacancy_overrides(summary) == []
+
+
+def test_house_box_rebase_keeps_vacancy_segments_and_discloses_analyst_original():
+    canonical = _canonical(physical_vacancy_curve=_time_varying_curve(0.09, 0.06, 0.05))
+    canonical["metadata"]["property_summary"]["house_box_score"] = {
+        "total_units": UNITS,
+        "status_counts": {"Occupied": 417, "Vacant": 30},
+        "floorplans": [
+            {"code": "a1", "avg_sqft": 750.0, "avg_in_place_rent": 1200.0,
+             "avg_market_rent": 1200.0, "units": UNITS},
+        ],
+    }
+    prepared, summary = _prepare(canonical)
+
+    anchor = summary["physical_vacancy_rate_applied"]
+    assert anchor == pytest.approx(30 / UNITS)
+    assert summary["house_box_score_rebase"]["observed_unavailable_rate"] == pytest.approx(anchor)
+    expected = _time_varying_curve(0.09, anchor, anchor)
+    assert prepared["physical_vacancy_curve"] == expected
+    assert summary["physical_vacancy_curve_applied"] == expected
+    # The rebase must not pre-floor the curve, or the override would record
+    # the rent-roll rate as the "original" and hide the analyst's input.
+    assert [(o["original"], o["applied"]) for o in _vacancy_overrides(summary)] == [
+        (0.06, anchor),
+        (0.05, anchor),
+    ]
