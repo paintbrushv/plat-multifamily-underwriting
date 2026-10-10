@@ -45,6 +45,17 @@ Manual / terminal-assisted workflows:
       --start 2026-05 --end 2031-04 \
       --partial-json data/analyst_patch.json \
       --output output/deal_inputs.json --validate
+
+Assumption layer (ADR 0003):
+    # Value-add profile with geography and analyst assumption overrides:
+    python runs/ingest_deal.py ... --deal-type value_add \
+      --msa "Synthetic Metro" --metro-slug synthetic_metro --submarket "Synthetic North" \
+      --assumption-overrides data/assumption_overrides.json
+
+    The overrides file is a JSON object {key: value | {"value": v, "note": "..."}}
+    keyed by assumption key (rent_growth, collection_loss, physical_vacancy, ...).
+    Values a --partial-json patch supplies for an assumption are recorded as
+    analyst overrides, and the assumptions are re-resolved after the merge.
 """
 
 from __future__ import annotations
@@ -58,8 +69,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from engine.assumptions import (
+    AssumptionOverrideError,
+    DealProfile,
+    UnsupportedDealTypeError,
+    normalize_overrides,
+    overrides_from_patch,
+    resolve_assumptions,
+)
 from engine.ingest.broker_om_snapshot import stable_property_tax_source_locator
-from engine.ingest.ingestion_pipeline import build_deal_from_documents
+from engine.ingest.ingestion_pipeline import (
+    build_deal_from_documents,
+    sync_ingest_gate_assumptions,
+)
+
+PARTIAL_JSON_OVERRIDE_NOTE = "supplied by --partial-json"
 
 
 def _load_json(path: Path) -> dict:
@@ -94,6 +118,38 @@ def _apply_partial_json(base_deal: dict, partial: dict) -> dict:
     if any(k in partial for k in ("purchase_assumptions", "debt_terms", "exit_assumptions", "fund_assumptions")):
         metadata["analyst_review_required"] = False
     return merged
+
+
+def apply_partial_and_reresolve(base_deal: dict, partial: dict) -> dict:
+    """Merge a partial patch, then re-run the assumption resolver.
+
+    Assumption values the patch supplies become analyst overrides, so the
+    assumptions section and the legacy ``ingest_gate.assumed_defaults`` reflect
+    the merged deal instead of the pre-merge ingest.
+    """
+    merged = _apply_partial_json(base_deal, partial)
+    if "assumptions" not in base_deal:
+        return merged
+    overrides = overrides_from_patch(partial, merged, note=PARTIAL_JSON_OVERRIDE_NOTE)
+    resolved = resolve_assumptions(merged, overrides=overrides)
+    return sync_ingest_gate_assumptions(resolved)
+
+
+def _profile_from_args(args: argparse.Namespace, *, year_built: int | None = None) -> DealProfile:
+    return DealProfile.from_inputs(
+        deal_type=args.deal_type or "stabilized",
+        msa=args.msa,
+        submarket=args.submarket,
+        metro_slug=args.metro_slug,
+        year_built=year_built,
+    )
+
+
+def _profile_flags_given(args: argparse.Namespace) -> bool:
+    return any(
+        value is not None
+        for value in (args.deal_type, args.msa, args.submarket, args.metro_slug)
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -163,20 +219,35 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Exit cap rate (0-1). Overrides OM if both provided.")
     p.add_argument("--exit-month", type=str, default=None,
                    help="Exit month YYYY-MM (default: analysis end)")
-    p.add_argument("--sale-cost", type=float, default=0.02,
-                   help="Sale cost percent (default 2%%)")
+    p.add_argument("--sale-cost", type=float, default=None,
+                   help="Sale cost percent. If omitted, the house default (2%%) is used and "
+                        "flagged for review.")
 
     # Fund structure
     p.add_argument("--sponsor-pct", type=float, default=None,
                    help="Sponsor (GP) equity percent (e.g. 0.10 for 10%%)")
     p.add_argument("--pref-return", type=float, default=None,
                    help="LP preferred return rate (e.g. 0.08 for 8%%)")
-    p.add_argument("--acq-fee", type=float, default=0.01,
-                   help="Acquisition fee percent (default 1%%)")
-    p.add_argument("--am-fee", type=float, default=0.015,
-                   help="Asset management fee percent (default 1.5%%)")
-    p.add_argument("--disp-fee", type=float, default=0.01,
-                   help="Disposition fee percent (default 1%%)")
+    p.add_argument("--acq-fee", type=float, default=None,
+                   help="Acquisition fee percent (house default 1%% when omitted)")
+    p.add_argument("--am-fee", type=float, default=None,
+                   help="Asset management fee percent (house default 1.5%% when omitted)")
+    p.add_argument("--disp-fee", type=float, default=None,
+                   help="Disposition fee percent (house default 1%% when omitted)")
+
+    # Assumption layer (ADR 0003)
+    p.add_argument("--deal-type", default=None,
+                   help="Deal profile: stabilized (default) or value_add. lease_up and "
+                        "distressed are reserved and rejected.")
+    p.add_argument("--msa", default=None,
+                   help="MSA name or five-digit CBSA code (deal_profile.msa)")
+    p.add_argument("--submarket", default=None,
+                   help="Submarket name (deal_profile.submarket)")
+    p.add_argument("--metro-slug", default=None,
+                   help="Metro slug used by market-data providers (deal_profile.msa.metro_slug)")
+    p.add_argument("--assumption-overrides", type=Path, default=None, metavar="PATH.json",
+                   help="JSON object of analyst assumption overrides: "
+                        '{key: value | {"value": v, "note": "..."}}.')
 
     # Validation
     p.add_argument("--validate", action="store_true",
@@ -192,6 +263,17 @@ def main() -> int:
     if args.canonical_json and args.partial_json:
         print("Error: --canonical-json cannot be combined with --partial-json.", file=sys.stderr)
         return 2
+
+    assumption_overrides = None
+    if args.assumption_overrides is not None:
+        if not args.assumption_overrides.exists():
+            print(f"Error: Assumption overrides not found: {args.assumption_overrides}", file=sys.stderr)
+            return 1
+        try:
+            assumption_overrides = _load_json(args.assumption_overrides)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Error: failed to load assumption overrides: {exc}", file=sys.stderr)
+            return 1
 
     if args.canonical_json:
         forbidden = [
@@ -232,6 +314,17 @@ def main() -> int:
         t12_path = None
         om_path_resolved = None
         om_source_locator = None
+        if assumption_overrides is not None or _profile_flags_given(args):
+            try:
+                result = resolve_assumptions(
+                    result,
+                    deal_profile=_profile_from_args(args) if _profile_flags_given(args) else None,
+                    overrides=assumption_overrides,
+                )
+            except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 2
+            sync_ingest_gate_assumptions(result)
     else:
         if not args.start or not args.end:
             print(
@@ -288,6 +381,13 @@ def main() -> int:
         print(f"  T12:       {t12_path}")
         print(f"  Period:    {args.start} to {args.end}")
 
+        try:
+            _profile_from_args(args)
+            normalize_overrides(assumption_overrides)
+        except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+
         result = build_deal_from_documents(
             property_id=property_id,
             rent_roll_path=rent_roll_path,
@@ -316,9 +416,18 @@ def main() -> int:
             disposition_fee_pct=args.disp_fee,
             scan_sidecar_workbooks=args.scan_sidecar_workbooks,
             year_built=args.year_built,
+            deal_type=args.deal_type or "stabilized",
+            msa=args.msa,
+            submarket=args.submarket,
+            metro_slug=args.metro_slug,
+            assumption_overrides=assumption_overrides,
         )
         if partial_payload is not None:
-            result = _apply_partial_json(result, partial_payload)
+            try:
+                result = apply_partial_and_reresolve(result, partial_payload)
+            except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
+                print(f"Error: failed to re-resolve assumptions after --partial-json: {exc}", file=sys.stderr)
+                return 2
             print(f"  Applied partial overrides from: {args.partial_json}")
 
     if args.canonical_json:
@@ -396,6 +505,10 @@ def main() -> int:
             print(f"    BLOCKER [{blocker.get('code')}] {blocker.get('message')}")
         for assumed in gate.get("assumed_defaults") or []:
             print(f"    ASSUMED [{assumed.get('field')}] {assumed.get('value')} ({assumed.get('source')})")
+    entries = (result.get("assumptions") or {}).get("entries") or {}
+    review = [key for key, entry in entries.items() if entry.get("review_required")]
+    if entries:
+        print(f"  Assumptions: {len(entries)} resolved, {len(review)} flagged for review")
 
     if not args.canonical_json and om_path_resolved:
         confidence = result["metadata"].get("om_extraction_confidence", "unknown")
