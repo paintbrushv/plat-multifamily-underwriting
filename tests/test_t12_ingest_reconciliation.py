@@ -23,6 +23,7 @@ from engine.engine import run_underwriting
 from engine.ingest import rent_roll_parser
 from engine.ingest.ingestion_pipeline import build_deal_from_documents
 from engine.ingest.t12_parser import parse_t12_statement, parse_t12_with_provenance
+from engine.underwriting_policy import default_collection_loss_rate
 from engine.validator import validate_deal
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -178,17 +179,63 @@ def test_operating_expense_total_preferred_over_total_expenses(tmp_path):
     assert recon["status"] == "PASS"
 
 
-def test_policy_defaults_are_blockers():
+def test_omitted_policy_rates_are_assumed_defaults_not_blockers():
     deal = _ingest(rent_growth_rate=None, collection_loss_rate=None)
     gate = deal["metadata"]["ingest_gate"]
 
-    assert gate["status"] == "BLOCKED"
-    assert [b["code"] for b in gate["blockers"]] == [
-        "policy_default_rent_growth_rate",
-        "policy_default_collection_loss_rate",
-    ]
+    assert gate["status"] == "PASS"
+    assert gate["blockers"] == []
+    assumed = {entry["field"]: entry for entry in gate["assumed_defaults"]}
+    assert set(assumed) == {
+        "growth_assumptions.annual_growth_rate",
+        "collection_loss_curve.loss_rate",
+    }
+    assert all(entry["review_required"] is True for entry in assumed.values())
+    growth = assumed["growth_assumptions.annual_growth_rate"]
+    assert growth["value"] == 0.03
+    assert growth["source"] == "engine_fallback"
     assert deal["growth_assumptions"]["annual_growth_rate"] == 0.03
-    assert validate_deal(deal).status == "FAIL"
+    loss = assumed["collection_loss_curve.loss_rate"]
+    assert loss["value"] == 0.005
+    assert loss["source"] == "engine_fallback"
+    assert deal["collection_loss_curve"][0]["loss_rate"] == 0.005
+    flags = deal["metadata"]["intake_sanity_flags"]
+    assert "assumed_default_annual_growth_rate" in flags
+    assert "assumed_default_loss_rate" in flags
+
+    report = validate_deal(deal)
+    assert report.status == "PASS"
+    warnings = [i for i in report.issues if i.code == "ASSUMED_DEFAULT"]
+    assert len(warnings) == 2
+    assert {w.severity for w in warnings} == {"WARNING"}
+    assert {w.path for w in warnings} == {"/metadata/ingest_gate/assumed_defaults"}
+
+
+def test_known_year_built_drives_collection_loss_from_vintage_framework():
+    deal = _ingest(rent_growth_rate=0.025, collection_loss_rate=None, year_built=1984)
+    gate = deal["metadata"]["ingest_gate"]
+
+    assert gate["status"] == "PASS"
+    [loss] = gate["assumed_defaults"]
+    assert loss["field"] == "collection_loss_curve.loss_rate"
+    assert loss["source"] == "house_vintage_framework"
+    assert loss["value"] == float(default_collection_loss_rate(1984, strategy="cashflow"))
+    assert loss["value"] == 0.0075
+    assert "1980s" in loss["basis"]
+    assert deal["collection_loss_curve"][0]["loss_rate"] == 0.0075
+    assert deal["metadata"]["year_built"] == 1984
+    assert validate_deal(deal).status == "PASS"
+
+
+def test_explicit_policy_rates_assume_nothing():
+    deal = _ingest(year_built=1984)
+    gate = deal["metadata"]["ingest_gate"]
+
+    assert gate["assumed_defaults"] == []
+    assert deal["collection_loss_curve"][0]["loss_rate"] == 0.02
+    assert not any(
+        i.code == "ASSUMED_DEFAULT" for i in validate_deal(deal).issues
+    )
 
 
 def test_statement_without_totals_is_unverified_not_blocked():

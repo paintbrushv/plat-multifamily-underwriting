@@ -126,10 +126,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Revenue/OpEx assumptions
     p.add_argument("--rent-growth", type=float, default=None,
-                   help="Annual rent growth rate. If omitted, 3%% is used and the ingest gate is BLOCKED.")
+                   help="Annual rent growth rate. If omitted, a house default is used and "
+                        "flagged for review (metadata.ingest_gate.assumed_defaults).")
     p.add_argument("--vacancy", type=float, default=None, help="Vacancy rate override (0-1)")
     p.add_argument("--collection-loss", type=float, default=None,
-                   help="Collection loss rate. If omitted, 0.5%% is used and the ingest gate is BLOCKED.")
+                   help="Collection loss rate. If omitted, a house default is used (the vintage "
+                        "framework floor when the year built is known) and flagged for review.")
+    p.add_argument("--year-built", type=int, default=None,
+                   help="Subject year built. Drives the house vintage default for an omitted "
+                        "--collection-loss; otherwise an OM-extracted year built is used.")
     p.add_argument("--scan-sidecar-workbooks", action="store_true",
                    help="Read sibling workbooks in the rent roll's folder (e.g. a Box Score) for "
                         "bed/bath labels. Off by default.")
@@ -310,6 +315,7 @@ def main() -> int:
             am_fee_pct=args.am_fee,
             disposition_fee_pct=args.disp_fee,
             scan_sidecar_workbooks=args.scan_sidecar_workbooks,
+            year_built=args.year_built,
         )
         if partial_payload is not None:
             result = _apply_partial_json(result, partial_payload)
@@ -388,6 +394,8 @@ def main() -> int:
         print(f"  Ingest gate: {gate.get('status')}")
         for blocker in gate.get("blockers") or []:
             print(f"    BLOCKER [{blocker.get('code')}] {blocker.get('message')}")
+        for assumed in gate.get("assumed_defaults") or []:
+            print(f"    ASSUMED [{assumed.get('field')}] {assumed.get('value')} ({assumed.get('source')})")
 
     if not args.canonical_json and om_path_resolved:
         confidence = result["metadata"].get("om_extraction_confidence", "unknown")
