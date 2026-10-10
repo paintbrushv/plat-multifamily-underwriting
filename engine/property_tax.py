@@ -266,6 +266,11 @@ def _normalized_label(label: object) -> str:
     return " ".join(str(label or "").split()).casefold()
 
 
+def is_property_tax_label(label: object) -> bool:
+    """True when :func:`apply_property_tax_policy` replaces an opex row with this label."""
+    return _normalized_label(label) in _REPLACEABLE_LABELS
+
+
 def apply_property_tax_policy(
     canonical: Mapping[str, Any],
     *,
