@@ -86,6 +86,27 @@
           "items": { "type": "string" },
           "description": "V1.2 — sanity flags surfaced by intake (e.g. rent_roll_parser sanity flags such as target_monthly_rent_missing_for_cohort_<id>). Non-blocking; analyst review surface."
         },
+        "ingest_gate": {
+          "type": "object",
+          "description": "Document-ingestion gate. BLOCKED fails validation until every blocker is resolved: a T12 whose parsed opex or income does not tie to the statement totals, or a policy input that fell back to a default.",
+          "required": ["status", "blockers"],
+          "properties": {
+            "status": { "type": "string", "enum": ["PASS", "BLOCKED"] },
+            "blockers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["code", "message"],
+                "properties": {
+                  "code": { "type": "string", "minLength": 1 },
+                  "message": { "type": "string" }
+                }
+              }
+            },
+            "t12_reconciliation": { "type": "object" },
+            "t12_other_income": { "type": "array", "items": { "type": "object" } }
+          }
+        },
         "purchase_assumptions_source": {
           "type": "string",
           "enum": ["om_haiku_extraction", "cli_flags", "analyst_override"],

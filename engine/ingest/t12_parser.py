@@ -346,36 +346,263 @@ def parse_t12_with_provenance(
     return opex_table, provenance
 
 
+RECONCILIATION_TOLERANCE = 0.005
+
+# Statement opex total labels, most specific first: a generic "Total
+# Expenses" row can include non-operating items below NOI.
+_OPEX_TOTAL_LABELS = (
+    {"TOTAL OPERATING EXPENSES", "TOTAL OPERATING EXPENSE"},
+    {"TOTAL EXPENSES", "TOTAL EXPENSE", "TOTAL OPEX"},
+)
+
+# Income lines that belong to rent (modeled from the rent roll), not to
+# other income. Matched as substrings of the normalized label.
+_RENTAL_INCOME_PATTERNS = (
+    "POTENTIAL RENT",
+    "MARKET RENT",
+    "GROSS RENT",
+    "RENTAL INCOME",
+    "RENT INCOME",
+    "RENT RECEIVED",
+    "RESIDENTIAL RENT",
+    "LOSS TO LEASE",
+    "GAIN TO LEASE",
+    "LOSS/GAIN TO LEASE",
+    "GAIN/LOSS TO LEASE",
+    "VACANCY",
+    "CONCESSION",
+    "BAD DEBT",
+    "WRITE OFF",
+    "WRITE-OFF",
+    "MODEL UNIT",
+    "EMPLOYEE UNIT",
+    "EMPLOYEE APARTMENT",
+    "DOWN UNIT",
+    "ADMIN UNIT",
+    "NON-REVENUE",
+    "NON REVENUE",
+    "DELINQUEN",
+    "PREPAID RENT",
+)
+
+_RECOVERY_INCOME_PATTERNS = (
+    "RUBS",
+    "REIMBURS",
+    "BILLBACK",
+    "BILL BACK",
+    "UTILITY",
+    "UTILITIES",
+    "WATER",
+    "SEWER",
+    "GAS",
+    "ELECTRIC",
+    "TRASH",
+)
+
+
+def parse_t12_statement(path: str | Path) -> dict[str, Any]:
+    """Parse a T12 into opex, income lines, statement totals and a reconciliation.
+
+    Returns a dict with:
+      - ``opex_table`` / ``provenance``: as :func:`parse_t12_with_provenance`
+      - ``income_lines``: ``[{label, section, annual_amount, kind}]`` where kind is
+        ``rental`` (modeled from the rent roll), ``recovery`` (RUBS and
+        reimbursements) or ``other``
+      - ``statement_totals``: the statement's own ``income`` and ``opex`` totals,
+        ``None`` when the statement has no total row
+      - ``reconciliation``: parsed vs statement totals, see :func:`reconcile_t12`
+    """
+    path = Path(path)
+    opex_table, provenance = parse_t12_with_provenance(path)
+    income_lines, statement_totals = _extract_income_and_totals(_load_raw_rows(path))
+    return {
+        "opex_table": opex_table,
+        "provenance": provenance,
+        "income_lines": income_lines,
+        "statement_totals": statement_totals,
+        "reconciliation": reconcile_t12(opex_table, income_lines, statement_totals),
+    }
+
+
+def reconcile_t12(
+    opex_table: list[dict[str, Any]],
+    income_lines: list[dict[str, Any]],
+    statement_totals: dict[str, float | None],
+    tolerance: float = RECONCILIATION_TOLERANCE,
+) -> dict[str, Any]:
+    """Tie parsed opex and income to the statement's own totals.
+
+    Each side is ``PASS`` within ``tolerance``, ``BLOCKED`` outside it, or
+    ``UNVERIFIED`` when the statement has no total row to tie to. The overall
+    status is ``BLOCKED`` if either side is.
+    """
+    parsed = {
+        "opex": round(sum(row["base_value"] for row in opex_table), 2),
+        "income": round(sum(line["annual_amount"] for line in income_lines), 2),
+    }
+    result: dict[str, Any] = {"tolerance": tolerance}
+    for side in ("opex", "income"):
+        statement_total = statement_totals.get(side)
+        entry: dict[str, Any] = {
+            "parsed_total": parsed[side],
+            "statement_total": statement_total,
+        }
+        if statement_total is None:
+            entry["status"] = "UNVERIFIED"
+        else:
+            variance = parsed[side] - statement_total
+            pct = abs(variance) / abs(statement_total) if statement_total else (0.0 if variance == 0 else 1.0)
+            entry["variance"] = round(variance, 2)
+            entry["variance_pct"] = round(pct, 6)
+            entry["status"] = "PASS" if pct <= tolerance else "BLOCKED"
+        result[side] = entry
+    statuses = {result["opex"]["status"], result["income"]["status"]}
+    result["status"] = (
+        "BLOCKED" if "BLOCKED" in statuses else "UNVERIFIED" if "UNVERIFIED" in statuses else "PASS"
+    )
+    return result
+
+
+def _classify_income_line(label: str, section: str | None) -> str:
+    normalized = _normalize_statement_label(label)
+    section_normalized = _normalize_statement_label(section or "")
+    if any(pattern in normalized for pattern in _RENTAL_INCOME_PATTERNS):
+        return "rental"
+    if any(pattern in normalized for pattern in _RECOVERY_INCOME_PATTERNS) or any(
+        pattern in section_normalized for pattern in ("REIMBURS", "RUBS", "UTILIT", "BILLBACK")
+    ):
+        return "recovery"
+    if section_normalized in {"RENT", "RENTS", "RENTAL INCOME", "RENTAL REVENUE"} or normalized in {
+        "RENT",
+        "RENTS",
+    }:
+        return "rental"
+    return "other"
+
+
+def _is_income_summary_row(label: str) -> bool:
+    normalized = _normalize_statement_label(_LEADING_ACCOUNT_CODE_RE.sub("", label.strip()))
+    if normalized.startswith(("TOTAL ", "NET ", "EFFECTIVE GROSS")):
+        return True
+    if normalized.startswith("GROSS ") and ("INCOME" in normalized or "REVENUE" in normalized):
+        return True
+    return normalized in {"INCOME", "REVENUE", "REVENUES"}
+
+
+def _annual_statement_amount(values: list[float | None]) -> float:
+    numeric = _strip_trailing_total_column([v for v in values if v is not None])
+    return round(sum(numeric[:12]), 2)
+
+
+def _extract_income_and_totals(
+    raw_rows: list[Any],
+) -> tuple[list[dict[str, Any]], dict[str, float | None]]:
+    """Collect income detail lines and the statement's income/opex totals.
+
+    Income lines are rows above the statement's income boundary (``Total
+    Income`` and similar) or, failing that, above the operating-expense
+    header. Opex-only schedules return no income lines and no totals.
+    """
+    prepared: list[tuple[str, list[float | None], bool]] = []
+    for raw_row in raw_rows:
+        if not raw_row:
+            continue
+        label, values = _extract_label_and_values(raw_row)
+        if label:
+            prepared.append((label, values, any(v is not None for v in values)))
+
+    boundary_idx = next(
+        (i for i, (label, _, has_values) in enumerate(prepared) if _is_income_boundary_row(label, has_values)),
+        None,
+    )
+    opex_header_idx = next(
+        (
+            i
+            for i, (label, _, has_values) in enumerate(prepared)
+            if _detect_macro_section(label, has_values) == "operating_expenses"
+        ),
+        None,
+    )
+    income_end = boundary_idx if boundary_idx is not None else opex_header_idx
+
+    totals: dict[str, float | None] = {"income": None, "opex": None}
+    if boundary_idx is not None:
+        totals["income"] = _annual_statement_amount(prepared[boundary_idx][1])
+    for labels in _OPEX_TOTAL_LABELS:
+        match = next(
+            (
+                values
+                for label, values, has_values in prepared[(income_end or 0):]
+                if has_values and _normalize_statement_label(label) in labels
+            ),
+            None,
+        )
+        if match is not None:
+            totals["opex"] = _annual_statement_amount(match)
+            break
+
+    income_lines: list[dict[str, Any]] = []
+    if income_end is None:
+        return income_lines, totals
+
+    section: str | None = None
+    section_amounts: list[float] = []
+    for label, values, has_values in prepared[:income_end]:
+        if not has_values:
+            section = label
+            section_amounts = []
+            continue
+        if _is_income_summary_row(label):
+            continue
+        amount = _annual_statement_amount(values)
+        if (
+            section
+            and section_amounts
+            and _normalize_statement_label(label) == _normalize_statement_label(section)
+            and _ties_to_section(amount, section_amounts)
+        ):
+            continue
+        section_amounts.append(amount)
+        income_lines.append(
+            {
+                "label": label.strip(),
+                "section": section,
+                "annual_amount": amount,
+                "kind": _classify_income_line(label, section),
+            }
+        )
+    return income_lines, totals
+
+
 def _load_rows(
     path: Path,
     warnings: list[ParseWarning] | None = None,
 ) -> list[tuple[str, list[float | None]]]:
     """Load rows from CSV or Excel. Returns (category_name, [month_values...])."""
+    return _extract_statement_rows(_load_raw_rows(path), warnings)
+
+
+def _load_raw_rows(path: Path) -> list[Any]:
+    """Load the statement's raw rows (header row excluded for CSV)."""
     suffix = path.suffix.lower()
     if suffix == ".csv":
-        return _load_csv(path, warnings)
+        return _load_csv(path)
     elif suffix in (".xlsx", ".xls", ".xlsm"):
-        return _load_excel(path, warnings)
+        return _load_excel(path)
     elif suffix == ".pdf":
-        return _load_pdf(path, warnings)
+        return _load_pdf(path)
     else:
         raise ValueError(f"Unsupported file type: {suffix}. Use .csv, .xlsx, or text-based .pdf")
 
 
-def _load_csv(
-    path: Path,
-    warnings: list[ParseWarning] | None = None,
-) -> list[tuple[str, list[float | None]]]:
+def _load_csv(path: Path) -> list[Any]:
     with open(path, newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         next(reader, None)  # skip header
-        return _extract_statement_rows(reader, warnings)
+        return list(reader)
 
 
-def _load_excel(
-    path: Path,
-    warnings: list[ParseWarning] | None = None,
-) -> list[tuple[str, list[float | None]]]:
+def _load_excel(path: Path) -> list[Any]:
     try:
         import openpyxl
     except ImportError:
@@ -383,7 +610,7 @@ def _load_excel(
     wb = openpyxl.load_workbook(path, data_only=True)
     try:
         ws = _select_statement_sheet(wb)
-        return _extract_statement_rows(ws.iter_rows(values_only=True), warnings)
+        return list(ws.iter_rows(values_only=True))
     finally:
         wb.close()
 
@@ -433,13 +660,10 @@ def _select_statement_sheet(workbook: Any) -> Any:
     return scored[0][3]
 
 
-def _load_pdf(
-    path: Path,
-    warnings: list[ParseWarning] | None = None,
-) -> list[tuple[str, list[float | None]]]:
+def _load_pdf(path: Path) -> list[Any]:
     text = _extract_pdf_layout_text(path)
     rows = [_parse_pdf_layout_line(line) for line in text.splitlines()]
-    return _extract_statement_rows((row for row in rows if row), warnings)
+    return [row for row in rows if row]
 
 
 def _extract_pdf_layout_text(path: Path) -> str:
@@ -556,6 +780,8 @@ def _detect_hierarchy(
                 stripped,
                 current.subsection_header,
                 bool(current.detail_rows),
+                amount=amount,
+                section_amounts=[detail_amount for _, detail_amount in current.detail_rows],
             ):
                 continue
             current.detail_rows.append((stripped, amount))
@@ -798,23 +1024,32 @@ def _extract_statement_rows(
     current_macro_section: str | None = None
     after_income_boundary = False
     current_detail_section: str | None = None
+    current_detail_header: str | None = None
     detail_seen_in_section = False
     detail_categories_in_section: set[str] = set()
+    section_amounts: list[float] = []
+    section_category_amounts: dict[str, list[float]] = {}
 
     for label, raw_label, values, has_numeric_values, macro_section, income_boundary in prepared_rows:
         if macro_section is not None and not has_numeric_values:
             current_macro_section = macro_section
             current_detail_section = None
+            current_detail_header = None
             detail_seen_in_section = False
             detail_categories_in_section = set()
+            section_amounts = []
+            section_category_amounts = {}
             continue
         if income_boundary:
             after_income_boundary = True
             if not contains_operating_section and current_macro_section == "income":
                 current_macro_section = None
             current_detail_section = None
+            current_detail_header = None
             detail_seen_in_section = False
             detail_categories_in_section = set()
+            section_amounts = []
+            section_category_amounts = {}
             continue
         if not has_numeric_values:
             if _is_inside_expense_window(
@@ -824,8 +1059,11 @@ def _extract_statement_rows(
                 after_income_boundary=after_income_boundary,
             ):
                 current_detail_section = _normalize_statement_label(label)
+                current_detail_header = label
                 detail_seen_in_section = False
                 detail_categories_in_section = set()
+                section_amounts = []
+                section_category_amounts = {}
             continue
         if contains_operating_section and current_macro_section != "operating_expenses":
             continue
@@ -845,31 +1083,47 @@ def _extract_statement_rows(
             current_detail_section = _normalize_statement_label(
                 _matches_category_map(label) or label
             )
+            current_detail_header = label
             detail_seen_in_section = False
             detail_categories_in_section = set()
+            section_amounts = []
+            section_category_amounts = {}
             continue
         if _is_summary_row(label):
             continue
         label_is_account_detail = bool(re.match(r"^\s*\d+(?:\.\d+)?\s*[: -]", label))
         label_category = _matches_category_map(label)
+        if len(numeric_values) > 12:
+            numeric_values = numeric_values[:12]
+        if not numeric_values:
+            continue
+        amount = sum(numeric_values)
+        # A bare row that repeats a category already seen in this section is a
+        # rollup only when it ties to the detail above it. Otherwise it is
+        # another GL line for the same category and must be summed.
         if (
             detail_seen_in_section
             and current_detail_section
             and not label_is_account_detail
             and label_category
             and label_category in detail_categories_in_section
+            and _ties_to_section(amount, section_amounts, section_category_amounts.get(label_category))
         ):
             continue
-        if _is_section_subtotal_row(label, current_detail_section, detail_seen_in_section):
+        if _is_section_subtotal_row(
+            label,
+            current_detail_section,
+            detail_seen_in_section,
+            amount=amount,
+            section_amounts=section_amounts,
+        ):
             continue
-        if len(numeric_values) > 12:
-            numeric_values = numeric_values[:12]
-        if not numeric_values:
-            continue
-        rows.append((label, numeric_values))
+        rows.append((_contextual_label(label, current_detail_header), numeric_values))
         detail_seen_in_section = True
+        section_amounts.append(amount)
         if label_category:
             detail_categories_in_section.add(label_category)
+            section_category_amounts.setdefault(label_category, []).append(amount)
     return rows
 
 
@@ -891,6 +1145,8 @@ def _is_section_subtotal_row(
     label: str,
     current_detail_section: str | None,
     detail_seen_in_section: bool,
+    amount: float | None = None,
+    section_amounts: list[float] | None = None,
 ) -> bool:
     normalized = _normalize_statement_label(label)
     if detail_seen_in_section and current_detail_section:
@@ -906,13 +1162,52 @@ def _is_section_subtotal_row(
             and label_canonical
             and current_canonical == label_canonical
         ):
-            return True
+            return amount is None or _ties_to_section(amount, section_amounts or [])
     return normalized in {
         "MANAGER CONTROLLED EXPENSES",
         "ASSET MANAGER CONTROLLED EXPENSES",
         "EXPENSE",
         "EXPENSES",
     }
+
+
+def _ties_to_section(
+    amount: float,
+    section_amounts: list[float],
+    category_amounts: list[float] | None = None,
+) -> bool:
+    """True when a candidate rollup equals the detail lines above it."""
+    for parts in (section_amounts, category_amounts or []):
+        if parts and abs(sum(parts) - amount) <= max(1.0, abs(amount) * 1e-4):
+            return True
+    return False
+
+
+_UTILITY_CATEGORIES = {
+    canonical for _, canonical, recoverable in _CATEGORY_MAP if recoverable
+}
+_REPAIR_SECTION_CATEGORIES = {
+    "Repairs & Maintenance",
+    "Turnover / Make-Ready",
+    "Contract Services",
+}
+
+
+def _contextual_label(label: str, section_header: str | None) -> str:
+    """Keep a repair line under a repair header out of utility categories.
+
+    "Water Extraction" or "Electrical Repairs/Supplies" under a Repairs &
+    Maintenance header are repair costs, not recoverable utilities. Prefixing
+    the header lets category matching resolve them to the section's category
+    while keeping the raw label in provenance.
+    """
+    if not section_header:
+        return label
+    if _matches_category_map(section_header) not in _REPAIR_SECTION_CATEGORIES:
+        return label
+    if _matches_category_map(label) not in _UTILITY_CATEGORIES:
+        return label
+    return f"{section_header.strip()}: {label}"
 
 
 def _cell_text(value: Any) -> str:

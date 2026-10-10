@@ -654,7 +654,7 @@ def test_box_score_sidecar_maps_beds_and_baths_for_opaque_codes(tmp_path: Path) 
     wb.save(box_score)
     wb.close()
 
-    result = parse_rent_roll(rent_roll)
+    result = parse_rent_roll(rent_roll, scan_sidecar_workbooks=True)
     by_type = {c["unit_type"]: c for c in result["unit_cohorts"]}
     assert by_type["bc_Q1"]["bedrooms"] == 2
     assert by_type["bc_Q1"]["bathrooms"] == 1.0

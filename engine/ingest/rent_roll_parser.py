@@ -120,13 +120,22 @@ _CANONICAL_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
-def parse_rent_roll(path: str | Path) -> dict[str, Any]:
+def parse_rent_roll(
+    path: str | Path,
+    *,
+    scan_sidecar_workbooks: bool = False,
+) -> dict[str, Any]:
     """Parse a rent roll file into canonical unit_cohorts format.
 
     Args:
         path: CSV or Excel rent roll. Expected columns (case-insensitive):
               Unit, Type (or Bed/Bath), Sqft, Beds, Baths, Status,
               Monthly Rent (or Rent), Market Rent, Lease End
+        scan_sidecar_workbooks: Opt in to reading sibling workbooks in the
+              rent roll's folder (e.g. a Box Score) for bed/bath labels. Off
+              by default: the scan opens every workbook in the folder, which
+              reads unrelated files and forces downloads of cloud-only files
+              in synced folders.
 
     Returns:
         Dict with:
@@ -160,7 +169,9 @@ def parse_rent_roll(path: str | Path) -> dict[str, Any]:
     blockers: list[str] = []
     rows_with_beds_col = sum(1 for r in rows if r.get("beds") not in (None, 0))
     if rows_with_beds_col == 0:
-        sidecar_bed_bath_map = _load_sidecar_bed_bath_map(path, rows)
+        sidecar_bed_bath_map = (
+            _load_sidecar_bed_bath_map(path, rows) if scan_sidecar_workbooks else {}
+        )
         # Try extracting beds from each row's unit_type code. We only
         # populate `r["beds"]` if the cohort_key regex inside
         # `_resolve_beds_baths` would otherwise miss (i.e. the unit_type

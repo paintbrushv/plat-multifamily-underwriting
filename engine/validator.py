@@ -528,6 +528,23 @@ def _check_program_id_namespace_uniqueness(inputs: Dict[str, Any]) -> List[Valid
     return issues
 
 
+def _check_ingest_gate(inputs: Dict[str, Any]) -> List[ValidationIssue]:
+    """A BLOCKED ingest gate fails validation, one ERROR per blocker."""
+    gate = ((inputs.get("metadata") or {}).get("ingest_gate") or {})
+    if gate.get("status") != "BLOCKED":
+        return []
+    blockers = gate.get("blockers") or [{"code": "unspecified", "message": "ingest gate is BLOCKED"}]
+    return [
+        ValidationIssue(
+            severity="ERROR",
+            code="INGEST_BLOCKED",
+            message=f"{blocker.get('code')}: {blocker.get('message')}",
+            path="/metadata/ingest_gate",
+        )
+        for blocker in blockers
+    ]
+
+
 def _check_required_revenue_quality_bridge(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     property_summary = ((inputs.get("metadata") or {}).get("property_summary") or {})
     material = property_summary.get("material_ancillary_income") or {}
@@ -1512,6 +1529,7 @@ def validate_deal(
     issues.extend(_check_unit_cohorts_uniqueness(inputs))
     issues.extend(_check_program_id_namespace_uniqueness(inputs))
     issues.extend(_check_required_revenue_quality_bridge(inputs))
+    issues.extend(_check_ingest_gate(inputs))
     issues.extend(_check_renovation_programs(inputs, month_ids))
     issues.extend(_check_growth_bounds(inputs))
     issues.extend(_check_vacancy_bounds(inputs))
