@@ -11,7 +11,10 @@ floor $600/unit). Each case used to produce a wrong price with no error:
    T12 vacancy loss;
 5. a time-varying vacancy curve was flattened to one property-wide rate with
    no disclosure; the vacancy anchor now floors each segment and keeps the
-   analyst's curve shape.
+   analyst's curve shape;
+6. loss to lease, collection loss, concessions and reserves were rewritten
+   before the floors (re-derived, flattened, collapsed, forced to the vintage
+   reserve); the floors now only raise, per segment (UPL-62).
 """
 from __future__ import annotations
 
@@ -86,10 +89,14 @@ def test_free_months_only_concessions_do_not_crash():
     ])
     summary = _revenue_policy(canonical)
 
-    # 1.5 free months on a 12-month lease = 12.5% of rent.
+    # 1.5 free months on a 12-month lease = 12.5% of rent, above the floor: the
+    # analyst's row is kept with its type (UPL-62) and nothing is overridden.
     assert summary["year1_concessions_rate_applied"] == pytest.approx(0.125)
-    assert canonical["concession_schedule"][0]["concession_type"] == "pct_rent"
-    assert any(o["input"] == "concession_schedule" for o in summary["policy_overrides"])
+    assert canonical["concession_schedule"] == [
+        {"concession_id": "lease_up", "start_month": "2026-09", "end_month": "2027-08",
+         "concession_type": "free_months", "amount": 1.5, "applies_to_cohort": "ALL"},
+    ]
+    assert not any(o["input"] == "concession_schedule" for o in summary["policy_overrides"])
 
 
 def test_unsupported_concession_type_fails_closed():
@@ -239,3 +246,59 @@ def test_house_box_rebase_keeps_vacancy_segments_and_discloses_analyst_original(
         (0.06, anchor),
         (0.05, anchor),
     ]
+
+
+def _segments(field, *rates, key="cohort_id", value="a1"):
+    periods = [("2026-09", "2027-08"), ("2027-09", "2031-08")]
+    return [{key: value, "start_period": start, "end_period": end, field: rate}
+            for (start, end), rate in zip(periods, rates)]
+
+
+def test_pricing_floors_only_raise_and_keep_the_analyst_curves():
+    """UPL-62 decision (a): house floors only raise, per segment, as
+    max(analyst value, floor); they never lower or reshape the analyst's input.
+
+    The legacy pricing re-derived loss to lease from market vs in-place (4% here),
+    flattened collection loss to its worst rate, collapsed concessions into one
+    year-1 row and forced reserves down to the vintage reserve."""
+    canonical = _canonical(
+        loss_to_lease=_segments("ltl_percent", 0.08, 0.005),
+        collection_loss_curve=_segments("loss_rate", 0.03, 0.001, key="applies_to", value="ALL"),
+        concession_schedule=[
+            {"concession_id": "y1", "start_month": "2026-09", "end_month": "2027-08",
+             "concession_type": "pct_rent", "amount": 0.004, "applies_to_cohort": "ALL"},
+            {"concession_id": "later", "start_month": "2027-09", "end_month": "2031-08",
+             "concession_type": "pct_rent", "amount": 0.002, "applies_to_cohort": "ALL"},
+        ],
+        replacement_reserves=[
+            {"start_period": "2026-09", "end_period": "2031-08", "annual_amount": 1500.0 * UNITS},
+        ],
+    )
+    prepared, summary = _prepare(canonical)
+
+    # Higher analyst values are kept; only the segments below a floor are raised.
+    assert prepared["loss_to_lease"] == _segments("ltl_percent", 0.08, 0.01)
+    assert prepared["collection_loss_curve"] == _segments("loss_rate", 0.03, 0.0075, key="applies_to", value="ALL")
+    assert prepared["replacement_reserves"] == canonical["replacement_reserves"]
+    assert prepared["concession_schedule"] == [
+        dict(canonical["concession_schedule"][0], amount=0.0075),
+        canonical["concession_schedule"][1],  # later rows are kept
+    ]
+    # Every raise is disclosed with its original and applied value, and recorded as enforced.
+    raised = [(o["assumption"], o["original"], o["applied"]) for o in summary["policy_overrides"]
+              if o.get("guardrail") == "house_floor"]
+    assert sorted(raised) == [("collection_loss", 0.001, 0.0075), ("concessions", 0.004, 0.0075),
+                              ("loss_to_lease", 0.005, 0.01)]
+    findings = summary["guardrails"]["findings"]
+    assert sorted((f["key"], f["action"], f["floor_source"]) for f in findings) == [
+        ("collection_loss", "enforced", "house:vintage_1980s"),
+        ("concessions", "enforced", "house:vintage_1980s"),
+        ("loss_to_lease", "enforced", "house:vintage_1980s"),
+    ]
+    assert not [o for o in summary["policy_overrides"] if "normalization" in o]
+
+    # Pricing the priced canonical again raises nothing and changes nothing.
+    again, again_summary = _prepare(deepcopy(prepared))
+    for field in ("loss_to_lease", "collection_loss_curve", "concession_schedule", "replacement_reserves"):
+        assert again[field] == prepared[field], field
+    assert again_summary["guardrails"]["findings"] == []

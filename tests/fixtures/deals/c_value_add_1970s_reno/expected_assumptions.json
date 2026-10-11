@@ -580,8 +580,18 @@
         "floor_source": "house:vintage_1970s",
         "status": "below_floor",
         "action": "warned",
-        "original": 0.012,
-        "basis": "concessions is below the house floor 1.25% (house:vintage_1970s); lowest value before the guardrail 1.20%. Underwrite mode keeps the value; pricing mode would enforce the floor."
+        "original": 0.01,
+        "segments": [
+          {
+            "concession_id": "assumption_year1_concessions",
+            "applies_to_cohort": "ALL",
+            "start_month": "2026-11",
+            "end_month": "2027-10",
+            "concession_type": "pct_rent",
+            "original": 0.01
+          }
+        ],
+        "basis": "concessions (1 segment) is below the house floor 1.25% (house:vintage_1970s); lowest value before the guardrail 1.00%. Underwrite mode keeps the value; pricing mode would enforce the floor."
       }
     }
   },

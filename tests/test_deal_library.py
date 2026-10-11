@@ -309,17 +309,21 @@ def _below_floor_keys(canonical, deal):
     if any(d(r["vacancy_rate"]) < house.default_physical_vacancy_rate(year, strategy=strategy)
            for r in canonical["physical_vacancy_curve"]):
         below.add("physical_vacancy")
-    market = {r["cohort_id"]: d(r["market_rent"]) for r in canonical["market_rent_curve"]}
-    inplace = {c["cohort_id"]: d(c["initial_inplace_rent"]) for c in canonical["unit_cohorts"]}
-    if any(market[r["cohort_id"]] > inplace[r["cohort_id"]]
-           and d(r["ltl_percent"]) < house.default_loss_to_lease_rate(year, strategy=strategy)
-           for r in canonical["loss_to_lease"]):
+    # Every loss-to-lease segment counts (UPL-62), and a cohort with no row reads as 0%.
+    ltl_cohorts = {r["cohort_id"] for r in canonical["loss_to_lease"]}
+    if any(d(r["ltl_percent"]) < house.default_loss_to_lease_rate(year, strategy=strategy)
+           for r in canonical["loss_to_lease"]) or {c["cohort_id"] for c in canonical["unit_cohorts"]} - ltl_cohorts:
         below.add("loss_to_lease")
     if any(d(r["loss_rate"]) < house.default_collection_loss_rate(year, strategy=strategy)
            for r in canonical.get("collection_loss_curve") or [{"loss_rate": 0}]):
         below.add("collection_loss")
-    year1 = max((concession_pct_rent(r) for r in canonical.get("concession_schedule") or []), default=Decimal(0))
-    if year1 < house.default_year1_concessions_rate(year, strategy=strategy):
+    # Concessions: each row that applies in analysis year 1 (none reads as 0%).
+    start = canonical["time_grid"]["analysis_start_date"][:7]
+    index = int(start[:4]) * 12 + int(start[5:7]) + 10
+    year1_end = f"{index // 12:04d}-{index % 12 + 1:02d}"
+    year1 = [concession_pct_rent(r) for r in canonical.get("concession_schedule") or []
+             if r["start_month"] <= year1_end and r["end_month"] >= start] or [Decimal(0)]
+    if min(year1) < house.default_year1_concessions_rate(year, strategy=strategy):
         below.add("concessions")
     insurance = matching_opex_rows(canonical, "insurance")
     if annual_opex_amount(canonical, insurance[0]) / units < house.DEFAULT_YEAR1_INSURANCE_PER_UNIT:

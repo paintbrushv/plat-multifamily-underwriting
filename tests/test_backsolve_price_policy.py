@@ -540,9 +540,11 @@ def test_prepare_house_assumptions_preserves_multisegment_market_rent_curve():
         {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2027-05", "market_rent": 1100.0},
         {"cohort_id": "a1", "start_period": "2027-06", "end_period": "2028-05", "market_rent": 1133.0},
     ]
+    # The LTL segments keep their shape; each is floored at the 1980s 1% (UPL-62:
+    # a market rent at in-place no longer zeroes loss to lease).
     assert prepared["loss_to_lease"] == [
-        {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2027-05", "ltl_percent": 0.0},
-        {"cohort_id": "a1", "start_period": "2027-06", "end_period": "2028-05", "ltl_percent": 0.0},
+        {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2027-05", "ltl_percent": 0.01},
+        {"cohort_id": "a1", "start_period": "2027-06", "end_period": "2028-05", "ltl_percent": 0.01},
     ]
 
 
@@ -662,7 +664,11 @@ def test_prepare_house_assumptions_preserves_analyst_override_rent_caps():
     assert policy_summary["house_box_score_rebase"]["analyst_override_rent_cap_units"] == 10
 
 
-def test_prepare_house_assumptions_does_not_impose_ltl_on_capped_market_rents():
+def test_prepare_house_assumptions_floors_ltl_on_capped_market_rents():
+    """UPL-62: loss to lease is max(segment, floor) for every cohort. The legacy
+    pricing zeroed it when the (capped) market rent was at or below in-place;
+    now the 1980s 1% floor applies, while collection loss and concessions above
+    their floors are kept as entered."""
     canonical = {
         "metadata": {
             "year_built": 1984,
@@ -766,10 +772,12 @@ def test_prepare_house_assumptions_does_not_impose_ltl_on_capped_market_rents():
         broker_snapshot=None,
     )
 
-    assert prepared["loss_to_lease"][0]["ltl_percent"] == 0.0
+    assert prepared["loss_to_lease"][0]["ltl_percent"] == 0.01
     assert prepared["collection_loss_curve"][0]["loss_rate"] == 0.011
     assert prepared["concession_schedule"][0]["amount"] == 0.011
-    assert policy_summary["loss_to_lease_rate_applied"] == 0.0
+    assert policy_summary["loss_to_lease_rate_applied"] == 0.01
+    raised = [o for o in policy_summary["policy_overrides"] if o.get("assumption") == "loss_to_lease"]
+    assert [(o["cohort_id"], o["original"], o["applied"]) for o in raised] == [("b3", 0.0, 0.01)]
     assert policy_summary["collection_loss_rate_applied"] == 0.011
     assert policy_summary["year1_concessions_rate_applied"] == 0.011
 

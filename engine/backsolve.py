@@ -22,8 +22,6 @@ from engine.assumptions.canonical_ops import (
     sum_units as _sum_units,
     find_annual_opex as _find_annual_opex,
     sum_opex_bucket as _sum_opex_bucket,
-    ensure_year1_concession_schedule as _ensure_year1_concession_schedule,
-    concession_pct_rent as _concession_pct_rent,
     matching_opex_rows as _matching_opex_rows,
     upsert_annual_opex_by_match as _upsert_annual_opex_by_match,
     upsert_annual_opex as _upsert_annual_opex,
@@ -31,7 +29,6 @@ from engine.assumptions.canonical_ops import (
 from engine.assumptions import guardrails
 from engine.assumptions.guardrails import (
     GuardrailProfile,
-    cohort_rents as _cohort_rents,
     parse_percent_note as _parse_percent_note,
     status_count as _status_count,
     vacancy_anchor_summary as _vacancy_anchor_summary,
@@ -551,43 +548,6 @@ def _rebase_to_house_box_score(
 _extract_t12_vacancy_rate = guardrails.t12_vacancy_rate
 _extract_broker_vacancy_rate = guardrails.broker_vacancy_rate
 
-# Backsolve's pricing normalizations (house-policy rewrites of analyst inputs),
-# by the canonical input each rewrites: (normalization name, assumption key, basis).
-PRICING_NORMALIZATIONS = {
-    "loss_to_lease": (
-        "ltl_rederived_from_market_vs_in_place", "loss_to_lease",
-        "Backsolve pricing normalization: loss to lease is re-derived per cohort as "
-        "1 - in-place rent / market rent.",
-    ),
-    "collection_loss_curve": (
-        "collection_loss_flattened_to_worst_rate", "collection_loss",
-        "Backsolve pricing normalization: collection loss becomes one ALL row at the worst current rate.",
-    ),
-    "concession_schedule": (
-        "concessions_as_year1_schedule", "concessions",
-        "Backsolve pricing normalization: concessions become one year-1 pct_rent schedule at the "
-        "highest current rate.",
-    ),
-    "replacement_reserves": (
-        "reserves_set_to_vintage_reserve", "replacement_reserve_per_unit",
-        "Backsolve pricing normalization: replacement reserves are set to the house vintage reserve "
-        "per unit for the whole hold.",
-    ),
-}
-
-
-def _pricing_normalization(input_name: str, original: Any, applied: Any) -> dict[str, Any]:
-    """A ``policy_overrides`` entry for one pricing normalization that changed an input."""
-    name, _key, basis = PRICING_NORMALIZATIONS[input_name]
-    return {
-        "input": input_name,
-        "normalization": name,
-        "source": guardrails.SOURCE_HOUSE_PRICING_NORMALIZATION,
-        "basis": basis,
-        "original": deepcopy(original),
-        "applied": deepcopy(applied),
-    }
-
 
 def _apply_house_revenue_policy(
     canonical: dict[str, Any],
@@ -598,17 +558,16 @@ def _apply_house_revenue_policy(
     broker_snapshot: dict[str, Any] | None = None,
     trailing_actuals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """House revenue policy for pricing; the floors come from the shared guardrails.
+    """House revenue floors for pricing, from the shared guardrails (ADR 0003 §5).
 
-    Backsolve first normalizes three inputs (its pricing policy, unchanged):
-    loss to lease is re-derived from market vs in-place rent, collection loss
-    becomes one ALL row at the worst current rate, and concessions become a
-    year-1 pct_rent schedule at the highest current rate. Each normalization
-    that changes an input is listed in ``policy_overrides`` with
-    ``normalization``, ``source: "house:pricing_normalization"``, ``original``
-    and ``applied``. Then ``guardrails.enforce_floors`` in pricing mode raises
-    every value below its house floor (vacancy per segment against the
-    property-level anchor) and lists each raise in ``policy_overrides``.
+    The floors only raise, per segment: ``max(analyst value, floor)``. They
+    never lower or reshape the analyst's input. ``guardrails.enforce_floors``
+    in pricing mode raises each vacancy, loss-to-lease and collection-loss
+    segment below its floor and each year-1 concession row below the year-1
+    floor (a cohort with no loss-to-lease row, a hold with no collection-loss
+    curve, or a year 1 with no concession row gets a row at the floor). Every
+    raise is listed in ``policy_overrides`` with its original and applied
+    value.
     """
     broker_notes = (broker_snapshot or {}).get("underwriting_notes", {})
     profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=deferred)
@@ -620,53 +579,11 @@ def _apply_house_revenue_policy(
     broker_bad_debt = _parse_percent_note(broker_notes.get("bad_debt"))
     broker_concessions = _parse_percent_note(broker_notes.get("concessions"))
 
-    normalizations: list[dict[str, Any]] = []
-
-    # Loss to lease: the house value is derived from market vs in-place rent.
-    original_ltl = deepcopy(canonical.get("loss_to_lease") or [])
-    for row in canonical.get("loss_to_lease") or []:
-        market_dec, inplace_dec = _cohort_rents(canonical, row["cohort_id"])
-        derived = Decimal("0")
-        if market_dec > inplace_dec:
-            derived = max(Decimal("0"), Decimal("1") - (inplace_dec / market_dec))
-        row["ltl_percent"] = float(derived)
-    if original_ltl != (canonical.get("loss_to_lease") or []):
-        normalizations.append(_pricing_normalization(
-            "loss_to_lease", original_ltl, canonical.get("loss_to_lease") or [],
-        ))
-
-    # Concessions: one year-1 pct_rent schedule at the highest current rate.
-    original_concessions = deepcopy(canonical.get("concession_schedule") or [])
-    current_concessions = max(
-        (_concession_pct_rent(row) for row in original_concessions),
-        default=Decimal("0"),
-    )
-    _ensure_year1_concession_schedule(canonical, rate=current_concessions)
-
-    # Collection loss: one ALL row at the worst current rate.
-    original_collection = deepcopy(canonical.get("collection_loss_curve") or [])
-    current_collection = Decimal("0")
-    if canonical.get("collection_loss_curve"):
-        current_collection = max(
-            Decimal(str(row.get("loss_rate", 0))) for row in canonical["collection_loss_curve"]
-        )
-    canonical["collection_loss_curve"] = [
-        {
-            "applies_to": "ALL",
-            "start_period": str(canonical["time_grid"]["analysis_start_date"])[:7],
-            "end_period": str(canonical["time_grid"]["analysis_end_date"])[:7],
-            "loss_rate": float(current_collection),
-        }
-    ]
-    if original_collection != canonical["collection_loss_curve"]:
-        normalizations.append(_pricing_normalization(
-            "collection_loss_curve", original_collection, canonical["collection_loss_curve"],
-        ))
-
     # The vacancy anchor is a per-segment floor: a segment below it is raised
     # to it, a segment at or above it keeps the analyst's rate. The curve keeps
     # its shape, and one cohort's higher rate never spreads to other cohorts.
-    overrides: list[dict[str, Any]] = list(normalizations)
+    # Loss to lease, collection loss and year-1 concessions follow the same rule.
+    overrides: list[dict[str, Any]] = []
     findings = guardrails.enforce_floors(
         canonical,
         mode=guardrails.MODE_PRICING,
@@ -674,12 +591,6 @@ def _apply_house_revenue_policy(
         context={**context, "policy_overrides": overrides},
         keys=("physical_vacancy", "loss_to_lease", "collection_loss", "concessions"),
     )
-    if original_concessions and original_concessions != (canonical.get("concession_schedule") or []):
-        # The year-1 schedule as priced (after any concession floor).
-        overrides.append(_pricing_normalization(
-            "concession_schedule", original_concessions,
-            canonical.get("concession_schedule") or [],
-        ))
 
     applied_ltls = [float(row["ltl_percent"]) for row in canonical.get("loss_to_lease") or []]
     applied_vacancy = floors["physical_vacancy"].value
@@ -692,8 +603,11 @@ def _apply_house_revenue_policy(
         }
         for row in canonical.get("physical_vacancy_curve") or []
     ]
-    applied_concessions = max(current_concessions, floors["concessions"].value or Decimal("0"))
-    applied_collection = max(current_collection, floors["collection_loss"].value or Decimal("0"))
+    applied_concessions = guardrails.year1_concession_rate(canonical)
+    applied_collection = max(
+        (Decimal(str(row.get("loss_rate", 0))) for row in canonical.get("collection_loss_curve") or []),
+        default=Decimal("0"),
+    )
 
     annualized_house_gpr = Decimal("0")
     for cohort in canonical.get("unit_cohorts") or []:
@@ -1119,30 +1033,16 @@ def _prepare_house_assumptions(
         guardrail_findings.append(waiver)
         policy_overrides.append(guardrails.policy_override(waiver))
 
-    # Reserves: the house vintage reserve replaces the analyst's reserves. The
-    # shared guardrail first records any segment it raises.
+    # Reserves: max(analyst, vintage reserve) per segment (shared guardrail).
+    # A higher analyst reserve is kept; a hold with no reserves gets the floor.
     reserve_per_unit = guardrail_profile.replacement_reserve_per_unit()
-    if reserve_per_unit is not None:
-        guardrail_findings += guardrails.enforce_floors(
-            prepared,
-            mode=guardrails.MODE_PRICING,
-            profile=guardrail_profile,
-            context={"policy_overrides": policy_overrides},
-            keys=("replacement_reserve_per_unit",),
-        )
-        annual_reserve = reserve_per_unit * Decimal(str(units))
-        floored_reserves = deepcopy(prepared.get("replacement_reserves") or [])
-        prepared["replacement_reserves"] = [
-            {
-                "start_period": str(prepared["time_grid"]["analysis_start_date"])[:7],
-                "end_period": str(prepared["time_grid"]["analysis_end_date"])[:7],
-                "annual_amount": float(annual_reserve),
-            }
-        ]
-        if floored_reserves != prepared["replacement_reserves"]:
-            policy_overrides.append(_pricing_normalization(
-                "replacement_reserves", floored_reserves, prepared["replacement_reserves"],
-            ))
+    guardrail_findings += guardrails.enforce_floors(
+        prepared,
+        mode=guardrails.MODE_PRICING,
+        profile=guardrail_profile,
+        context={"policy_overrides": policy_overrides},
+        keys=("replacement_reserve_per_unit",),
+    )
 
     observed_r_and_m = _sum_opex_bucket(prepared, "repairs_maintenance")
     r_and_m_per_unit = guardrail_profile.r_and_m_per_unit()
@@ -1457,10 +1357,11 @@ def _label_pricing_entries(
 
     - ``house:backsolve_policy``: fees, closing costs, sale cost and an exit cap
       the policy carries.
-    - ``house:pricing_normalization``: the house-policy rewrites of analyst
-      inputs (loss to lease re-derived, concessions as one year-1 schedule,
-      collection loss at the worst rate, reserves at the vintage reserve, the
-      house box-score rebase), each also listed in ``policy_overrides``.
+    - ``house:pricing_normalization``: the house box-score rebase (loss to
+      lease and vacancy rebuilt on the rent-roll floorplans) and any other opex
+      line backsolve's preparation set (a revenue-quality bridge paired
+      expense). The house floors never rewrite an input: they only raise it
+      and keep their guardrail label.
     - ``house:property_tax_module``: the real estate tax line reassessed at the
       priced price; an opex line a floor raised takes that floor's source.
     - ``analyst``: insurance set by the policy's ``insurance_per_unit_override``.
@@ -1500,11 +1401,7 @@ def _label_pricing_entries(
             )
         label(key, guardrails.SOURCE_HOUSE_BACKSOLVE_POLICY, guardrails.PRICING_POLICY_NOTE, basis)
 
-    # 2. Pricing normalizations (each one is in policy_overrides).
-    for override in policy_summary.get("policy_overrides") or []:
-        if override.get("normalization"):
-            _name, key, basis = PRICING_NORMALIZATIONS[override["input"]]
-            label(key, guardrails.SOURCE_HOUSE_PRICING_NORMALIZATION, guardrails.PRICING_NORMALIZATION_NOTE, basis)
+    # 2. The house box-score rebase (the one remaining input normalization).
     rebase = policy_summary.get("house_box_score_rebase") or {}
     for key, field in _REBASED_FIELDS.items():
         if rebase.get("applied") and changed(key) and original.get(field) != case.get(field):
