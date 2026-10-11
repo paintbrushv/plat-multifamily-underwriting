@@ -1977,6 +1977,40 @@ def backsolve_price(
     return {**base, "status": status, "case": solved_case, "results": solved_results, "summary": summary}
 
 
+def _pct(value: Any) -> str:
+    return "n/a" if value is None else f"{float(value):.2%}"
+
+
+def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
+    """The concise result the CLI prints (the full record is backsolve_summary.json)."""
+    price = summary.get("solved_purchase_price")
+    basis = summary.get("coc_basis") or {}
+    basis_name = basis.get("basis") if isinstance(basis, dict) else basis
+    if isinstance(basis, dict) and basis.get("analysis_year") is not None:
+        basis_name = f"{basis_name} (analysis year {basis['analysis_year']})"
+    target = summary.get("target_cash_on_cash_pct")
+    if target is None and summary.get("target_coc_pct") is not None:
+        target = float(summary["target_coc_pct"]) / 100
+    achieved = summary.get("achieved_coc_pct")
+    findings = ((summary.get("policy_summary") or {}).get("guardrails") or {}).get("findings") or []
+    enforced = sum(1 for f in findings if f.get("action") == guardrails.ACTION_ENFORCED)
+    dscr = summary.get("minimum_dscr")
+    lines = [
+        f"Backsolve: {summary.get('status', 'unknown')}",
+        f"  Solved price:     {'n/a' if price is None else f'${float(price):,.2f}'}",
+        f"  CoC basis:        {basis_name or 'n/a'}, target {_pct(target)}",
+        f"  Achieved CoC:     {_pct(None if achieved is None else float(achieved) / 100)}",
+        f"  Levered IRR:      {_pct(summary.get('levered_irr'))}",
+        f"  Min DSCR:         {'n/a' if dscr is None else f'{float(dscr):.2f}x'}",
+        f"  Floors enforced:  {enforced}",
+        f"  Summary:          {summary_path}",
+    ]
+    labels = {"canonical": "Canonical", "underwriting": "Results", "assumptions": "Assumptions"}
+    for key, path in (summary.get("artifacts") or {}).items():
+        lines.append(f"  {labels.get(key, key.title()) + ':':<18}{path}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     args = _parse_args()
     canonical = _load_json(Path(args.canonical_json))
@@ -2024,7 +2058,9 @@ def main() -> None:
         if has_assumptions(result["case"]):
             sheet_path = write_assumptions_json(result["case"], output_dir / "assumptions.json")
             summary["artifacts"]["assumptions"] = str(sheet_path)
-    _write_json(output_dir / "backsolve_summary.json", summary)
+    summary_path = output_dir / "backsolve_summary.json"
+    _write_json(summary_path, summary)
+    print(format_cli_summary(summary, summary_path))
     if result["status"] not in {"converged", "ceiling_feasible"}:
         raise SystemExit(2)
 

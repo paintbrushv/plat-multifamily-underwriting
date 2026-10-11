@@ -130,7 +130,10 @@ python -m engine.backsolve --canonical-json output/deal.json \
 ```
 
 It writes `backsolve_summary.json`, the priced canonical, its results and
-`assumptions.json` into the output folder.
+`assumptions.json` into the output folder, and prints the status, solved
+price, cash-on-cash basis and target, achieved cash-on-cash, levered IRR,
+minimum DSCR, the number of floors enforced and those paths. It exits 2 when
+the search is infeasible or exhausted.
 
 ### Market data
 

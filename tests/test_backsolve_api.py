@@ -121,6 +121,46 @@ def test_cli_and_api_share_solver_output(economy, tmp_path, monkeypatch):
     }}
 
 
+def _run_cli(tmp_path, monkeypatch, *flags):
+    source = tmp_path / "synthetic.json"
+    source.write_text(json.dumps(INPUTS))
+    monkeypatch.setattr(backsolve.sys, "argv", [
+        "backsolve", "--canonical-json", str(source), "--output-dir", str(tmp_path / "out"),
+        "--policy-version", POLICY["version"], "--benchmark-5yr-treasury", BENCHMARK["rate"],
+        "--benchmark-as-of", BENCHMARK["as_of"], "--benchmark-source", BENCHMARK["source"],
+        "--exit-cap-rate", "0.06", *flags,
+    ])
+    backsolve.main()
+
+
+def test_cli_prints_a_concise_summary_on_success(economy, tmp_path, monkeypatch, capsys):
+    _run_cli(tmp_path, monkeypatch, "--min-price", "20", "--max-price", "100")
+    out = capsys.readouterr().out
+    summary = json.loads((tmp_path / "out/backsolve_summary.json").read_text())
+    assert summary["status"] == "converged"
+    lines = dict(line.strip().split(":", 1) for line in out.strip().splitlines()[1:])
+    assert out.splitlines()[0] == "Backsolve: converged"
+    assert lines["Solved price"].strip() == "$50.00"
+    assert lines["CoC basis"].strip() == "year_1 (analysis year 1), target 7.00%"
+    assert lines["Achieved CoC"].strip() == "7.00%"
+    assert lines["Levered IRR"].strip() == "0.00%"
+    assert lines["Min DSCR"].strip() == "0.00x"
+    assert lines["Floors enforced"].strip() == "0"
+    assert lines["Summary"].strip() == str(tmp_path / "out/backsolve_summary.json")
+    for label, key in (("Canonical", "canonical"), ("Results", "underwriting"), ("Assumptions", "assumptions")):
+        assert lines[label].strip() == summary["artifacts"][key]
+
+
+def test_cli_prints_the_status_and_keeps_exit_2_when_infeasible(economy, tmp_path, monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        _run_cli(tmp_path, monkeypatch, "--min-price", "60", "--max-price", "100")
+    assert exit_info.value.code == 2
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "Backsolve: infeasible"
+    assert "Solved price:     n/a" in out
+    assert str(tmp_path / "out/backsolve_summary.json") in out
+
+
 def test_engine_mcp_uses_public_api(economy):
     from engine.mcp_server import backsolve_deal_price
 

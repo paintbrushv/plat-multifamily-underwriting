@@ -225,7 +225,10 @@ value only when given; omitted, the canonical's analyst value is priced, else
 the policy default. An infeasible
 or exhausted search writes its status and exits with code 2 so a caller cannot
 treat it as a completed solve. Exit code 0 requires a converged boundary or a
-feasible supplied ceiling.
+feasible supplied ceiling. Every run prints a concise summary to stdout:
+status, solved price, cash-on-cash basis and target, achieved cash-on-cash,
+levered IRR, minimum DSCR, the number of house floors enforced, and the paths
+of `backsolve_summary.json` and the other artifacts written.
 
 The engine MCP tool `backsolve_deal_price` returns the same summary and
 assumptions, excluding large cashflow arrays. The Platworks tool
