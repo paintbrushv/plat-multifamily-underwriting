@@ -77,6 +77,19 @@ Payback Period = Renovation Cost / (Rent Premium × 12)
 | end_month | string | No | Last month renovations can occur |
 | monthly_pace | number | Yes | Target units per month |
 
+### Funding the renovation budget
+
+The top-level `renovation_capex_funding` says how the renovation budget
+(program and `unit_renovations` costs) is funded:
+
+- `operating_cash_flow` (default): the costs are CapEx in operating cash flow.
+- `equity_at_close`: the budget is funded by equity at close. The engine keeps
+  it out of operating cash flow (each month shows it as `equity_funded_capex`,
+  and `results.capex_funding` totals it). A stated
+  `purchase_assumptions.total_equity_basis` / `total_unlevered_basis` must
+  include the budget; a basis left out defaults to the usual basis plus the
+  budget. Value-add backsolve pricing sets this mode (docs/BACKSOLVE_API.md).
+
 ## Output Schema
 
 ### by_month

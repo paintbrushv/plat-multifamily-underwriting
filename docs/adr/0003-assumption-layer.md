@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Slices 1-8 are implemented; see "Implementation status" at the end
-for the decisions that remain open.
+Accepted. Slices 1-8 are implemented, and so are the four product decisions
+that followed them; see "Implementation status" at the end.
 
 ## Context
 
@@ -124,7 +124,7 @@ key:
 | `house:year1_insurance_floor` | The $600/unit Year-1 insurance floor |
 | `house:vacancy_anchor` | The property-level vacancy anchor when no single anchor names the source |
 | `house:backsolve_policy` | `engine/backsolve_policy` values: fees, closing costs, sale cost, and in pricing any value the backsolve policy sets (an explicit exit cap) |
-| `house:pricing_normalization` | A backsolve pricing normalization (§5): loss to lease re-derived, concessions as one year-1 schedule, collection loss at the worst rate, reserves at the vintage reserve, the house box-score rebase |
+| `house:pricing_normalization` | A backsolve pricing normalization (§5): the house box-score rebase (loss to lease and vacancy rebuilt on the rent-roll floorplans), or an opex line backsolve's preparation sets (a revenue-quality bridge paired expense). The house floors never rewrite an input. |
 | `engine_fallback` | An engine default when nothing else applies |
 
 #### Overrides
@@ -217,9 +217,9 @@ reuses the `underwriting_policy` vintage functions:
 | Key | Floor | Checked against |
 |---|---|---|
 | `physical_vacancy` | Property-level anchor: max of the vintage floor, rent-roll vacant share (`house_box_score`), T12 vacancy / GPR, broker vacancy, and a supplied `market_vacancy_benchmark` | each `physical_vacancy_curve` segment |
-| `loss_to_lease` | max(vintage LTL floor, broker LTL) | each `loss_to_lease` segment whose cohort market rent exceeds in-place rent |
+| `loss_to_lease` | max(vintage LTL floor, broker LTL) | each `loss_to_lease` segment, whatever the cohort's market vs in-place rent; a cohort with no row counts as 0% |
 | `collection_loss` | max(vintage floor, broker bad debt) | each `collection_loss_curve` segment (no curve counts as 0) |
-| `concessions` | max(vintage year-1 floor, broker concessions) | the year-1 rate (highest `pct_rent` / `free_months` row) |
+| `concessions` | max(vintage year-1 floor, broker concessions) | each `concession_schedule` row that applies in analysis year 1 (`free_months` read as months / 12); no year-1 row counts as 0% |
 | `insurance_per_unit` | $600/unit (`DEFAULT_YEAR1_INSURANCE_PER_UNIT`); waived by an explicit analyst insurance override, and the waiver is disclosed | the matched insurance line, annualized |
 | `r_and_m_per_unit` | vintage R&M per unit | the R&M bucket, annualized; a shortfall is one top-up line sized from the other R&M lines (an existing top-up line never counts toward the floor) |
 | `replacement_reserve_per_unit` | vintage reserve per unit | each `replacement_reserves` segment (none counts as 0) |
@@ -244,12 +244,46 @@ context=None)` returns `(canonical_copy, findings)`:
   `value == default_value`.
 
 `resolve_assumptions(mode=...)` calls the same module through one hook, so an
-ingested canonical carries underwrite warnings. Backsolve keeps its pricing
-normalizations (LTL re-derived from market vs in-place rent, collection loss
-flattened to its worst rate, concessions as one year-1 schedule, reserves set
-to the vintage reserve), then enforces the shared floors. Its solved canonical
-is re-resolved in `mode="pricing"` so `assumptions` matches the priced values
-and lists the enforced floors.
+ingested canonical carries underwrite warnings. Backsolve prices on the
+analyst's curves and applies only the shared floors (decision (a), below):
+
+- Floors only raise, per segment, as `max(analyst value, floor)`. They never
+  lower or reshape the analyst's input.
+- Loss to lease: every segment is floored, whatever the cohort's market vs
+  in-place rent (it is never re-derived from them or zeroed); a cohort with
+  no row gets one at the floor for the analysis period.
+- Collection loss: every segment is floored (never flattened to one row); a
+  hold with no curve gets one row at the floor.
+- Concessions: the schedule and its later-year rows are kept. A year-1 row
+  below the floor is raised to it; a row that runs past year 1 is split at
+  the year-1 boundary so its later months keep the analyst's rate. A
+  `free_months` row is compared as months / 12 and keeps its type (a raised
+  row carries the floor's months equivalent). With no year-1 row, one year-1
+  `pct_rent` row at the floor is added.
+- Reserves: `max(analyst, vintage reserve)` per segment, never forced down.
+- Vacancy, insurance and R&M are as described in the table above.
+
+Its solved canonical is re-resolved in `mode="pricing"` so `assumptions`
+matches the priced values and lists the enforced floors.
+
+Value-add pricing basis (decision (b)): the backsolve policy's `coc_basis` is
+`"year_1"` (default for the cashflow strategy) or `"stabilized_year"` (default
+for value_add), and can be overridden. On the stabilized-year basis the target
+is the post-debt cash-on-cash of the first stabilized analysis year:
+
+- with renovation programs or unit renovations, the first full 12-month
+  analysis year after the last unit is renovated;
+- otherwise `find_stabilized_year` (engine/modules/metrics.py) on the analysis
+  years, with each year's unit-weighted vacancy against the hold's last-month
+  vacancy and its operating CapEx against price plus closing costs;
+- the year must be a full year before the exit year, or the solve refuses.
+
+For value_add the renovation budget (program units x cost per unit, plus
+`unit_renovations`) is funded with equity at close: the priced canonical
+carries `renovation_capex_funding: "equity_at_close"`, `total_equity_basis`
+and `total_unlevered_basis` include the budget, and the engine keeps it out of
+operating cash flow (shown as `equity_funded_capex`). The summary discloses
+`coc_basis` and `renovation_funding`.
 
 Every value backsolve's pricing sets outside the floors is labeled by who set
 it, never as an `analyst` edit: an override with a note naming the rule pins
@@ -259,14 +293,15 @@ re-resolution.
 | Set by | Entry source | Override note |
 |---|---|---|
 | The pricing policy: fees, purchase and partnership closing costs, loan closing costs, sale cost, an exit cap the policy carries | `house:backsolve_policy` | "set by the backsolve pricing policy" |
-| A pricing normalization (LTL, concessions, collection loss, reserves, the house box-score rebase) | `house:pricing_normalization` | "rewritten by a backsolve pricing normalization" |
+| A pricing normalization (the house box-score rebase of loss to lease and vacancy; an opex line backsolve's preparation sets) | `house:pricing_normalization` | "rewritten by a backsolve pricing normalization" |
 | The real estate tax reassessed at the priced price | `house:property_tax_module` | "reassessed by the property tax module at the priced purchase price" |
 | An opex line a floor raised (insurance line, R&M top-up) | the floor's source | "opex line set by a house floor the pricing guardrail enforced" |
 | The policy's `insurance_per_unit_override` | `analyst` | "analyst insurance_per_unit_override in the backsolve policy" |
 
-Each normalization that changes an input is listed in `policy_overrides` as
-`{input, normalization, source: "house:pricing_normalization", basis, original,
-applied}`. An entry the pricing guardrail enforced keeps its guardrail label.
+Every raise a floor makes is listed in `policy_overrides` with its original and
+applied values, and the entry carries the floor's source and a `guardrail`
+record with `action: "enforced"`, the floor and its `floor_source`. An entry
+the pricing guardrail enforced keeps its guardrail label.
 
 An explicit analyst insurance figure below the $600 floor is priced as given
 (no price change) and disclosed: `policy_overrides` gets
@@ -433,25 +468,38 @@ Slices 1-8 are implemented on the stacked PRs, and an independent audit's
 gaps were filled: the sheet clears overrides and honors Value edits, the
 override contract (null clears, cohort keys, opex base overrides) is in the
 resolver, the R&M top-up is sized from the analyst lines on re-pricing, and
-every value backsolve's pricing sets is labeled and disclosed. Known open
-decisions, each pending with the product owner:
+every value backsolve's pricing sets is labeled and disclosed. The four
+decisions that were open with the product owner are decided and implemented:
 
-1. **Removing the pricing normalizations.** Backsolve still rewrites loss to
-   lease, concessions, collection loss and reserves before the floors (now
-   labeled `house:pricing_normalization` and listed in `policy_overrides`).
-   Whether pricing should keep the analyst's curves and apply only the shared
-   floors is undecided; removing them changes prices.
-2. **Value-add backsolve cash-on-cash basis.** Value-add deals are priced on
-   the same Year-1 post-debt cash-on-cash as stabilized deals; whether the
-   basis should be a stabilized-year or renovation-adjusted return is open.
-3. **Real estate tax growth after reassessment.** The property-tax module
-   reassesses the year-1 tax at the purchase price; the growth applied after
-   reassessment (house table rate vs the row's own rate vs none) needs a
-   decision.
-4. **Stabilized vacancy vs the vacancy floor.** A market or vintage-typical
-   stabilized vacancy can sit below the property-level vacancy anchor;
-   underwrite warns and pricing raises it. Whether the stabilized target
-   should be floored at resolution is open.
+1. **(a) Pricing follows the design rule (implemented, UPL-62).** Backsolve no
+   longer rewrites loss to lease, concessions, collection loss or reserves
+   before the floors. The house floors only raise, per segment, as
+   `max(analyst value, floor)`, through the shared guardrails module (§5), so
+   underwrite mode warns on the same floors. The legacy normalizations and
+   their `policy_overrides` entries are gone; only the house box-score rebase
+   is still labeled `house:pricing_normalization`. This changes backsolve
+   prices: library deal a (6% Year-1 target) moves from $27,502,952.52 to
+   $28,024,900.49.
+2. **(b) Value-add cash-on-cash basis (implemented, UPL-62).** Value-add
+   pricing targets the post-debt cash-on-cash of the first stabilized
+   analysis year, with the renovation budget funded by equity at close
+   (`renovation_capex_funding: "equity_at_close"`); stabilized deals keep the
+   Year-1 basis. The basis is the policy's `coc_basis`, defaulting by
+   strategy, and is disclosed in the summary (§5). Library deal d (3% target)
+   moves from $10,278,777.88 to $11,126,918.03 (analysis year 2), and deal c,
+   whose Year-1 solve used to refuse as non-monotonic, converges over
+   $1M-$100M at $13,304,631.70 for a 6% target (analysis year 3).
+3. **(c) Real estate tax growth after reassessment (implemented, UPL-48).**
+   The real estate tax row grows at `HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT`
+   (3%) from year 2 on the reassessed year-1 tax. The resolver writes it once
+   into the row (`house:opex_growth_table`, overridable) and
+   `engine/property_tax.py` keeps the row's growth rate, so it applies once.
+4. **(d) Stabilized vacancy vs the vacancy floor (implemented, UPL-48).**
+   The house stabilized vacancy is max(vintage typical-band midpoint, house
+   vacancy floor) for the vintage and strategy, so a house-only deal is
+   consistent with its own floor. A market stabilized vacancy is kept as
+   resolved; the property-level vacancy anchor stays a guardrail (underwrite
+   warns, pricing raises each segment below it).
 
 ## Consequences
 
