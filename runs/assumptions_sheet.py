@@ -8,7 +8,7 @@ Usage:
 
     # Re-resolve the canonical with the edited sheet as analyst overrides:
     python runs/assumptions_sheet.py apply output/deal.json \\
-      output/deal.assumptions.xlsx --output output/deal.reresolved.json
+      output/deal.assumptions.xlsx --output output/deal.reresolved.json [--no-market-data]
 
 ``export`` writes ``<canonical stem>.assumptions.json`` next to the canonical
 when neither --json nor --xlsx is given. ``apply`` accepts an edited
@@ -25,6 +25,13 @@ read against it:
 
 An overridden entry keeps its ``default_value``. ``apply`` also writes the
 re-resolved sheet as ``<output stem>.assumptions.json``.
+
+Like ``runs/ingest_deal.py``, ``apply`` re-resolves with the market-data
+registry (``engine.market_data.default_registry()``) unless
+``--no-market-data`` is given. Either way, a cleared override goes back to
+its full default chain: without a registry, the market-informed default
+recorded at the last resolution (``default_value`` and its market
+candidates) is kept.
 """
 
 from __future__ import annotations
@@ -75,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("canonical", type=Path, help="Canonical deal JSON")
     apply.add_argument("sheet", type=Path, help="Edited assumptions .json or .xlsx")
     apply.add_argument("--output", "-o", type=Path, required=True, help="Re-resolved canonical JSON path")
+    apply.add_argument("--no-market-data", action="store_true",
+                       help="Re-resolve without market data. By default the market-data registry "
+                            "(engine.market_data.default_registry) is used; market-sourced values "
+                            "already in the canonical are kept either way.")
     return p
 
 
@@ -103,8 +114,14 @@ def _apply(args: argparse.Namespace) -> int:
     except (KeyError, ValueError) as exc:
         print(f"Error: failed to read the assumptions sheet: {exc}", file=sys.stderr)
         return 1
+    if args.no_market_data:
+        market = None
+    else:
+        from engine.market_data import default_registry
+
+        market = default_registry()
     try:
-        result = resolve_assumptions(canonical, overrides=overrides)
+        result = resolve_assumptions(canonical, overrides=overrides, market=market)
     except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

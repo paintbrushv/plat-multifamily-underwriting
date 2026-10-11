@@ -136,7 +136,16 @@ key:
   recorded in the canonical are kept on re-resolution.
 - `None` (JSON `null`) **clears** the key's override: the entry returns to its
   resolver default. The assumptions sheet emits `{key: null}` when an analyst
-  blanks a row's Override (§8).
+  blanks a row's Override (§8). The default is the full chain, market data
+  included: with a registry that has data for the key it is re-queried;
+  without one (or with one that has none, such as the default registry
+  without feeder files) the market-informed `default_value` and market
+  candidates recorded at the last resolution are kept. An overridden entry
+  records its default's source, basis, as-of and confidence on its `analyst`
+  candidate (`default`), so clearing restores the pre-override value and
+  source exactly. `runs/assumptions_sheet.py apply` and
+  `runs/run_deal.py --assumption-overrides` use
+  `engine.market_data.default_registry()` unless `--no-market-data` is given.
 - `cohort_overrides: {cohort_id: value}` is supported only for the cohort keys
   `physical_vacancy` and `loss_to_lease`; any other key raises
   `AssumptionOverrideError`.

@@ -38,6 +38,7 @@ from engine.assumptions.registry import is_valid_source, requires_review
 from engine.assumptions.sheet import assumptions_document, write_assumptions_json
 from engine.backsolve import backsolve_price
 from engine.engine import run_underwriting
+from engine.market_data import MarketDataRegistry, SyntheticProvider
 from engine.validator import validate_deal
 from runs import assumptions_sheet
 from tests import deal_library as dl
@@ -548,6 +549,71 @@ def test_sheet_override_round_trip_moves_the_result_the_expected_way(slug, tmp_p
     assert year1(results) < year1(baseline)
     assert results["metrics"]["irr"]["unlevered_irr"] < baseline["metrics"]["irr"]["unlevered_irr"]
     assert results["metrics"]["irr"]["levered_irr"] < baseline["metrics"]["irr"]["levered_irr"]
+
+
+CLEARED_KEYS = ("exit_cap_rate", "rent_growth")
+RESTORED_FIELDS = ("value", "source", "as_of", "confidence", "default_value", "override", "review_required")
+
+
+def _assert_restored(before, after):
+    for key in CLEARED_KEYS:
+        for field in RESTORED_FIELDS:
+            assert _entries(after)[key][field] == _entries(before)[key][field], (key, field)
+    assert after["exit_assumptions"]["exit_cap_rate"] == before["exit_assumptions"]["exit_cap_rate"]
+    assert after["growth_assumptions"] == before["growth_assumptions"]
+
+
+@pytest.mark.parametrize("registry", ["none", "empty", "deal"])
+def test_clearing_an_override_restores_the_market_default(registry):
+    slug = "a_stabilized_1990s"
+    before = _canonical(slug)
+    assert all(_entries(before)[k]["source"] == "market:synthetic" for k in CLEARED_KEYS)
+    overridden = resolve_assumptions(before, overrides={"exit_cap_rate": 0.06, "rent_growth": 0.02})
+    assert all(_entries(overridden)[k]["source"] == "analyst" for k in CLEARED_KEYS)
+    # Re-resolving while the override stands keeps the market default as the default.
+    kept = resolve_assumptions(overridden)
+    for key in CLEARED_KEYS:
+        assert _entries(kept)[key]["default_value"] == _entries(before)[key]["default_value"], key
+        assert "from market:synthetic" in _entries(kept)[key]["basis"], key
+
+    # No registry, one without data for the deal (e.g. no feeder files), or the deal's own.
+    market = {
+        "none": None,
+        "empty": MarketDataRegistry([SyntheticProvider({})]),
+        "deal": dl.synthetic_registry(_deal(slug)),
+    }[registry]
+    for start in (overridden, kept):
+        cleared = resolve_assumptions(start, overrides={k: None for k in CLEARED_KEYS}, market=market)
+        _assert_restored(before, cleared)
+        # Stable: a later re-resolution without market data changes nothing.
+        _assert_restored(before, resolve_assumptions(cleared))
+
+
+@pytest.mark.parametrize("flags", [["--no-market-data"], []], ids=["no_market_data", "default_registry"])
+def test_sheet_apply_clear_restores_the_market_default(flags, tmp_path, monkeypatch):
+    import engine.market_data
+
+    slug = "a_stabilized_1990s"
+    before = _canonical(slug)
+    calls = []
+
+    def registry(*_args, **_kwargs):
+        calls.append(1)
+        return dl.synthetic_registry(_deal(slug))
+
+    monkeypatch.setattr(engine.market_data, "default_registry", registry)
+    paths = {name: tmp_path / f"{name}.json" for name in ("deal", "set", "overridden", "clear", "cleared")}
+    paths["deal"].write_text(json.dumps(before), encoding="utf-8")
+    paths["set"].write_text(json.dumps({"exit_cap_rate": 0.06, "rent_growth": 0.02}), encoding="utf-8")
+    paths["clear"].write_text(json.dumps({k: None for k in CLEARED_KEYS}), encoding="utf-8")
+    apply = lambda src, sheet, out: assumptions_sheet.main(  # noqa: E731
+        ["apply", str(paths[src]), str(paths[sheet]), "-o", str(paths[out]), *flags]
+    )
+    assert apply("deal", "set", "overridden") == 0
+    assert _entries(json.loads(paths["overridden"].read_text()))["exit_cap_rate"]["value"] == 0.06
+    assert apply("overridden", "clear", "cleared") == 0
+    _assert_restored(before, json.loads(paths["cleared"].read_text()))
+    assert len(calls) == (0 if flags else 2)  # the registry is the default, as in ingest
 
 
 # ── determinism and goldens ──────────────────────────────────────────────
