@@ -503,22 +503,8 @@ def test_excel_blanked_override_cell_clears_and_value_edit_wins(synthetic_canoni
     assert "rent_growth" not in overrides
 
 
-def _resolver_clears_overrides() -> bool:
-    """True once resolve_assumptions accepts ``{key: None}`` (clear the override)."""
-    from engine.assumptions import AssumptionOverrideError
-
-    try:
-        resolve_assumptions(_ingest(), overrides={"sale_cost_percent": None})
-    except (AssumptionOverrideError, TypeError, ValueError):
-        return False
-    return True
-
-
 def test_sheet_clear_round_trips_through_the_resolver(resolved_deal, tmp_path):
     """End to end: a blanked Override returns the entry to its resolver default."""
-    if not _resolver_clears_overrides():
-        pytest.skip("resolve_assumptions does not accept {key: None} (clear an override) in this "
-                    "base yet; the resolver side of the null-clears-override contract lands separately")
     deal = resolve_assumptions(resolved_deal, overrides={"collection_loss": 0.02})
     entry = deal["assumptions"]["entries"]["collection_loss"]
     assert entry["override"]["value"] == 0.02

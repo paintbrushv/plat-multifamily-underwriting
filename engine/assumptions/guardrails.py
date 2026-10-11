@@ -755,11 +755,28 @@ def _guard_r_and_m(canonical: dict[str, Any], floor: Floor, mode: str, units: in
     if mode == MODE_PRICING:
         top_up = floor_annual - (observed - prior_top_up)
         upsert_annual_opex(canonical, category_name=R_AND_M_TOP_UP_CATEGORY, annual_amount=top_up)
+        _grow_like_r_and_m(canonical)
         finding.update(applied_annual=float(floor_annual), top_up_annual=float(top_up),
                        category_name=R_AND_M_TOP_UP_CATEGORY)
         if prior_top_up:
             finding["replaced_top_up_annual"] = float(prior_top_up)
     return [finding]
+
+
+def _grow_like_r_and_m(canonical: dict[str, Any]) -> None:
+    """Give a new R&M top-up line the house R&M growth rate.
+
+    The top-up is R&M expense, so it grows with R&M. Without a rate it would
+    stay flat for the hold, and the next resolution would fill the house rate
+    in, so the priced canonical would not be idempotent.
+    """
+    from engine.assumptions.opex import _house_growth
+
+    for row in canonical.get("opex_table") or []:
+        if _is_r_and_m_top_up(row) and row.get("growth_rate") is None and not row.get("growth_phases"):
+            _category, _constant, rate = _house_growth(row)
+            if rate is not None:
+                row["growth_rate"] = float(rate)
 
 
 def _guard_reserves(canonical: dict[str, Any], floor: Floor, mode: str, units: int) -> list[dict[str, Any]]:

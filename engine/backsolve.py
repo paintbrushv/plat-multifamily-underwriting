@@ -37,7 +37,7 @@ from engine.assumptions.guardrails import (
     vacancy_anchor_summary as _vacancy_anchor_summary,
     year1_insurance_per_unit as _year1_insurance_per_unit,
 )
-from engine.assumptions.opex import SOURCE_HOUSE_PROPERTY_TAX
+from engine.assumptions.opex import SOURCE_HOUSE_OPEX_GROWTH, SOURCE_HOUSE_PROPERTY_TAX
 from engine.assumptions.registry import SOURCE_ANALYST as SOURCE_ANALYST_OVERRIDE
 from engine.assumptions.resolver import resolve_assumptions
 from engine.property_tax import (
@@ -1557,6 +1557,18 @@ def _label_pricing_entries(
             label(key, guardrails.SOURCE_HOUSE_PRICING_NORMALIZATION, guardrails.PRICING_NORMALIZATION_NOTE,
                   f"{name} set by backsolve's pricing preparation (for example a revenue-quality "
                   "bridge paired expense).")
+
+    # The R&M top-up line the pricing guardrail adds grows at the house R&M rate.
+    growth_keys = {
+        str((entry.get("detail") or {}).get("category_name")): key
+        for key, entry in entries.items()
+        if key.startswith("opex.") and key.endswith(".growth")
+    }
+    top_up_growth = growth_keys.get(guardrails.R_AND_M_TOP_UP_CATEGORY)
+    if top_up_growth is not None and "r_and_m_per_unit" in enforced and changed(top_up_growth):
+        label(top_up_growth, SOURCE_HOUSE_OPEX_GROWTH, guardrails.PRICING_FLOOR_LINE_NOTE,
+              f"{guardrails.R_AND_M_TOP_UP_CATEGORY} grows at the house R&M growth rate, like the "
+              "R&M lines it tops up.")
 
 
 def _parse_args() -> argparse.Namespace:
