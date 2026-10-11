@@ -234,10 +234,11 @@ def test_each_floor_type(minimal_deal_inputs, key, mutate, check):
     assert enforce_floors(priced, mode="pricing", profile=PROFILE, keys=(key,)) == []
 
 
-def test_ltl_floor_applies_to_every_segment_and_cohort(minimal_deal_inputs):
-    """max(segment, floor) on every segment, whatever the market vs in-place rent
-    (UPL-62: a capped market rent no longer zeroes the floor); a cohort with no
-    loss-to-lease row gets one at the floor."""
+def test_ltl_floor_skips_cohorts_without_a_market_gap(minimal_deal_inputs):
+    """No loss-to-lease gap (market rent at or below in-place, e.g. a capped
+    market rent): the floor is neither warned nor imposed, the entered rows are
+    kept, and the exemption is disclosed. A cohort with a gap is floored per
+    segment, and with no row it gets one at the floor."""
     deal = _below_floor_deal(minimal_deal_inputs)
     deal["loss_to_lease"] = [
         {"cohort_id": "1BR", "start_period": "2026-07", "end_period": "2027-06", "ltl_percent": 0.04},
@@ -245,17 +246,30 @@ def test_ltl_floor_applies_to_every_segment_and_cohort(minimal_deal_inputs):
     ]
     deal["market_rent_curve"][0]["market_rent"] = 1100  # 1BR in-place 1200: capped market rent
     warned = enforce_floors(copy.deepcopy(deal), mode="underwrite", profile=PROFILE, keys=("loss_to_lease",))
-    findings = enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("loss_to_lease",))
-    assert [(f["cohort_id"], f["start_period"], f["original"]) for f in findings] == [
-        ("1BR", "2027-07", 0.0), ("2BR", "2026-07", 0.0)]
-    assert [(f["cohort_id"], f["original"]) for f in warned] == [("1BR", 0.0), ("2BR", 0.0)]
-    # The analyst's higher year-1 segment and the curve shape are kept.
+    exemptions: list = []
+    findings = enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("loss_to_lease",),
+                              context={"exemptions": exemptions})
+    assert [(f["cohort_id"], f["start_period"], f["original"]) for f in findings] == [("2BR", "2026-07", 0.0)]
+    assert [(f["cohort_id"], f["original"]) for f in warned] == [("2BR", 0.0)]
     assert deal["loss_to_lease"] == [
         {"cohort_id": "1BR", "start_period": "2026-07", "end_period": "2027-06", "ltl_percent": 0.04},
-        {"cohort_id": "1BR", "start_period": "2027-07", "end_period": "2031-06", "ltl_percent": 0.01},
+        {"cohort_id": "1BR", "start_period": "2027-07", "end_period": "2031-06", "ltl_percent": 0.0},
         {"cohort_id": "2BR", "start_period": "2026-07", "end_period": "2031-06", "ltl_percent": 0.01},
     ]
+    assert [(e["cohort_id"], e["status"], e["market_rent"], e["in_place_rent"], e["kept"]) for e in exemptions] == [
+        ("1BR", "exempt_no_gap", 1100.0, 1200.0, [0.0])]
     assert enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("loss_to_lease",)) == []
+
+    # A no-gap cohort alone raises no warning; its entry discloses the exemption.
+    deal["market_rent_curve"][1]["market_rent"] = 1500  # 2BR at in-place
+    deal["loss_to_lease"] = [dict(r, ltl_percent=0.0) for r in deal["loss_to_lease"]]
+    resolved = resolve_assumptions(deal, deal_profile=PROFILE)
+    entry = resolved["assumptions"]["entries"]["loss_to_lease"]
+    assert "guardrail" not in entry
+    assert "exempt_no_gap" in entry["basis"] and "1BR, 2BR" in entry["basis"]
+    assert not [i for i in validate_deal(resolved).issues
+                if i.code == "GUARDRAIL_BELOW_FLOOR" and "loss_to_lease" in i.path]
+    assert resolve_assumptions(resolved) == resolved
 
 
 def test_concession_floor_keeps_the_schedule_and_raises_year1_rows_only(minimal_deal_inputs):
@@ -604,6 +618,11 @@ def test_reserves_above_the_vintage_reserve_are_never_lowered(minimal_deal_input
         "replacement_reserve_per_unit"]["source"]
     assert not [o for o in result["summary"]["policy_summary"]["policy_overrides"]
                 if o.get("input") == "replacement_reserves"]
+    # The summary reports the reserve priced, and the floor separately.
+    summary = result["summary"]["policy_summary"]
+    assert summary["replacement_reserve_per_unit"] == 1500.0
+    assert summary["replacement_reserve_floor_per_unit"] == 1000.0
+    assert summary["replacement_reserves_applied"] == result["case"]["replacement_reserves"]
 
 
 @pytest.mark.parametrize("slug, strategy, target, max_price", [

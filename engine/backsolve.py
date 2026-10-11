@@ -592,16 +592,18 @@ def _apply_house_revenue_policy(
     # its shape, and one cohort's higher rate never spreads to other cohorts.
     # Loss to lease, collection loss and year-1 concessions follow the same rule.
     overrides: list[dict[str, Any]] = []
+    exemptions: list[dict[str, Any]] = []
     findings = guardrails.enforce_floors(
         canonical,
         mode=guardrails.MODE_PRICING,
         profile=profile,
-        context={**context, "policy_overrides": overrides},
+        context={**context, "policy_overrides": overrides, "exemptions": exemptions},
         keys=("physical_vacancy", "loss_to_lease", "collection_loss", "concessions"),
     )
 
     applied_ltls = [float(row["ltl_percent"]) for row in canonical.get("loss_to_lease") or []]
-    applied_vacancy = floors["physical_vacancy"].value
+    vacancy_floor = floors["physical_vacancy"].value
+    applied_vacancy = _curve_weighted_rate(canonical, "physical_vacancy_curve", "vacancy_rate")
     applied_curve = [
         {
             "cohort_id": row.get("cohort_id"),
@@ -637,7 +639,11 @@ def _apply_house_revenue_policy(
         "loss_to_lease_rate_applied": (
             round(sum(applied_ltls) / len(applied_ltls), 6) if applied_ltls else 0.0
         ),
+        # The priced vacancy: unit- and month-weighted over the hold.
         "physical_vacancy_rate_applied": float(applied_vacancy),
+        # The property-level vacancy anchor each segment is floored at.
+        "physical_vacancy_floor": float(vacancy_floor),
+        "physical_vacancy_floor_source": floors["physical_vacancy"].source,
         "physical_vacancy_curve_applied": applied_curve,
         "physical_vacancy_anchor_summary": vacancy_summary,
         "collection_loss_rate_applied": float(applied_collection),
@@ -651,6 +657,7 @@ def _apply_house_revenue_policy(
         "market_rent_requires_comp_support": market_rent_requires_comp_support,
         "policy_overrides": overrides,
         "guardrail_findings": findings,
+        "guardrail_exemptions": exemptions,
     }
 
 
@@ -997,6 +1004,35 @@ def _apply_renovation_funding(prepared: dict[str, Any], *, strategy: str) -> dic
     return out
 
 
+def _reserve_per_unit(canonical: dict[str, Any], units: int) -> float | None:
+    """The priced reserve per unit: the first ``replacement_reserves`` segment."""
+    rows = sorted(canonical.get("replacement_reserves") or [], key=lambda r: str(r.get("start_period", "")))
+    if not rows or not units or rows[0].get("annual_amount") is None:
+        return None
+    return float(dec(rows[0]["annual_amount"]) / Decimal(str(units)))
+
+
+def _curve_weighted_rate(canonical: dict[str, Any], table: str, field: str) -> Decimal:
+    """A cohort curve's unit- and month-weighted rate over the analysis period."""
+    grid = canonical.get("time_grid") or {}
+    months = _analysis_months(str(grid["analysis_start_date"])[:7], str(grid["analysis_end_date"])[:7])
+    units = {str(c.get("cohort_id")): dec(c.get("unit_count") or 0) for c in canonical.get("unit_cohorts") or []}
+    total = sum(units.values(), Decimal("0"))
+    if not months or total <= 0:
+        return Decimal("0")
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for row in canonical.get(table) or []:
+        rows.setdefault(str(row.get("cohort_id")), []).append(row)
+    weighted = Decimal("0")
+    for month in months:
+        for cohort_id, count in units.items():
+            row = next((r for r in rows.get(cohort_id, [])
+                        if str(r.get("start_period") or months[0])[:7] <= month
+                        <= str(r.get("end_period") or months[-1])[:7]), None)
+            weighted += count * dec((row or {}).get(field) or 0)
+    return weighted / (total * Decimal(len(months)))
+
+
 def _analysis_months(start: str, end: str) -> list[str]:
     months, index, last = [], int(start[:4]) * 12 + int(start[5:7]) - 1, int(end[:4]) * 12 + int(end[5:7]) - 1
     while index <= last:
@@ -1275,6 +1311,7 @@ def _prepare_house_assumptions(
     )
     revenue_summary["policy_overrides"] = policy_overrides + revenue_summary["policy_overrides"]
     guardrail_findings += revenue_summary.pop("guardrail_findings")
+    guardrail_exemptions = revenue_summary.pop("guardrail_exemptions")
     if rebase_summary.get("unsupported_upside_units", 0):
         revenue_summary["market_rent_requires_comp_support"] = True
     bridge_required, bridge_required_reason = _ancillary_income_bridge_required(
@@ -1320,7 +1357,11 @@ def _prepare_house_assumptions(
         "observed_insurance_per_unit": (
             float(observed_insurance_per_unit) if observed_insurance_per_unit is not None else None
         ),
-        "replacement_reserve_per_unit": (
+        # The reserve priced (first segment, per unit; the curve is in
+        # replacement_reserves_applied) and the vintage floor it was held to.
+        "replacement_reserve_per_unit": _reserve_per_unit(prepared, units),
+        "replacement_reserves_applied": deepcopy(prepared.get("replacement_reserves") or []),
+        "replacement_reserve_floor_per_unit": (
             float(reserve_per_unit) if reserve_per_unit is not None else None
         ),
         "observed_repairs_maintenance_annual": float(observed_r_and_m),
@@ -1342,6 +1383,8 @@ def _prepare_house_assumptions(
             "mode": guardrails.MODE_PRICING,
             "profile": guardrail_profile.to_dict(),
             "findings": guardrail_findings,
+            # Loss-to-lease cohorts with no market vs in-place gap: the floor is not imposed.
+            "exemptions": guardrail_exemptions,
         },
     }
     return prepared, policy_summary

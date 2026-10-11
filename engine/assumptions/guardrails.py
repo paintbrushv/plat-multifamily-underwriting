@@ -65,6 +65,8 @@ from engine.modules.util import dec
 MODE_UNDERWRITE = "underwrite"
 MODE_PRICING = "pricing"
 STATUS_BELOW_FLOOR = "below_floor"
+# A loss-to-lease cohort the floor is not imposed on: no market vs in-place gap.
+STATUS_EXEMPT_NO_GAP = "exempt_no_gap"
 ACTION_WARNED = "warned"
 ACTION_ENFORCED = "enforced"
 # An explicit analyst insurance figure below the insurance floor: the value is
@@ -559,19 +561,111 @@ def _guard_vacancy(canonical: dict[str, Any], floor: Floor, mode: str) -> list[d
     return findings
 
 
+def cohort_rents(canonical: Mapping[str, Any], cohort_id: Any) -> tuple[Decimal, Decimal]:
+    """(market rent, in-place rent) for a cohort, as the LTL floor reads them.
+
+    Market rent is the cohort's first ``market_rent_curve`` row (the house
+    box-score rebase writes the capped rent there), else its target rent.
+    """
+    cohort = next(
+        (c for c in canonical.get("unit_cohorts") or [] if c.get("cohort_id") == cohort_id),
+        {},
+    )
+    market = next(
+        (
+            mr.get("market_rent")
+            for mr in canonical.get("market_rent_curve") or []
+            if mr.get("cohort_id") == cohort_id
+        ),
+        cohort.get("target_monthly_rent") or cohort.get("initial_inplace_rent") or 0,
+    )
+    inplace = cohort.get("initial_inplace_rent") or 0
+    market_dec = Decimal(str(market)) if market else Decimal("0")
+    return market_dec, Decimal(str(inplace))
+
+
+def _has_ltl_gap(canonical: Mapping[str, Any], cohort_id: Any) -> bool:
+    market, inplace = cohort_rents(canonical, cohort_id)
+    return market > inplace
+
+
+def ltl_exemptions(
+    canonical: Mapping[str, Any],
+    profile: Any = None,
+    context: Optional[Mapping[str, Any]] = None,
+    *,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
+    """Cohorts the loss-to-lease floor is not imposed on (``status: "exempt_no_gap"``).
+
+    A cohort whose market rent is at or below its in-place rent (including a
+    market rent the house box-score rebase capped at in-place) has no
+    loss-to-lease gap, so the house floor is not imposed on it in either mode.
+    Only cohorts the floor would otherwise touch are listed: a row below the
+    floor, or no row at all. Their rows are kept exactly as entered.
+    """
+    floors, _ = house_floors(dict(canonical), profile, context, strict=strict)
+    floor = floors["loss_to_lease"]
+    if floor.value is None or floor.value <= 0:
+        return []
+    rows = canonical.get("loss_to_lease") or []
+    out = []
+    for cohort in canonical.get("unit_cohorts") or []:
+        cohort_id = cohort.get("cohort_id")
+        if cohort_id is None or _has_ltl_gap(canonical, cohort_id):
+            continue
+        own = [r for r in rows if str(r.get("cohort_id")) == str(cohort_id)]
+        below = [r for r in own if r.get("ltl_percent") is not None and Decimal(str(r["ltl_percent"])) < floor.value]
+        if own and not below:
+            continue
+        market, inplace = cohort_rents(canonical, cohort_id)
+        out.append({
+            "key": "loss_to_lease",
+            "status": STATUS_EXEMPT_NO_GAP,
+            "cohort_id": cohort_id,
+            "market_rent": float(market),
+            "in_place_rent": float(inplace),
+            "floor": float(floor.value),
+            "floor_source": floor.source,
+            "kept": [float(r["ltl_percent"]) for r in below] if own else [],
+        })
+    return out
+
+
+def ltl_exemption_note(exemptions: Iterable[Mapping[str, Any]]) -> str:
+    """The basis note that discloses LTL exemptions on the ``loss_to_lease`` entry."""
+    items = list(exemptions)
+    if not items:
+        return ""
+    cohorts = ", ".join(str(i["cohort_id"]) for i in items)
+    first = items[0]
+    return (
+        f"House loss-to-lease floor {_fmt(first['floor'], 'loss_to_lease')} ({first['floor_source']}) not "
+        f"imposed on {cohorts} ({STATUS_EXEMPT_NO_GAP}): market rent at or below in-place rent, so there is "
+        "no loss-to-lease gap; the entered values are kept."
+    )
+
+
 def _guard_ltl(canonical: dict[str, Any], floor: Floor, mode: str) -> list[dict[str, Any]]:
     """Each loss-to-lease segment against the floor: ``max(segment, floor)``.
 
-    Every segment is floored, whatever the cohort's market vs in-place rent: the
-    floor only raises, so the analyst's higher segments and curve shape stay.
-    A cohort with no loss-to-lease row is read as 0% and gets one row at the
-    floor for the analysis period.
+    The floor only raises, so the analyst's higher segments and curve shape
+    stay. A cohort with no loss-to-lease gap (market rent at or below in-place,
+    see ``ltl_exemptions``) is exempt: the floor is neither warned nor imposed,
+    and its rows are kept. A cohort with a gap but no loss-to-lease row is read
+    as 0% and gets one row at the floor for the analysis period.
     """
     findings = []
     rows = canonical.get("loss_to_lease") or []
+    gap = {
+        str(c.get("cohort_id")): _has_ltl_gap(canonical, c.get("cohort_id"))
+        for c in canonical.get("unit_cohorts") or []
+    }
     for row in rows:
         rate = row.get("ltl_percent")
         if rate is None or Decimal(str(rate)) >= floor.value:
+            continue
+        if not gap.get(str(row.get("cohort_id")), _has_ltl_gap(canonical, row.get("cohort_id"))):
             continue
         findings.append(_finding(
             "loss_to_lease", floor, rate, mode,
@@ -587,7 +681,7 @@ def _guard_ltl(canonical: dict[str, Any], floor: Floor, mode: str) -> list[dict[
     covered = {str(row.get("cohort_id")) for row in rows}
     for cohort in canonical.get("unit_cohorts") or []:
         cohort_id = cohort.get("cohort_id")
-        if cohort_id is None or str(cohort_id) in covered:
+        if cohort_id is None or str(cohort_id) in covered or not gap.get(str(cohort_id)):
             continue
         findings.append(_finding(
             "loss_to_lease", floor, 0.0, mode,
@@ -931,6 +1025,9 @@ def enforce_floors(
             pinned figure.
         ``policy_overrides``: a list; every enforced or waived finding is
             appended to it in ``policy_overrides`` form.
+        ``exemptions``: a list; the loss-to-lease cohorts exempt from the
+            floor (``ltl_exemptions``, ``status: "exempt_no_gap"``) are
+            appended to it.
     """
     _check_mode(mode)
     context = context or {}
@@ -940,6 +1037,9 @@ def enforce_floors(
         raise ValueError(f"unknown guardrail keys {sorted(unknown)}")
     floors, _ = house_floors(canonical, profile, context, strict=mode == MODE_PRICING)
     units = sum_units(canonical)
+    exempt_sink = context.get("exemptions")
+    if isinstance(exempt_sink, list) and "loss_to_lease" in selected:
+        exempt_sink.extend(ltl_exemptions(canonical, profile, context, strict=mode == MODE_PRICING))
     findings: list[dict[str, Any]] = []
     for key in GUARDRAIL_KEYS:
         if key not in selected:
@@ -1079,8 +1179,12 @@ def record_on_entries(
     *,
     mode: str,
     prior_entries: Optional[Mapping[str, Any]] = None,
+    exemptions: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> dict[str, dict[str, Any]]:
     """Record guardrail findings on ``entries`` (mutated and returned).
+
+    ``exemptions`` (``ltl_exemptions``) are disclosed as a note on the
+    ``loss_to_lease`` entry's basis; they never add a warning.
 
     An enforced key takes the floor's source, and its override pins the priced
     value (note ``GUARDRAIL_OVERRIDE_NOTE``) so a re-resolution keeps it; the
@@ -1138,6 +1242,10 @@ def record_on_entries(
                                "basis": "House floor enforced by the pricing guardrail."})
         entry["candidates"] = candidates
         entry["basis"] = f"Pricing guardrail: {record['basis']} Resolver default: {_fmt_default(entry, key)}."
+    note = ltl_exemption_note(exemptions or [])
+    ltl = entries.get("loss_to_lease")
+    if note and isinstance(ltl, dict) and note not in str(ltl.get("basis") or ""):
+        ltl["basis"] = f"{ltl.get('basis') or ''} {note}".strip()
     return entries
 
 
@@ -1283,7 +1391,8 @@ def apply_guardrails(
         out["assumptions"] = resolved["assumptions"]
         out["deal_profile"] = resolved["deal_profile"]
     else:
-        record_on_entries(entries, findings, mode=mode)
+        record_on_entries(entries, findings, mode=mode,
+                          exemptions=ltl_exemptions(out, profile, context, strict=False))
         section["mode"] = mode
     return out, findings
 

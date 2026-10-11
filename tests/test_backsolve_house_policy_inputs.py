@@ -169,7 +169,7 @@ def test_vacancy_anchor_reads_vacant_status_variants_and_negative_t12_loss():
 
     assert candidates["rent_roll_vacant"] == pytest.approx(41 / UNITS)
     assert candidates["t12_vacancy_gpr"] == pytest.approx(0.0625)
-    assert summary["physical_vacancy_rate_applied"] == pytest.approx(41 / UNITS)
+    assert summary["physical_vacancy_floor"] == pytest.approx(41 / UNITS)
 
 
 def _time_varying_curve(*rates):
@@ -193,7 +193,7 @@ def test_overridden_time_varying_vacancy_curve_is_disclosed():
         trailing_actuals={"gross_potential_rent": 6_000_000.0, "vacancy_loss": -375_000.0},
     )
 
-    anchor = summary["physical_vacancy_rate_applied"]
+    anchor = summary["physical_vacancy_floor"]
     assert anchor == pytest.approx(0.0625)
     expected = _time_varying_curve(0.09, anchor, anchor)
     assert canonical["physical_vacancy_curve"] == expected
@@ -216,7 +216,7 @@ def test_vacancy_segment_above_the_anchor_is_never_lowered():
         trailing_actuals={"gross_potential_rent": 6_000_000.0, "vacancy_loss": -375_000.0},
     )
 
-    assert summary["physical_vacancy_rate_applied"] == pytest.approx(0.0625)
+    assert summary["physical_vacancy_floor"] == pytest.approx(0.0625)
     assert canonical["physical_vacancy_curve"] == original
     assert summary["physical_vacancy_curve_applied"] == original
     assert _vacancy_overrides(summary) == []
@@ -234,7 +234,7 @@ def test_house_box_rebase_keeps_vacancy_segments_and_discloses_analyst_original(
     }
     prepared, summary = _prepare(canonical)
 
-    anchor = summary["physical_vacancy_rate_applied"]
+    anchor = summary["physical_vacancy_floor"]
     assert anchor == pytest.approx(30 / UNITS)
     assert summary["house_box_score_rebase"]["observed_unavailable_rate"] == pytest.approx(anchor)
     expected = _time_varying_curve(0.09, anchor, anchor)

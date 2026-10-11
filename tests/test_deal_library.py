@@ -311,10 +311,16 @@ def _below_floor_keys(canonical, deal):
     if any(d(r["vacancy_rate"]) < house.default_physical_vacancy_rate(year, strategy=strategy)
            for r in canonical["physical_vacancy_curve"]):
         below.add("physical_vacancy")
-    # Every loss-to-lease segment counts (UPL-62), and a cohort with no row reads as 0%.
+    # Loss to lease: cohorts with a market vs in-place gap only; such a cohort
+    # with no row reads as 0%.
+    market = {}
+    for r in canonical["market_rent_curve"]:
+        market.setdefault(r["cohort_id"], d(r["market_rent"]))
+    gap = {c["cohort_id"] for c in canonical["unit_cohorts"]
+           if market.get(c["cohort_id"], d(0)) > d(c["initial_inplace_rent"])}
     ltl_cohorts = {r["cohort_id"] for r in canonical["loss_to_lease"]}
-    if any(d(r["ltl_percent"]) < house.default_loss_to_lease_rate(year, strategy=strategy)
-           for r in canonical["loss_to_lease"]) or {c["cohort_id"] for c in canonical["unit_cohorts"]} - ltl_cohorts:
+    if any(r["cohort_id"] in gap and d(r["ltl_percent"]) < house.default_loss_to_lease_rate(year, strategy=strategy)
+           for r in canonical["loss_to_lease"]) or gap - ltl_cohorts:
         below.add("loss_to_lease")
     if any(d(r["loss_rate"]) < house.default_collection_loss_rate(year, strategy=strategy)
            for r in canonical.get("collection_loss_curve") or [{"loss_rate": 0}]):
