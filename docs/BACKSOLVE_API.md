@@ -41,11 +41,19 @@ Floors compare annual dollars: opex lines are annualized from their
 rather than being added beside it. Concessions are read as `pct_rent` or
 `free_months` (months / 12); any other concession type, or a percent-of-revenue
 opex line that a floor must read, refuses. The property-level vacancy anchor
-(`physical_vacancy_rate_applied`) floors each `physical_vacancy_curve` segment
+(`physical_vacancy_floor`, with `physical_vacancy_floor_source`) floors each
+`physical_vacancy_curve` segment
 separately and preserves the analyst's curve shape: a segment below the anchor
 is raised to it, and a segment at or above it is kept as entered, so one
 cohort's higher vacancy is never lowered or spread to other cohorts. The
-resulting curve is reported as `physical_vacancy_curve_applied`. Every analyst
+resulting curve is reported as `physical_vacancy_curve_applied`, and
+`physical_vacancy_rate_applied` is that priced curve's unit- and month-weighted
+rate over the hold. Summary fields named `*_applied` (and
+`replacement_reserve_per_unit`, the first priced reserve segment per unit, with
+the curve in `replacement_reserves_applied`) report what was priced; the floors
+are reported separately (`physical_vacancy_floor`,
+`replacement_reserve_floor_per_unit`, `repairs_maintenance_floor_per_unit`).
+Every analyst
 input the policy replaced, including each raised vacancy segment, is listed in
 `policy_overrides` with its original and applied value.
 
@@ -58,10 +66,14 @@ The floors are defined once, in `engine/assumptions/guardrails.py` (ADR 0003
 
 - vacancy, loss to lease, collection loss and reserves: each segment below its
   floor is raised to it, and every other segment keeps the analyst's value.
-  Loss to lease is floored whatever the cohort's market vs in-place rent (it is
-  never re-derived from them), and a cohort with no loss-to-lease row gets one
-  at the floor. A hold with no collection-loss curve or no reserves gets one
-  row at the floor.
+  Loss to lease is never re-derived from market vs in-place rent. A cohort
+  whose market rent is at or below its in-place rent (including a rent the
+  house box-score rebase capped) has no loss-to-lease gap, so the floor is not
+  imposed on it (no raise, no underwrite warning, its rows kept); each such
+  cohort is listed in `house_adjustments.guardrails.exemptions` with
+  `status: "exempt_no_gap"`, its market and in-place rent, and the rates kept.
+  A cohort with a gap and no loss-to-lease row gets one at the floor. A hold
+  with no collection-loss curve or no reserves gets one row at the floor.
 - concessions: the schedule and its later-year rows are kept. Each row that
   applies in analysis year 1 and is below the floor is raised to it (a row that
   runs past year 1 is split at the year-1 boundary, so its later months keep

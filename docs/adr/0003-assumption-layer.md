@@ -217,7 +217,7 @@ reuses the `underwriting_policy` vintage functions:
 | Key | Floor | Checked against |
 |---|---|---|
 | `physical_vacancy` | Property-level anchor: max of the vintage floor, rent-roll vacant share (`house_box_score`), T12 vacancy / GPR, broker vacancy, and a supplied `market_vacancy_benchmark` | each `physical_vacancy_curve` segment |
-| `loss_to_lease` | max(vintage LTL floor, broker LTL) | each `loss_to_lease` segment, whatever the cohort's market vs in-place rent; a cohort with no row counts as 0% |
+| `loss_to_lease` | max(vintage LTL floor, broker LTL) | each `loss_to_lease` segment of a cohort whose market rent exceeds its in-place rent; such a cohort with no row counts as 0%. A cohort with no gap (market at or below in-place, including a rent the house box-score rebase capped) is exempt in both modes: no warning, no raise, its rows kept, and the exemption disclosed (`exempt_no_gap`) |
 | `collection_loss` | max(vintage floor, broker bad debt) | each `collection_loss_curve` segment (no curve counts as 0) |
 | `concessions` | max(vintage year-1 floor, broker concessions) | each `concession_schedule` row that applies in analysis year 1 (`free_months` read as months / 12); no year-1 row counts as 0% |
 | `insurance_per_unit` | $600/unit (`DEFAULT_YEAR1_INSURANCE_PER_UNIT`); waived by an explicit analyst insurance override, and the waiver is disclosed | the matched insurance line, annualized |
@@ -249,9 +249,12 @@ analyst's curves and applies only the shared floors (decision (a), below):
 
 - Floors only raise, per segment, as `max(analyst value, floor)`. They never
   lower or reshape the analyst's input.
-- Loss to lease: every segment is floored, whatever the cohort's market vs
-  in-place rent (it is never re-derived from them or zeroed); a cohort with
-  no row gets one at the floor for the analysis period.
+- Loss to lease: never re-derived from market vs in-place rent or zeroed.
+  Each segment of a cohort with a loss-to-lease gap (market rent above
+  in-place) is floored, and such a cohort with no row gets one at the floor
+  for the analysis period. A cohort with no gap is exempt (`exempt_no_gap`):
+  its rows are kept as entered, and the exemption is disclosed on the
+  `loss_to_lease` entry's basis and in `house_adjustments.guardrails.exemptions`.
 - Collection loss: every segment is floored (never flattened to one row); a
   hold with no curve gets one row at the floor.
 - Concessions: the schedule and its later-year rows are kept. A year-1 row
@@ -477,18 +480,17 @@ decisions that were open with the product owner are decided and implemented:
    `max(analyst value, floor)`, through the shared guardrails module (§5), so
    underwrite mode warns on the same floors. The legacy normalizations and
    their `policy_overrides` entries are gone; only the house box-score rebase
-   is still labeled `house:pricing_normalization`. This changes backsolve
-   prices: library deal a (6% Year-1 target) moves from $27,502,952.52 to
-   $28,024,900.49.
+   is still labeled `house:pricing_normalization`. A cohort with no
+   loss-to-lease gap (market rent at or below in-place) stays exempt from the
+   loss-to-lease floor. This changes backsolve prices.
 2. **(b) Value-add cash-on-cash basis (implemented, UPL-62).** Value-add
    pricing targets the post-debt cash-on-cash of the first stabilized
    analysis year, with the renovation budget funded by equity at close
    (`renovation_capex_funding: "equity_at_close"`); stabilized deals keep the
    Year-1 basis. The basis is the policy's `coc_basis`, defaulting by
-   strategy, and is disclosed in the summary (§5). Library deal d (3% target)
-   moves from $10,278,777.88 to $11,126,918.03 (analysis year 2), and deal c,
-   whose Year-1 solve used to refuse as non-monotonic, converges over
-   $1M-$100M at $13,304,631.70 for a 6% target (analysis year 3).
+   strategy, and is disclosed in the summary (§5). A value-add deal with a
+   renovation program, whose Year-1 solve could refuse as non-monotonic,
+   now converges over a wide price bracket. This changes value-add prices.
 3. **(c) Real estate tax growth after reassessment (implemented, UPL-48).**
    The real estate tax row grows at `HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT`
    (3%) from year 2 on the reassessed year-1 tax. The resolver writes it once
