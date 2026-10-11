@@ -144,3 +144,51 @@ def test_supplied_market_vacancy_keeps_source_and_observation_date():
     assert summary["market_vacancy_benchmark_source"]["source"] == "synthetic:analyst estimate"
     assert summary["market_vacancy_benchmark_source"]["as_of"] == "2026-09-30"
     assert "supplied_market_benchmark" in encoded
+
+
+def _cli_policy(monkeypatch, tmp_path, *flags):
+    """The policy the CLI hands the solver for ``flags``."""
+    source = tmp_path / "synthetic.json"
+    source.write_text(json.dumps(INPUTS))
+    seen = {}
+
+    def capture(_canonical, *, policy, **_kwargs):
+        seen.update(policy)
+        return {"status": "infeasible", "case": None, "results": None, "summary": {"status": "infeasible"}}
+
+    monkeypatch.setattr(backsolve, "backsolve_price", capture)
+    monkeypatch.setattr(backsolve.sys, "argv", [
+        "backsolve", "--canonical-json", str(source), "--output-dir", str(tmp_path / "out"),
+        "--policy-version", POLICY["version"], "--benchmark-5yr-treasury", BENCHMARK["rate"],
+        "--benchmark-as-of", BENCHMARK["as_of"], "--benchmark-source", BENCHMARK["source"], *flags,
+    ])
+    with pytest.raises(SystemExit):
+        backsolve.main()
+    return seen
+
+
+def test_cli_passes_only_the_policy_values_given(monkeypatch, tmp_path):
+    """An omitted fee flag is not an explicit policy value, so the canonical's
+    analyst value (else the policy default) is priced; a given flag is explicit."""
+    fees = ("agency_spread", "sale_cost_percent", "purchase_closing_cost_pct", "partnership_closing_costs",
+            "acquisition_fee_pct", "asset_management_fee_pct", "annual_partnership_expenses",
+            "disposition_fee_pct", "loan_closing_costs", "insurance_per_unit_override")
+    omitted = _cli_policy(monkeypatch, tmp_path)
+    assert not set(fees) & set(omitted)
+    given = _cli_policy(monkeypatch, tmp_path, "--sale-cost-percent", "0.03")
+    assert given["sale_cost_percent"] == Decimal("0.03")
+    assert set(fees) & set(given) == {"sale_cost_percent"}
+
+
+def test_policy_value_sources_disclose_who_set_each_value():
+    canonical = {"exit_assumptions": {"exit_cap_rate": 0.055}}
+    policy = {"version": "plat.backsolve-policy/1", "strategy": "cashflow", "acquisition_fee_pct": "0.02"}
+    analyst = {"sale_cost_percent": Decimal("0.03"), "acquisition_fee_pct": Decimal("0.005")}
+    values = backsolve.resolve_policy(policy, canonical, analyst)
+    assert values["sale_cost_percent"] == Decimal("0.03")  # analyst over the 2% default
+    assert values["acquisition_fee_pct"] == Decimal("0.02")  # explicit policy over the analyst
+    sources = backsolve.policy_value_sources(policy, analyst)
+    assert sources["sale_cost_percent"] == "canonical_analyst"
+    assert sources["acquisition_fee_pct"] == "explicit_policy"
+    assert sources["disposition_fee_pct"] == "policy_default"
+    assert sources["exit_cap_rate"] == "canonical"

@@ -505,6 +505,67 @@ def test_stabilized_deals_keep_the_year1_basis_and_their_price():
     assert "capex_funding" not in default["results"]
 
 
+STABILIZED = "a_stabilized_1990s"
+
+
+def _solve_a(canonical, **policy_values):
+    config = BACKSOLVE[STABILIZED]
+    policy = {"version": "plat.backsolve-policy/1", "strategy": "cashflow", **policy_values}
+    result = backsolve_price(copy.deepcopy(canonical), target_coc=config["target_coc"], policy=policy,
+                             benchmark=BENCHMARK, min_price="1000000.00", max_price=config["max_price"])
+    assert result["status"] == "converged"
+    return result
+
+
+@lru_cache(maxsize=None)
+def _baseline_a() -> str:
+    return json.dumps(_solve_a(_canonical(STABILIZED)))
+
+
+def test_backsolve_prices_the_analysts_sale_cost_unless_the_policy_sets_one():
+    """Defaults never silently override the analyst: an ingest --sale-cost of 3%
+    is priced as 3% and stays labeled analyst, not the policy's 2%."""
+    baseline = json.loads(_baseline_a())
+    canonical = resolve_assumptions(_canonical(STABILIZED), overrides={"sale_cost_percent": 0.03})
+    result = _solve_a(canonical)
+    case, sources = result["case"], result["effective_assumptions"]["policy_value_sources"]
+    assert case["exit_assumptions"]["sale_cost_percent"] == 0.03
+    assert sources["sale_cost_percent"] == "canonical_analyst"
+    assert result["effective_assumptions"]["policy"]["sale_cost_percent"] == "0.03"
+    entry = _entries(case)["sale_cost_percent"]
+    assert (entry["source"], entry["value"]) == ("analyst", 0.03)
+    # The sale cost does not move a cash-on-cash price; it lowers the levered IRR.
+    assert result["summary"]["solved_purchase_price"] == baseline["summary"]["solved_purchase_price"]
+    assert result["summary"]["levered_irr"] < baseline["summary"]["levered_irr"]
+    assert resolve_assumptions(case, mode="pricing") == case
+
+    # An explicit policy value is a policy override: it wins and is labeled as the policy's.
+    explicit = _solve_a(canonical, sale_cost_percent="0.025")
+    assert explicit["case"]["exit_assumptions"]["sale_cost_percent"] == 0.025
+    assert explicit["effective_assumptions"]["policy_value_sources"]["sale_cost_percent"] == "explicit_policy"
+    entry = _entries(explicit["case"])["sale_cost_percent"]
+    assert entry["source"] == "house:backsolve_policy"
+    assert "explicit policy value" in entry["basis"]
+
+
+def test_backsolve_keeps_analyst_fees_and_defaults_the_rest():
+    """The same rule for every PRICING_POLICY_KEYS fee: an analyst value is priced,
+    a value the canonical leaves to a default takes the policy default."""
+    baseline = json.loads(_baseline_a())
+    assert baseline["effective_assumptions"]["policy_value_sources"]["acquisition_fee_pct"] == "policy_default"
+    canonical = resolve_assumptions(_canonical(STABILIZED), overrides={"acquisition_fee_pct": 0.005})
+    result = _solve_a(canonical)
+    assert result["case"]["fund_assumptions"]["acquisition_fee_pct"] == 0.005
+    assert result["effective_assumptions"]["policy_value_sources"]["acquisition_fee_pct"] == "canonical_analyst"
+    assert _entries(result["case"])["acquisition_fee_pct"]["source"] == "analyst"
+    # A lower acquisition fee lowers the equity basis, so the target is met at a higher price.
+    assert result["summary"]["solved_purchase_price"] > baseline["summary"]["solved_purchase_price"]
+    # Keys the canonical leaves to defaults are priced at, and labeled as, the policy default.
+    for key in ("asset_management_fee_pct", "disposition_fee_pct", "loan_closing_costs"):
+        assert result["effective_assumptions"]["policy_value_sources"][key] == "policy_default", key
+        assert _entries(result["case"])[key]["source"] == "house:backsolve_policy", key
+
+
 # ── assumptions sheet ────────────────────────────────────────────────────
 
 

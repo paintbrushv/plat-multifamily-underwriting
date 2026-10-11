@@ -13,7 +13,7 @@ from typing import Any
 
 from engine.backsolve_policy import (
     CONTRACT_VERSION, DEFAULT_COC_BASIS, POLICY_VERSION, BacksolveInputError, decimal_value,
-    describe_policy, resolve_policy, validate_benchmark,
+    describe_policy, policy_value_sources, resolve_policy, validate_benchmark,
 )
 from engine.engine import (
     RENOVATION_FUNDING_EQUITY_AT_CLOSE,
@@ -1524,6 +1524,7 @@ def _with_pricing_assumptions(
     policy: dict[str, Any] | None = None,
     values: dict[str, Any] | None = None,
     policy_summary: dict[str, Any] | None = None,
+    analyst_keys: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Re-resolve the solved case's ``assumptions`` in pricing mode (ADR 0003 slice 6).
 
@@ -1551,6 +1552,7 @@ def _with_pricing_assumptions(
         values=values or {},
         policy_summary=policy_summary or {},
         findings=findings,
+        analyst_keys=analyst_keys,
     )
     return {**case, "deal_profile": resolved["deal_profile"], "assumptions": section}
 
@@ -1567,6 +1569,38 @@ PRICING_POLICY_KEYS = (
     "purchase_closing_cost_pct",
     "loan_closing_costs",
 )
+
+
+def canonical_analyst_values(canonical: dict[str, Any]) -> dict[str, Decimal]:
+    """Analyst-sourced values of ``PRICING_POLICY_KEYS`` in the canonical (ADR 0003 §5).
+
+    Provenance comes from the canonical's ``assumptions`` section, re-read
+    with the resolver so a field edited after the last resolution counts as
+    the analyst's too. A canonical without that section records no
+    provenance, so none of its values is treated as an analyst value and the
+    policy defaults apply as before. Dollar values are rounded to cents.
+    """
+    if not isinstance(canonical.get("assumptions"), dict):
+        return {}
+    try:
+        entries = resolve_assumptions(canonical)["assumptions"]["entries"]
+    except ValueError:  # an unresolvable canonical: fall back to the recorded provenance
+        entries = canonical["assumptions"].get("entries") or {}
+    out: dict[str, Decimal] = {}
+    for key in PRICING_POLICY_KEYS:
+        entry = entries.get(key)
+        if not isinstance(entry, dict) or entry.get("source") != SOURCE_ANALYST_OVERRIDE:
+            continue
+        value = entry.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        number = Decimal(str(value))
+        if key in ("annual_partnership_expenses", "partnership_closing_costs", "loan_closing_costs"):
+            number = number.quantize(_PRICE_CENT, rounding=ROUND_HALF_UP)
+        out[key] = number
+    return out
+
+
 # Canonical fields the house box-score rebase rebuilds (an input normalization too).
 _REBASED_FIELDS = {"physical_vacancy": "physical_vacancy_curve", "loss_to_lease": "loss_to_lease"}
 
@@ -1580,11 +1614,14 @@ def _label_pricing_entries(
     values: dict[str, Any],
     policy_summary: dict[str, Any],
     findings: list[dict[str, Any]],
+    analyst_keys: set[str] | frozenset[str] = frozenset(),
 ) -> None:
     """Label every entry whose value backsolve's pricing set (ADR 0003 §5).
 
     - ``house:backsolve_policy``: fees, closing costs, sale cost and an exit cap
-      the policy carries.
+      the policy carries. A key in ``analyst_keys`` was priced at the analyst
+      value the canonical carries (no explicit policy value): the policy did
+      not set it, so it keeps its analyst label.
     - ``house:pricing_normalization``: the house box-score rebase (loss to
       lease and vacancy rebuilt on the rent-roll floorplans) and any other opex
       line backsolve's preparation set (a revenue-quality bridge paired
@@ -1612,7 +1649,7 @@ def _label_pricing_entries(
     policy_keys = PRICING_POLICY_KEYS + (("exit_cap_rate",) if "exit_cap_rate" in policy else ())
     for key in policy_keys:
         entry = entries.get(key)
-        if entry is None:
+        if entry is None or key in analyst_keys:
             continue
         origin = "an explicit policy value" if key in policy else f"engine/backsolve_policy.DEFAULTS[{key!r}]"
         unit = entry.get("unit")
@@ -1709,20 +1746,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark-5yr-treasury", type=Decimal, required=True)
     parser.add_argument("--benchmark-as-of", required=True)
     parser.add_argument("--benchmark-source", required=True)
-    parser.add_argument("--agency-spread", type=Decimal, default=DEFAULT_AGENCY_SPREAD_PCT)
     parser.add_argument("--broker-json")
     parser.add_argument("--grouped-comps-json")
     parser.add_argument("--revenue-quality-bridge-json")
     parser.add_argument("--trailing-actuals-json")
     parser.add_argument("--exit-cap-rate", type=Decimal)
-    parser.add_argument("--sale-cost-percent", type=Decimal, default=Decimal("0.02"))
-    parser.add_argument("--purchase-closing-cost-pct", type=Decimal, default=DEFAULT_PURCHASE_CLOSING_COST_PCT)
-    parser.add_argument("--partnership-closing-costs", type=Decimal, default=DEFAULT_PARTNERSHIP_CLOSING_COSTS)
-    parser.add_argument("--acquisition-fee-pct", type=Decimal, default=DEFAULT_ACQUISITION_FEE_PCT)
-    parser.add_argument("--asset-management-fee-pct", type=Decimal, default=DEFAULT_ASSET_MANAGEMENT_FEE_PCT)
-    parser.add_argument("--annual-partnership-expenses", type=Decimal, default=DEFAULT_ANNUAL_PARTNERSHIP_EXPENSES)
-    parser.add_argument("--disposition-fee-pct", type=Decimal, default=DEFAULT_DISPOSITION_FEE_PCT)
-    parser.add_argument("--loan-closing-costs", type=Decimal, default=Decimal("0"))
+    # Policy values: a flag given is an explicit policy value. Omitted, the
+    # canonical's analyst value is priced, else engine/backsolve_policy.DEFAULTS.
+    for flag, default in (
+        ("--agency-spread", DEFAULT_AGENCY_SPREAD_PCT),
+        ("--sale-cost-percent", Decimal("0.02")),
+        ("--purchase-closing-cost-pct", DEFAULT_PURCHASE_CLOSING_COST_PCT),
+        ("--partnership-closing-costs", DEFAULT_PARTNERSHIP_CLOSING_COSTS),
+        ("--acquisition-fee-pct", DEFAULT_ACQUISITION_FEE_PCT),
+        ("--asset-management-fee-pct", DEFAULT_ASSET_MANAGEMENT_FEE_PCT),
+        ("--annual-partnership-expenses", DEFAULT_ANNUAL_PARTNERSHIP_EXPENSES),
+        ("--disposition-fee-pct", DEFAULT_DISPOSITION_FEE_PCT),
+        ("--loan-closing-costs", Decimal("0")),
+    ):
+        parser.add_argument(flag, type=Decimal, default=None,
+                            help=f"Explicit policy value (default: the canonical's analyst value, else {default})")
     parser.add_argument("--insurance-per-unit-override", type=Decimal)
     parser.add_argument("--coc-basis", choices=["year_1", "stabilized_year"],
                         help="Cash-on-cash basis to target (default: year_1 for cashflow, "
@@ -1759,7 +1802,11 @@ def backsolve_price(
     if type(max_iterations) is not int or not 1 <= max_iterations <= 60:
         raise BacksolveInputError("max_iterations must be an integer from 1 to 60")
     checked_benchmark = validate_benchmark(benchmark)
-    values = resolve_policy(policy, canonical)
+    # An analyst value in the canonical wins over the policy default; only an
+    # explicit policy value overrides it (ADR 0003 §5).
+    analyst_values = canonical_analyst_values(canonical)
+    values = resolve_policy(policy, canonical, analyst_values)
+    analyst_keys = {key for key in analyst_values if key not in policy}
     require_property_tax_policy(canonical)
     treasury = Decimal(checked_benchmark["rate"])
     prepared, policy_summary = _prepare_house_assumptions(
@@ -1768,7 +1815,9 @@ def backsolve_price(
         revenue_quality_bridge=revenue_quality_bridge, trailing_actuals=trailing_actuals,
     )
     values["year_built"] = policy_summary.get("year_built", values["year_built"])
-    effective = {"policy": describe_policy(values), "benchmark": checked_benchmark,
+    effective = {"policy": describe_policy(values),
+                 "policy_value_sources": policy_value_sources(policy, analyst_values),
+                 "benchmark": checked_benchmark,
                  "target_coc": str(target), "house_adjustments": policy_summary,
                  "property_tax_policy": deepcopy(require_property_tax_policy(canonical))}
     projected_noi = _preview_projected_noi(prepared)
@@ -1838,6 +1887,7 @@ def backsolve_price(
         policy=policy,
         values=values,
         policy_summary=policy_summary,
+        analyst_keys=analyst_keys,
     )
     solved_by_year = solved_results["cashflow"]["by_year"]
     basis_y1 = solved_results["metrics"]["coc"]
@@ -1936,10 +1986,13 @@ def main() -> None:
     broker = _load_json(Path(args.broker_json)) if args.broker_json else None
     if broker is not None:
         broker, _ = enrich_broker_snapshot_from_om(broker, broker_json_path=Path(args.broker_json))
-    policy = {"version": args.policy_version, **{name: getattr(args, name) for name in (
-        "strategy", "year_built", "agency_spread", "sale_cost_percent", "purchase_closing_cost_pct",
+    policy = {"version": args.policy_version, "strategy": args.strategy, "year_built": args.year_built}
+    # Only the policy flags given are explicit policy values (see _parse_args).
+    policy.update({name: getattr(args, name) for name in (
+        "agency_spread", "sale_cost_percent", "purchase_closing_cost_pct",
         "partnership_closing_costs", "acquisition_fee_pct", "asset_management_fee_pct",
-        "annual_partnership_expenses", "disposition_fee_pct", "loan_closing_costs", "insurance_per_unit_override")}}
+        "annual_partnership_expenses", "disposition_fee_pct", "loan_closing_costs", "insurance_per_unit_override")
+        if getattr(args, name) is not None})
     if args.exit_cap_rate is not None:
         policy["exit_cap_rate"] = args.exit_cap_rate
     if args.coc_basis is not None:

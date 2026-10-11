@@ -123,7 +123,7 @@ key:
 | `house:management_fee_pct_egr` | The house management fee as a percent of EGR |
 | `house:year1_insurance_floor` | The $600/unit Year-1 insurance floor |
 | `house:vacancy_anchor` | The property-level vacancy anchor when no single anchor names the source |
-| `house:backsolve_policy` | `engine/backsolve_policy` values: fees, closing costs, sale cost, and in pricing any value the backsolve policy sets (an explicit exit cap) |
+| `house:backsolve_policy` | `engine/backsolve_policy` values: fees, closing costs, sale cost, and in pricing any value the backsolve policy sets (an explicit policy value, or a default where the canonical has no analyst value) |
 | `house:pricing_normalization` | A backsolve pricing normalization (§5): the house box-score rebase (loss to lease and vacancy rebuilt on the rent-roll floorplans), or an opex line backsolve's preparation sets (a revenue-quality bridge paired expense). The house floors never rewrite an input. |
 | `engine_fallback` | An engine default when nothing else applies |
 
@@ -304,11 +304,26 @@ re-resolution.
 
 | Set by | Entry source | Override note |
 |---|---|---|
-| The pricing policy: fees, purchase and partnership closing costs, loan closing costs, sale cost, an exit cap the policy carries | `house:backsolve_policy` | "set by the backsolve pricing policy" |
+| The pricing policy: fees, purchase and partnership closing costs, loan closing costs, sale cost, an exit cap the policy carries (an explicit policy value, or a default where the canonical carries no analyst value) | `house:backsolve_policy` | "set by the backsolve pricing policy" |
 | A pricing normalization (the house box-score rebase of loss to lease and vacancy; an opex line backsolve's preparation sets) | `house:pricing_normalization` | "rewritten by a backsolve pricing normalization" |
 | The real estate tax reassessed at the priced price | `house:property_tax_module` | "reassessed by the property tax module at the priced purchase price" |
 | An opex line a floor raised (insurance line, R&M top-up) | the floor's source | "opex line set by a house floor the pricing guardrail enforced" |
 | The policy's `insurance_per_unit_override` | `analyst` | "analyst insurance_per_unit_override in the backsolve policy" |
+
+The policy defaults never replace an analyst value. For each pricing-policy
+key (`engine/backsolve.PRICING_POLICY_KEYS`: sale cost, fees, purchase,
+partnership and loan closing costs) backsolve prices an explicit policy value
+(`policy`, `--policy-json`, or a CLI flag that was given) when there is one,
+else the canonical's value when its entry is `analyst`-sourced (an ingest
+`--sale-cost`, an override, a resolved hand-authored value), else
+`engine/backsolve_policy.DEFAULTS`. An analyst value is priced as given and
+keeps its `analyst` label; only explicit policy values and defaults are
+labeled `house:backsolve_policy`. The exit cap already followed this rule
+(the policy's, else the canonical's). A canonical with no `assumptions`
+section records no provenance, so the defaults apply to it as before.
+`effective_assumptions.policy_value_sources` discloses who set each value.
+Earlier, the policy defaults replaced an analyst value (an ingest
+`--sale-cost` of 3% was priced at 2% and relabeled `house:backsolve_policy`).
 
 Every raise a floor makes is listed in `policy_overrides` with its original and
 applied values, and the entry carries the floor's source and a `guardrail`
