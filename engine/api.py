@@ -111,6 +111,7 @@ def build_provenance(
                 "free_cf_year_1": coc_src.get("free_cf_year_1"),
                 "target_cash_on_cash_pct": coc_src.get("target_cash_on_cash_pct"),
                 "coc_below_target": coc_src.get("coc_below_target"),
+                "coc_below_primary_target": coc_src.get("coc_below_primary_target"),
                 "coc_below_target_7pct": coc_src.get("coc_below_target_7pct"),
                 "coc_below_target_6pct": coc_src.get("coc_below_target_6pct"),
                 "components": coc_src.get("components"),

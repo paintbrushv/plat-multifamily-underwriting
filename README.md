@@ -146,7 +146,7 @@ pricing policy; the house floors are enforced and listed in the summary):
 ```bash
 python -m engine.backsolve --canonical-json output/deal.json \
   --output-dir output/deal_backsolve --policy-version plat.backsolve-policy/1 \
-  --strategy cashflow --year-built 1994 --target-coc 0.07 \
+  --strategy cashflow --year-built 1994 --target-coc 0.08 \
   --benchmark-5yr-treasury 0.04 --benchmark-as-of 2026-09-30 --benchmark-source "analyst entry"
 ```
 

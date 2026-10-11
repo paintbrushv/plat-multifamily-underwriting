@@ -1438,6 +1438,10 @@ def _run_stubbed_backsolve_main(
             str(max_price),
             "--max-iterations",
             "20",
+            # The stubbed CoC (8% - 0.02% x price) meets a 7% target up to price 50;
+            # pinned explicitly so the house default (8%) does not move the test.
+            "--target-coc",
+            "0.07",
         ],
     )
 

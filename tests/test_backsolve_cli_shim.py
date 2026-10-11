@@ -100,6 +100,8 @@ def _stub_solver(monkeypatch, tmp_path: Path, *, min_price: str, max_price: str)
             "--min-price", min_price,
             "--max-price", max_price,
             "--max-iterations", "20",
+            # Stubbed CoC meets a 7% target up to price 50; pinned against the 8% house default.
+            "--target-coc", "0.07",
         ],
     )
     return output_dir

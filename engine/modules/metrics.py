@@ -195,6 +195,7 @@ def compute_cash_on_cash(
             },
             "target_cash_on_cash_pct": float(target),
             "coc_below_target": False,
+            "coc_below_primary_target": False,
             "coc_below_target_7pct": False,
             "coc_below_target_6pct": False,
         }
@@ -257,7 +258,10 @@ def compute_cash_on_cash(
         },
         "target_cash_on_cash_pct": float(target),
         "coc_below_target": bool(coc_below_target),
-        "coc_below_target_7pct": bool(coc_below_target and target == PRIMARY_COC_TARGET_PCT),
+        # Below the house primary CoC target (PRIMARY_COC_TARGET_PCT, 8%).
+        "coc_below_primary_target": bool(coc_below_target and target == PRIMARY_COC_TARGET_PCT),
+        # Legacy key from when the primary target was 7%: kept as a literal 7% test.
+        "coc_below_target_7pct": bool(coc_y1 is not None and coc_y1 < Decimal("0.07")),
         # Backward-compatible alias preserved for older consumers.
         "coc_below_target_6pct": bool(coc_below_target),
     }

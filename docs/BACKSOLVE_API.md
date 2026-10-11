@@ -11,7 +11,7 @@ from engine.backsolve import backsolve_price
 
 result = backsolve_price(
     canonical,
-    target_coc="0.07",
+    target_coc="0.08",
     policy={"version": "plat.backsolve-policy/1", "strategy": "cashflow",
             "year_built": 1984, "exit_cap_rate": "0.06"},
     benchmark={"rate": "0.04", "as_of": "2026-10-03", "source": "synthetic:example"},

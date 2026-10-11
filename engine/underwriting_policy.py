@@ -10,7 +10,7 @@ from typing import Optional
 # so the two check sites cannot drift apart.
 CAP_RATE_SANITY_BAND: tuple = (0.06, 0.12)
 
-PRIMARY_COC_TARGET_PCT = Decimal("0.07")
+PRIMARY_COC_TARGET_PCT = Decimal("0.08")
 PRIMARY_IRR_TARGET_LOW_PCT = Decimal("0.10")
 PRIMARY_IRR_TARGET_HIGH_PCT = Decimal("0.13")
 

@@ -47,8 +47,21 @@ class TestCashOnCashSimple(unittest.TestCase):
         self.assertTrue(result["coc_below_target"])
         self.assertTrue(result["coc_below_target_7pct"])
 
-    def test_at_7pct_threshold_not_flagged(self):
-        # At exactly 7%, NOT below; flag = False
+    def test_at_8pct_primary_target_not_flagged(self):
+        # At exactly the 8% house primary target, NOT below.
+        cashflow_by_year = [{
+            "year": "2026", "net_operating_income": 800_000,
+            "replacement_reserves": 0, "total_capex": 0, "debt_service": 0,
+            "leveraged_cash_flow": 800_000,
+        }]
+        result = compute_cash_on_cash(cashflow_by_year, equity_basis=10_000_000)
+        self.assertEqual(result["cash_on_cash_year_1"], 0.08)
+        self.assertFalse(result["coc_below_target"])
+        self.assertFalse(result["coc_below_primary_target"])
+        self.assertFalse(result["coc_below_target_7pct"])
+
+    def test_7pct_is_below_the_8pct_primary_target(self):
+        # 7% CoC misses the 8% primary target; the legacy 7% flag stays a literal 7% test.
         cashflow_by_year = [{
             "year": "2026", "net_operating_income": 700_000,
             "replacement_reserves": 0, "total_capex": 0, "debt_service": 0,
@@ -56,7 +69,8 @@ class TestCashOnCashSimple(unittest.TestCase):
         }]
         result = compute_cash_on_cash(cashflow_by_year, equity_basis=10_000_000)
         self.assertEqual(result["cash_on_cash_year_1"], 0.07)
-        self.assertFalse(result["coc_below_target"])
+        self.assertTrue(result["coc_below_target"])
+        self.assertTrue(result["coc_below_primary_target"])
         self.assertFalse(result["coc_below_target_7pct"])
 
     def test_exact_hurdle_check_is_not_masked_by_display_rounding(self):
