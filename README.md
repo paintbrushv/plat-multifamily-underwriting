@@ -87,6 +87,8 @@ python runs/ingest_deal.py --property-id SYN-A \
   one. A null `exit_cap_rate` is an unresolved placeholder: validation warns
   (`EXIT_CAP_RATE_PLACEHOLDER`) and the engine refuses to run it.
 - Add `--no-market-data` to resolve from deal evidence and house policy only.
+- `--validate` prints the validation report and exits 1 when it fails
+  (warnings alone exit 0); the output JSON is still written so you can fix it.
 
 **2. Review** `output/deal.assumptions.json` (one row per assumption: value,
 unit, source, basis, default, override, delta, guardrail). Rows sourced from

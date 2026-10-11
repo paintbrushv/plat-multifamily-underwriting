@@ -73,6 +73,11 @@ Assumption layer (ADR 0003):
     Market data (rent-growth forecast, stabilized vacancy, concession rate,
     market cap rate) comes from engine.market_data.default_registry(); pass
     --no-market-data to resolve from deal evidence and house policy only.
+
+Exit codes: 0 on success; with --validate, 0 when validation passes (warnings
+allowed) and 1 when it fails (the output JSON is still written so the errors
+can be fixed); 1 for a missing or unreadable input file; 2 for invalid
+arguments or inputs.
 """
 
 from __future__ import annotations
@@ -340,7 +345,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Validation
     p.add_argument("--validate", action="store_true",
-                   help="Run schema validation on output and report issues")
+                   help="Run schema validation on output and report issues; exit 1 when it "
+                        "fails (warnings alone pass)")
 
     return p
 
@@ -659,6 +665,7 @@ def main() -> int:
                 print(f"    ERROR [{e.code}] {e.path}: {e.message}")
             if any(e.code == PROPERTY_TAX_MILLAGE_MISSING for e in errors):
                 print("    Fix: pass --millage <combined mills per $1,000> [--assessment-ratio R]")
+            return 1
 
     return 0
 
