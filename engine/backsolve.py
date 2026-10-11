@@ -12,11 +12,19 @@ import sys
 from typing import Any
 
 from engine.backsolve_policy import (
-    CONTRACT_VERSION, POLICY_VERSION, BacksolveInputError, decimal_value,
+    CONTRACT_VERSION, DEFAULT_COC_BASIS, POLICY_VERSION, BacksolveInputError, decimal_value,
     describe_policy, resolve_policy, validate_benchmark,
 )
-from engine.engine import run_underwriting
+from engine.engine import (
+    RENOVATION_FUNDING_EQUITY_AT_CLOSE,
+    RENOVATION_FUNDING_OPERATING,
+    run_underwriting,
+)
+from engine.modules.analysis_years import aggregate_analysis_years
 from engine.modules.debt import compute_agency_loan_terms
+from engine.modules.metrics import compute_cash_on_cash_for_year, stabilized_analysis_year
+from engine.modules.renovations import compute_renovations
+from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec
 from engine.assumptions.canonical_ops import (
     sum_units as _sum_units,
@@ -921,6 +929,149 @@ def _preview_projected_noi(canonical: dict[str, Any]) -> Decimal:
     return Decimal("0")
 
 
+def _renovation_plan(canonical: dict[str, Any]) -> dict[str, Any] | None:
+    """The renovation schedule the engine will run (price-independent), or None.
+
+    The budget is the engine's renovation cost over the hold: renovation program
+    units x cost per unit, plus any unit_renovations.
+    """
+    programs = canonical.get("renovation_programs") or []
+    unit_renovations = canonical.get("unit_renovations") or []
+    if not programs and not unit_renovations:
+        return None
+    grid = canonical["time_grid"]
+    result = compute_renovations(
+        time_grid=TimeGrid.build(grid["analysis_start_date"], grid["analysis_end_date"]),
+        unit_cohorts=canonical.get("unit_cohorts") or [],
+        renovation_programs=programs,
+        unit_renovations=unit_renovations,
+    )
+    renovated = [row["month"] for row in result["by_month"] if row["units_renovated"]]
+    return {
+        "renovation_budget": result["summary"]["total_renovation_cost"],
+        "units_renovated": result["summary"]["total_units_renovated"],
+        "first_renovation_month": renovated[0] if renovated else None,
+        "last_renovation_month": renovated[-1] if renovated else None,
+        "programs": [
+            {"program_id": p["program_id"], "units": p["total_units_renovated"],
+             "cost": p["total_renovation_cost"]}
+            for p in result["by_program"]
+        ],
+        "unit_renovations": len(unit_renovations),
+    }
+
+
+def _apply_renovation_funding(prepared: dict[str, Any], *, strategy: str) -> dict[str, Any]:
+    """Fund a value-add deal's renovation budget with equity at close (UPL-62).
+
+    For the value_add strategy the prepared canonical gets
+    ``renovation_capex_funding: "equity_at_close"``: the engine keeps the budget
+    out of operating cash flow, and ``_build_price_case`` adds it to the total
+    equity basis. Other strategies keep the canonical's funding as entered.
+    """
+    plan = _renovation_plan(prepared)
+    entered = prepared.get("renovation_capex_funding")
+    override = None
+    if strategy == "value_add" and plan and plan["renovation_budget"] > 0:
+        if entered not in (None, RENOVATION_FUNDING_EQUITY_AT_CLOSE):
+            override = {
+                "input": "renovation_capex_funding",
+                "source": guardrails.SOURCE_HOUSE_BACKSOLVE_POLICY,
+                "basis": "Value-add pricing funds the renovation budget with equity at close.",
+                "original": entered,
+                "applied": RENOVATION_FUNDING_EQUITY_AT_CLOSE,
+            }
+        prepared["renovation_capex_funding"] = RENOVATION_FUNDING_EQUITY_AT_CLOSE
+    mode = prepared.get("renovation_capex_funding") or RENOVATION_FUNDING_OPERATING
+    funded = bool(plan) and mode == RENOVATION_FUNDING_EQUITY_AT_CLOSE
+    out: dict[str, Any] = {
+        "renovation_capex_funding": mode,
+        "renovation_budget": plan["renovation_budget"] if plan else 0.0,
+        "equity_funded_renovation_budget": plan["renovation_budget"] if funded else 0.0,
+        "included_in_total_equity_basis": funded,
+        "excluded_from_operating_cash_flow": funded,
+        "plan": plan,
+    }
+    if override is not None:
+        out["policy_override"] = override
+    return out
+
+
+def _analysis_months(start: str, end: str) -> list[str]:
+    months, index, last = [], int(start[:4]) * 12 + int(start[5:7]) - 1, int(end[:4]) * 12 + int(end[5:7]) - 1
+    while index <= last:
+        months.append(f"{index // 12:04d}-{index % 12 + 1:02d}")
+        index += 1
+    return months
+
+
+def _vacancy_by_analysis_year(case: dict[str, Any]) -> tuple[list[Decimal], Decimal]:
+    """Unit-weighted physical vacancy per 12-month analysis year, and the last month's."""
+    months = _analysis_months(str(case["time_grid"]["analysis_start_date"])[:7],
+                              str(case["time_grid"]["analysis_end_date"])[:7])
+    units = {str(c.get("cohort_id")): dec(c.get("unit_count") or 0) for c in case.get("unit_cohorts") or []}
+    total = sum(units.values(), Decimal("0"))
+    curve: dict[str, list[dict[str, Any]]] = {}
+    for row in case.get("physical_vacancy_curve") or []:
+        curve.setdefault(str(row.get("cohort_id")), []).append(row)
+
+    def rate(month: str) -> Decimal:
+        if total <= 0:
+            return Decimal("0")
+        weighted = Decimal("0")
+        for cohort_id, count in units.items():
+            row = next((r for r in curve.get(cohort_id, [])
+                        if str(r.get("start_period"))[:7] <= month <= str(r.get("end_period"))[:7]), None)
+            weighted += count * dec((row or {}).get("vacancy_rate") or 0)
+        return weighted / total
+
+    monthly = [rate(m) for m in months]
+    years = [monthly[i:i + 12] for i in range(0, len(monthly), 12)]
+    return [sum(y, Decimal("0")) / Decimal(len(y)) for y in years], (monthly[-1] if monthly else Decimal("0"))
+
+
+def _stabilized_coc(
+    case: dict[str, Any],
+    results: dict[str, Any],
+    *,
+    last_renovation_month: str | None,
+) -> dict[str, Any]:
+    """Post-debt cash-on-cash in the first stabilized analysis year (UPL-62).
+
+    The stabilized year is the first full analysis year after the last
+    renovation when the deal renovates, else ``find_stabilized_year`` on the
+    analysis years (``engine.modules.metrics.stabilized_analysis_year``). It
+    must be a full 12-month year before the exit year, so sale proceeds never
+    count as operating cash.
+    """
+    start = str(case["time_grid"]["analysis_start_date"])[:7]
+    years = aggregate_analysis_years(results["cashflow"]["by_month"], start)
+    purchase = case.get("purchase_assumptions") or {}
+    vacancy, steady = (None, None) if last_renovation_month else _vacancy_by_analysis_year(case)
+    stabilized = stabilized_analysis_year(
+        years,
+        analysis_start=start,
+        total_basis=dec(purchase.get("purchase_price") or 0) + dec(purchase.get("closing_costs") or 0),
+        last_renovation_month=last_renovation_month,
+        vacancy_by_year=vacancy,
+        steady_state_vacancy=steady,
+    )
+    year = stabilized["year"]
+    exit_month = ((results.get("metrics") or {}).get("exit") or {}).get("exit_month")
+    months = _analysis_months(start, str(case["time_grid"]["analysis_end_date"])[:7])
+    year_months = months[(year - 1) * 12:year * 12]
+    if len(year_months) != 12 or (exit_month and exit_month <= year_months[-1]):
+        raise BacksolveInputError(
+            f"coc_basis stabilized_year: analysis year {year} ({stabilized['rule']}) is not a full year "
+            "before the exit; extend the hold or use coc_basis year_1"
+        )
+    coc = compute_cash_on_cash_for_year(
+        years, year, purchase.get("total_equity_basis", purchase.get("equity_contribution", 0)),
+        (results.get("fund_waterfall") or {}).get("by_year"),
+    )
+    return {**coc, **stabilized, "months": [year_months[0], year_months[-1]]}
+
+
 def _prepare_house_assumptions(
     canonical: dict[str, Any],
     *,
@@ -939,6 +1090,7 @@ def _prepare_house_assumptions(
     disposition_fee_pct: Decimal,
     loan_closing_costs: Decimal,
     insurance_per_unit_override: Decimal | None = None,
+    coc_basis: str | None = None,
     broker_snapshot: dict[str, Any] | None = None,
     grouped_comps: dict[str, Any] | None = None,
     revenue_quality_bridge: dict[str, Any] | None = None,
@@ -1141,6 +1293,9 @@ def _prepare_house_assumptions(
         prepared,
         revenue_quality_bridge,
     )
+    renovation_funding = _apply_renovation_funding(prepared, strategy=strategy)
+    if renovation_funding.get("policy_override"):
+        revenue_summary["policy_overrides"].append(renovation_funding.pop("policy_override"))
 
     policy_summary = {
         "units": units,
@@ -1180,6 +1335,8 @@ def _prepare_house_assumptions(
         "revenue_quality_bridge_required": bridge_required,
         "revenue_quality_bridge_required_reason": bridge_required_reason,
         "revenue_quality_bridge": revenue_quality_summary,
+        "renovation_funding": renovation_funding,
+        "coc_basis": coc_basis or DEFAULT_COC_BASIS[strategy],
         **revenue_summary,
         "guardrails": {
             "mode": guardrails.MODE_PRICING,
@@ -1203,7 +1360,16 @@ def _build_price_case(
     acquisition_fee_pct: Decimal,
     loan_closing_costs: Decimal,
     projected_noi: Decimal,
+    renovation_budget: Decimal = Decimal("0"),
+    coc_basis: str = "year_1",
 ) -> dict[str, Any]:
+    """The candidate case at ``price``.
+
+    ``renovation_budget`` is a renovation budget funded with equity at close
+    (``renovation_capex_funding: "equity_at_close"``): it is added to the total
+    equity basis and the unlevered basis, and the engine keeps it out of
+    operating cash flow.
+    """
     price = normalize_property_tax_purchase_price(price)
     persisted_price = property_tax_decimal_to_json_number(
         price,
@@ -1237,6 +1403,7 @@ def _build_price_case(
         + partnership_closing_costs
         + loan_closing_costs
         + upfront_capex
+        + renovation_budget
     )
     case["purchase_assumptions"] = {
         "purchase_price": persisted_price,
@@ -1244,6 +1411,10 @@ def _build_price_case(
         "closing_costs": float(closing_costs),
         "total_equity_basis": float(total_equity_basis),
     }
+    if renovation_budget > 0:
+        case["purchase_assumptions"]["total_unlevered_basis"] = float(
+            price + closing_costs + upfront_capex + renovation_budget
+        )
     case["debt_terms"] = {
         "commitment": float(commitment),
         "rate": agency_terms["rate"],
@@ -1260,7 +1431,7 @@ def _build_price_case(
         "strike_price": persisted_price,
         "strike_price_basis": "analyst_target",
         "strike_price_derivation": (
-            f"Backsolved to {float(target_coc) * 100:.1f}% Year-1 post-debt CoC "
+            f"Backsolved to {float(target_coc) * 100:.1f}% {COC_BASIS_LABELS[coc_basis]} post-debt CoC "
             f"using hold-matched Treasury {agency_terms['rate_breakdown']['benchmark_5yr_treasury']:.4f} "
             f"+ spread {agency_terms['rate_breakdown']['agency_spread']:.4f}; "
             f"DSCR sizing method {agency_terms['sizing_method']}; "
@@ -1272,8 +1443,22 @@ def _build_price_case(
     return case
 
 
-def _evaluate_case(case: dict[str, Any]) -> tuple[dict[str, Any], Decimal]:
+COC_BASIS_LABELS = {"year_1": "Year-1", "stabilized_year": "first-stabilized-year"}
+
+
+def _evaluate_case(
+    case: dict[str, Any],
+    coc_basis: str = "year_1",
+    *,
+    last_renovation_month: str | None = None,
+) -> tuple[dict[str, Any], Decimal]:
+    """Run the engine on ``case`` and return its cash-on-cash on ``coc_basis``."""
     results = run_underwriting(case)
+    if coc_basis == "stabilized_year":
+        coc = _stabilized_coc(case, results, last_renovation_month=last_renovation_month)["cash_on_cash"]
+        if coc is None:
+            raise RuntimeError("Engine did not produce a stabilized-year cash-on-cash for backsolve case.")
+        return results, dec(coc)
     coc_metrics = results["metrics"]["coc"]
     free_cf = coc_metrics.get("free_cf_year_1")
     equity_basis = (coc_metrics.get("components") or {}).get("equity_basis")
@@ -1496,6 +1681,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--disposition-fee-pct", type=Decimal, default=DEFAULT_DISPOSITION_FEE_PCT)
     parser.add_argument("--loan-closing-costs", type=Decimal, default=Decimal("0"))
     parser.add_argument("--insurance-per-unit-override", type=Decimal)
+    parser.add_argument("--coc-basis", choices=["year_1", "stabilized_year"],
+                        help="Cash-on-cash basis to target (default: year_1 for cashflow, "
+                             "stabilized_year for value_add)")
     parser.add_argument("--min-price", type=Decimal, default=Decimal("1000000"))
     parser.add_argument("--max-price", type=Decimal, default=Decimal("100000000"))
     parser.add_argument("--max-iterations", type=int, default=40)
@@ -1541,17 +1729,24 @@ def backsolve_price(
                  "target_coc": str(target), "house_adjustments": policy_summary,
                  "property_tax_policy": deepcopy(require_property_tax_policy(canonical))}
     projected_noi = _preview_projected_noi(prepared)
+    coc_basis = values["coc_basis"]
+    funding = policy_summary.get("renovation_funding") or {}
+    renovation_budget = dec(funding.get("equity_funded_renovation_budget", 0))
+    last_renovation_month = (funding.get("plan") or {}).get("last_renovation_month")
 
     def evaluate(price):
         case = _build_price_case(
             prepared, price=price, target_coc=target, benchmark_treasury=treasury,
-            projected_noi=projected_noi,
+            projected_noi=projected_noi, renovation_budget=renovation_budget, coc_basis=coc_basis,
             **{key: values[key] for key in (
                 "year_built", "agency_spread", "purchase_closing_cost_pct",
                 "partnership_closing_costs", "acquisition_fee_pct", "loan_closing_costs")},
         )
         case.setdefault("pricing_provenance", {})["as_of_date"] = checked_benchmark["as_of"]
-        results, coc = _evaluate_case(case)
+        if coc_basis == "year_1":
+            results, coc = _evaluate_case(case)
+        else:
+            results, coc = _evaluate_case(case, coc_basis, last_renovation_month=last_renovation_month)
         if not coc.is_finite():
             raise BacksolveInputError("engine produced a non-finite cash-on-cash return")
         return case, results, coc
@@ -1602,6 +1797,30 @@ def backsolve_price(
         policy_summary=policy_summary,
     )
     solved_by_year = solved_results["cashflow"]["by_year"]
+    basis_y1 = solved_results["metrics"]["coc"]
+    year1_persisted = float(solved_coc)
+    if coc_basis != "year_1":
+        y1_equity = (basis_y1.get("components") or {}).get("equity_basis")
+        year1_persisted = (
+            float(dec(basis_y1["free_cf_year_1"]) / dec(y1_equity))
+            if basis_y1.get("free_cf_year_1") is not None and y1_equity else None
+        )
+    basis_detail: dict[str, Any] = {
+        "basis": coc_basis,
+        "source": "explicit policy value" if "coc_basis" in policy else f"default for the {values['strategy']} strategy",
+    }
+    if coc_basis == "stabilized_year":
+        stabilized = _stabilized_coc(solved_case, solved_results, last_renovation_month=last_renovation_month)
+        basis_detail.update(
+            analysis_year=stabilized["year"], months=stabilized["months"], rule=stabilized["rule"],
+            free_cf=stabilized["free_cf"], equity_basis=stabilized["components"]["equity_basis"],
+            components=stabilized["components"],
+            **({"last_renovation_month": stabilized["last_renovation_month"]}
+               if "last_renovation_month" in stabilized else {}),
+        )
+    else:
+        basis_detail.update(analysis_year=1, free_cf=basis_y1["free_cf_year_1"],
+                            equity_basis=(basis_y1.get("components") or {}).get("equity_basis"))
     solved_projected_noi = dec(solved_by_year[1 if len(solved_by_year) >= 2 else 0]["net_operating_income"])
     summary = {
             "target_cash_on_cash_pct": float(target),
@@ -1621,7 +1840,9 @@ def backsolve_price(
             "cash_on_cash_year_1_exact": solved_results["metrics"]["coc"].get(
                 "cash_on_cash_year_1_exact"
             ),
-            "cash_on_cash_year_1_persisted": float(solved_coc),
+            "cash_on_cash_year_1_persisted": year1_persisted,
+            # The target is met on coc_basis (summary.coc_basis).
+            "cash_on_cash_persisted": float(solved_coc),
             "cash_on_cash_hurdle_margin": float(solved_coc - target),
             "maximum_feasible_boundary": {
                 "highest_feasible_price": solved_case["purchase_assumptions"]["purchase_price"],
@@ -1644,8 +1865,13 @@ def backsolve_price(
                 ),
                 "search_ceiling_reached": search_ceiling_reached,
                 "iterations": iterations_run,
-                "evaluation_basis": "persisted_year1_free_cf_divided_by_persisted_total_equity",
+                "evaluation_basis": (
+                    "persisted_year1_free_cf_divided_by_persisted_total_equity" if coc_basis == "year_1"
+                    else "persisted_stabilized_year_free_cf_divided_by_persisted_total_equity"
+                ),
             },
+            "coc_basis": basis_detail,
+            "renovation_funding": {k: v for k, v in funding.items() if k != "plan"},
             "free_cf_year_1": solved_results["metrics"]["coc"]["free_cf_year_1"],
             "levered_irr": solved_results["metrics"]["irr"]["levered_irr"],
             "minimum_dscr": solved_results["metrics"]["dscr"]["minimum_dscr"],
@@ -1673,6 +1899,8 @@ def main() -> None:
         "annual_partnership_expenses", "disposition_fee_pct", "loan_closing_costs", "insurance_per_unit_override")}}
     if args.exit_cap_rate is not None:
         policy["exit_cap_rate"] = args.exit_cap_rate
+    if args.coc_basis is not None:
+        policy["coc_basis"] = args.coc_basis
     if args.policy_json:
         provided_policy = _load_json(Path(args.policy_json))
         if not isinstance(provided_policy, dict) or provided_policy.get("version") != args.policy_version:

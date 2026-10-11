@@ -24,6 +24,11 @@ DEFAULTS = {
     "loan_closing_costs": Decimal("0"),
     "insurance_per_unit_override": None,
 }
+# The cash-on-cash basis the price search targets (UPL-62 decision b):
+# "year_1" is the Year-1 post-debt CoC; "stabilized_year" is the post-debt CoC
+# in the first stabilized analysis year. The default follows the strategy.
+COC_BASES = ("year_1", "stabilized_year")
+DEFAULT_COC_BASIS = {"cashflow": "year_1", "value_add": "stabilized_year"}
 RATE_FIELDS = frozenset({
     "agency_spread", "sale_cost_percent", "purchase_closing_cost_pct",
     "acquisition_fee_pct", "asset_management_fee_pct", "disposition_fee_pct", "exit_cap_rate",
@@ -69,7 +74,7 @@ def validate_benchmark(benchmark):
 
 
 def resolve_policy(policy, canonical):
-    allowed = set(DEFAULTS) | {"version", "strategy", "year_built", "exit_cap_rate"}
+    allowed = set(DEFAULTS) | {"version", "strategy", "year_built", "exit_cap_rate", "coc_basis"}
     if not isinstance(policy, dict) or policy.get("version") != POLICY_VERSION:
         raise BacksolveInputError(f"policy.version must be {POLICY_VERSION}")
     if set(policy) - allowed:
@@ -79,6 +84,9 @@ def resolve_policy(policy, canonical):
     year = policy.get("year_built")
     if year is not None and (type(year) is not int or not 1800 <= year <= 2200):
         raise BacksolveInputError("policy.year_built must be an integer year or null")
+    coc_basis = policy.get("coc_basis", DEFAULT_COC_BASIS[policy["strategy"]])
+    if coc_basis not in COC_BASES:
+        raise BacksolveInputError(f"policy.coc_basis must be one of {', '.join(COC_BASES)}")
     values = {**DEFAULTS, **{k: v for k, v in policy.items() if k in DEFAULTS}}
     values["exit_cap_rate"] = policy.get("exit_cap_rate", (canonical.get("exit_assumptions") or {}).get("exit_cap_rate"))
     for name, value in values.items():
@@ -87,7 +95,7 @@ def resolve_policy(policy, canonical):
         values[name] = decimal_value(value, f"policy.{name}",
                                      positive=name == "exit_cap_rate", rate=name in RATE_FIELDS,
                                      cents=name not in RATE_FIELDS)
-    return {**values, "strategy": policy["strategy"], "year_built": year}
+    return {**values, "strategy": policy["strategy"], "year_built": year, "coc_basis": coc_basis}
 
 
 def describe_policy(values):
