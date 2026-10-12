@@ -172,6 +172,10 @@ def promote_property_tax_evidence(
     return promoted_summary, None
 
 
+# Sentinel: ``build_deal_from_documents(market=...)`` uses the default registry.
+DEFAULT_MARKET: Any = object()
+
+
 def build_deal_from_documents(
     property_id: str,
     rent_roll_path: str | Path,
@@ -209,6 +213,7 @@ def build_deal_from_documents(
     submarket: str | Mapping[str, Any] | None = None,
     metro_slug: str | None = None,
     assumption_overrides: Mapping[str, Any] | None = None,
+    market: Any = DEFAULT_MARKET,
 ) -> dict[str, Any]:
     """Build a canonical deal JSON from a rent roll, T12, and optional OM.
 
@@ -222,14 +227,17 @@ def build_deal_from_documents(
         t12_path: Path to T12 CSV/Excel
         analysis_start: Analysis start month "YYYY-MM"
         analysis_end: Analysis end month "YYYY-MM"
-        rent_growth_rate: Annual rent growth assumption. When omitted, the
-            engine fallback (3%) is used and recorded in
+        rent_growth_rate: Annual rent growth assumption (flat). When omitted,
+            the resolver writes a per-year vector: market forecast years, then
+            a glide to the long-run rate (house 2.5% without market data); a
+            house-sourced vector is recorded in
             ``metadata.ingest_gate.assumed_defaults`` for analyst review.
-        vacancy_rate_override: Override physical_vacancy_rate from rent roll
-        collection_loss_rate: Collection loss rate. When omitted, the house
-            vintage-framework floor for the deal's year built is used (0.5%
-            engine fallback when year built is unknown) and recorded in
-            ``metadata.ingest_gate.assumed_defaults`` for analyst review.
+        vacancy_rate_override: Flat physical vacancy. When omitted, vacancy
+            moves from the rent-roll level to stabilized vacancy over the
+            deal type's stabilization window.
+        collection_loss_rate: Collection loss rate. When omitted, T12 bad debt
+            / GPR is used, else the house default (vintage
+            ``bad_debt_typical_low``; 2.0% when the year built is unknown).
         analyst: Analyst name for metadata
         om_path: Optional path to OM PDF or text file
         om_source_locator: Stable original-document locator for OM tax evidence.
@@ -264,6 +272,11 @@ def build_deal_from_documents(
         assumption_overrides: ``{key: value | {"value": ..., "note": ...}}``
             analyst overrides applied by the assumption resolver. They win over
             the explicit kwargs above for the same key.
+        market: Market-data registry for the resolver (anything with
+            ``resolve(metric, Geo, as_of=None)``). Defaults to
+            ``engine.market_data.default_registry()``; ``None`` uses no market
+            data. Missing feeder data falls through to deal evidence and house
+            policy.
 
     Returns:
         Canonical deal inputs dict (schema_version 0.1) with ``deal_profile``
@@ -299,9 +312,9 @@ def build_deal_from_documents(
             })
 
     unit_cohorts = roll["unit_cohorts"]
-    # The rent-roll rate is deal evidence; an explicit vacancy_rate_override is
-    # applied by the assumption resolver as an analyst override.
-    vacancy_rate = roll["physical_vacancy_rate"]
+    # The rent-roll vacancy rate is deal evidence (ingest_gate.evidence); the
+    # resolver builds the vacancy curve from it, and an explicit
+    # vacancy_rate_override is applied as an analyst override.
     market_rents = roll.get("market_rent_by_cohort", {})
     start = tg.month_ids[0]
     end = tg.month_ids[-1]
@@ -350,9 +363,12 @@ def build_deal_from_documents(
         },
         "unit_cohorts": unit_cohorts,
         "market_rent_curve": _build_market_rent_curve(unit_cohorts, market_rents, start, end),
-        # Flat 0% loss to lease; the resolver records it as an engine fallback.
-        "loss_to_lease": _build_cohort_curve(unit_cohorts, "ltl_percent", 0.0, start, end),
-        "physical_vacancy_curve": _build_cohort_curve(unit_cohorts, "vacancy_rate", vacancy_rate, start, end),
+        # Loss to lease, physical vacancy and concessions are placeholders the
+        # assumption resolver fills with curves (ADR 0003 slice 4) from the
+        # rent roll / T12 evidence recorded above, market data and house policy.
+        "loss_to_lease": _build_cohort_curve(unit_cohorts, "ltl_percent", None, start, end),
+        "physical_vacancy_curve": _build_cohort_curve(unit_cohorts, "vacancy_rate", None, start, end),
+        "concession_schedule": None,
         "collection_loss_curve": [
             # loss_rate is filled by the assumption resolver (year_built may come from the OM).
             {"applies_to": "ALL", "start_period": start, "end_period": end, "loss_rate": None}
@@ -431,6 +447,9 @@ def build_deal_from_documents(
                 deal["metadata"]["ingest_gate"]["evidence"]["om"] = {
                     "exit_cap_rate": partial["exit_assumptions"]["exit_cap_rate"],
                 }
+                # The OM rate is deal evidence; the resolver fills the field
+                # (a market exit-year cap rate wins over it, ADR 0003 §3).
+                deal["exit_assumptions"] = {**deal["exit_assumptions"], "exit_cap_rate": None}
                 om_extracted_anything = True
                 deal["metadata"]["analyst_review_required"] = True
         if (
@@ -553,10 +572,15 @@ def build_deal_from_documents(
         metro_slug=metro_slug,
         year_built=resolved_year_built,
     )
+    if market is DEFAULT_MARKET:
+        from engine.market_data import default_registry
+
+        market = default_registry()
     deal = resolve_assumptions(
         deal,
         deal_profile=profile,
         overrides={**overrides, **dict(assumption_overrides or {})},
+        market=market,
     )
     return sync_ingest_gate_assumptions(deal)
 
@@ -592,9 +616,15 @@ def sync_ingest_gate_assumptions(deal: dict[str, Any]) -> dict[str, Any]:
         entry = entries.get(key)
         if not entry or not entry.get("review_required") or entry.get("value") is None:
             continue
+        value = entry["value"]
+        if isinstance(value, list):
+            # Per-year rent growth: the legacy field is the scalar (year-2) rate.
+            value = value[0]
+        elif isinstance(value, dict):
+            continue
         assumed.append({
             "field": field,
-            "value": entry["value"],
+            "value": value,
             "source": _legacy_source(entry["source"]),
             "basis": entry.get("basis", ""),
             "review_required": True,
@@ -787,7 +817,7 @@ def _build_market_rent_curve(
 def _build_cohort_curve(
     cohorts: list[dict],
     value_key: str,
-    value: float,
+    value: float | None,
     start: str,
     end: str,
 ) -> list[dict]:

@@ -102,6 +102,65 @@ def _apply_monthly_compound_growth(
     return new_rent, growth_factor - Decimal("1")
 
 
+def growth_rate_vector(growth_assumptions: Optional[Dict[str, Any]]) -> Optional[List[Decimal]]:
+    """``growth_assumptions.annual_growth_rates`` as Decimals, or None when absent.
+
+    Convention (ADR 0003 §4): element ``k`` is the growth applied at the start
+    of growth year ``k + 2`` counted from ``growth_start_month`` (the analysis
+    start by default), so the first increase uses element 0. Elements past the
+    hold are ignored; when the vector is shorter than the hold its last value
+    repeats.
+    """
+    rates = (growth_assumptions or {}).get("annual_growth_rates")
+    if not rates:
+        return None
+    return [dec(r) for r in rates]
+
+
+def _vector_rate(rates: List[Decimal], index: int) -> Decimal:
+    return rates[index] if index < len(rates) else rates[-1]
+
+
+def _apply_annual_compound_vector(
+    base_rent: Decimal,
+    rates: List[Decimal],
+    current_month: str,
+    growth_start: str,
+) -> tuple[Decimal, Decimal]:
+    """Annual compound growth with a per-year rate vector."""
+    years = _calculate_years_elapsed(current_month, growth_start)
+    if years <= 0:
+        return base_rent, Decimal("0")
+    growth_factor = Decimal("1")
+    for index in range(years):
+        growth_factor *= Decimal("1") + _vector_rate(rates, index)
+    return base_rent * growth_factor, growth_factor - Decimal("1")
+
+
+def _apply_monthly_compound_vector(
+    base_rent: Decimal,
+    rates: List[Decimal],
+    current_month: str,
+    growth_start: str,
+) -> tuple[Decimal, Decimal]:
+    """Monthly compound growth with a per-year rate vector.
+
+    Full years compound at their own rate; the months into the current growth
+    year compound at that year's monthly-equivalent rate.
+    """
+    months = _calculate_months_elapsed(current_month, growth_start)
+    if months <= 0:
+        return base_rent, Decimal("0")
+    years, remainder = divmod(months, 12)
+    growth_factor = Decimal("1")
+    for index in range(years):
+        growth_factor *= Decimal("1") + _vector_rate(rates, index)
+    if remainder:
+        monthly_factor = (Decimal("1") + _vector_rate(rates, years)) ** (Decimal("1") / Decimal("12"))
+        growth_factor *= monthly_factor ** remainder
+    return base_rent * growth_factor, growth_factor - Decimal("1")
+
+
 def _apply_step_increases(
     base_rent: Decimal,
     step_increases: List[Dict[str, Any]],
@@ -212,6 +271,7 @@ def generate_rent_curves(
     # Extract growth parameters
     growth_type = growth_assumptions.get("growth_type", "annual_compound")
     annual_growth = dec(growth_assumptions.get("annual_growth_rate", 0))
+    growth_vector = growth_rate_vector(growth_assumptions)
     growth_start = month_id(growth_assumptions.get("growth_start_month", time_grid.month_ids[0]))
     step_increases = growth_assumptions.get("step_increases", [])
 
@@ -236,12 +296,23 @@ def generate_rent_curves(
         else:
             base_market = initial_inplace
 
-        # Get cohort-specific growth rate if provided
+        # Get cohort-specific growth rate if provided. A cohort rate wins over
+        # the property-level vector; otherwise the vector (when present) wins
+        # over the scalar annual_growth_rate.
         cohort_growth = dec(cohort.get("growth_rate", annual_growth))
+        cohort_vector = None if "growth_rate" in cohort else growth_vector
 
         for month in time_grid.month_ids:
             # Calculate market rent
-            if growth_type == "annual_compound":
+            if cohort_vector is not None and growth_type == "annual_compound":
+                grown_rent, growth_pct = _apply_annual_compound_vector(
+                    base_market, cohort_vector, month, growth_start
+                )
+            elif cohort_vector is not None and growth_type == "monthly_compound":
+                grown_rent, growth_pct = _apply_monthly_compound_vector(
+                    base_market, cohort_vector, month, growth_start
+                )
+            elif growth_type == "annual_compound":
                 grown_rent, growth_pct = _apply_annual_compound_growth(
                     base_market, cohort_growth, month, growth_start
                 )

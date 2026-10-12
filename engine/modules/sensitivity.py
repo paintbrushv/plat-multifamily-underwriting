@@ -45,6 +45,8 @@ def _apply_parameter_override(
         if "growth_assumptions" not in modified:
             modified["growth_assumptions"] = {}
         modified["growth_assumptions"]["annual_growth_rate"] = value
+        # A flat sensitivity rate replaces any per-year vector (ADR 0003 §4).
+        modified["growth_assumptions"].pop("annual_growth_rates", None)
 
     elif parameter == "exit_cap_rate":
         if "exit_assumptions" not in modified:

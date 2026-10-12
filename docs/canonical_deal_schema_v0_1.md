@@ -101,6 +101,30 @@ Unit count may be time-varying in future versions; v0.1 assumes static.
 | end_period | Yes | Month |
 | market_rent | Yes | $ / unit / month |
 
+### GrowthAssumptions (scalar)
+
+| Field | Required | Notes |
+|-----|---------|------|
+| growth_type | Yes | `annual_compound`, `monthly_compound` or `step_only` |
+| annual_growth_rate | Yes | Scalar annual market rent growth |
+| annual_growth_rates | Optional | Per-year growth vector (ADR 0003 §4) |
+| growth_start_month | Optional | Month growth years count from (default: analysis start) |
+
+The engine grows a cohort whose `market_rent_curve` is flat. When
+`annual_growth_rates` is present it wins over `annual_growth_rate`:
+
+- Year 1 has no growth. Element `k` is the growth applied at the start of
+  growth year `k + 2`, so the first increase (entering year 2) uses element 0.
+- Elements past the hold are ignored. If the vector is shorter than the hold,
+  its last value repeats.
+- Growth years count from `growth_start_month`, so it shifts every increase.
+- `monthly_compound` compounds each year's rate monthly within that year.
+- A cohort `growth_rate` and explicit time-varying `market_rent_curve` rows
+  stay authoritative.
+
+The assumption resolver writes the vector and its element 0 to
+`annual_growth_rate`, which stays the scalar shorthand.
+
 ---
 
 ### LossToLease (table)

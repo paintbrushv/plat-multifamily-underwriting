@@ -5,16 +5,17 @@
 with provenance in the canonical ``assumptions`` section, and writes the
 resolved value into the existing canonical field the engine reads.
 
-Slice 2 changes no numbers. Each key resolves to the value ingest and the
-engine produce today. Where the ADR 0003 §3 precedence would pick a different
-candidate, the entry's ``basis`` says so and today's value is kept. Market data
-is recorded as candidates only.
+Slice 2 changed no numbers. Slice 4 (``engine/assumptions/curves.py``) applies
+the ADR 0003 §3 precedence to rent_growth, physical_vacancy, loss_to_lease,
+concessions, collection_loss and exit_cap_rate, and reads market data through
+an ``engine.market_data`` registry. Every other key still resolves to the value
+ingest and the engine produced before the assumption layer; where the ADR
+precedence would pick a different candidate, the entry's ``basis`` says so.
 """
 
 from __future__ import annotations
 
 import math
-import re
 from copy import deepcopy
 from dataclasses import dataclass, field, is_dataclass, asdict
 from datetime import date, datetime
@@ -50,7 +51,6 @@ from engine.assumptions.registry import (
     SOURCE_ENGINE_FALLBACK,
     AssumptionEntry,
     house_vintage_source,
-    market_source,
     requires_review,
 )
 
@@ -112,6 +112,7 @@ class _Context:
     end: str
     om_confidence: Optional[str] = None
     notes: dict[str, list[str]] = field(default_factory=dict)
+    market_cache: dict[Any, Any] = field(default_factory=dict)  # slice 4: per-run market lookups
 
     @property
     def strategy(self) -> str:
@@ -839,7 +840,7 @@ def _adr_pick(spec: _Spec, candidates: list[dict[str, Any]]) -> Optional[dict[st
 # ── key registry ─────────────────────────────────────────────────────────
 
 
-def _specs() -> tuple[_Spec, ...]:
+def _base_specs() -> tuple[_Spec, ...]:
     return (
         _Spec(
             key="rent_growth",
@@ -1001,6 +1002,22 @@ def _specs() -> tuple[_Spec, ...]:
     )
 
 
+# ── ADR 0003 slice 4 hook: curve keys (engine/assumptions/curves.py) ──────
+
+
+def _curves():
+    from engine.assumptions import curves  # lazy: curves imports this module
+
+    return curves
+
+
+def _specs() -> tuple[_Spec, ...]:
+    return _curves().apply(_base_specs())
+
+
+# ── end slice 4 hook ─────────────────────────────────────────────────────
+
+
 ASSUMPTION_KEYS = tuple(spec.key for spec in _specs())
 
 
@@ -1013,47 +1030,9 @@ def _specs_for(profile: DealProfile) -> tuple[_Spec, ...]:
 # ── market candidates ────────────────────────────────────────────────────
 
 
-def _attr(item: Any, name: str) -> Any:
-    if isinstance(item, Mapping):
-        return item.get(name)
-    return getattr(item, name, None)
-
-
-def _market_candidate(metric: str, item: Any) -> dict[str, Any]:
-    source = _attr(item, "source")
-    if not (isinstance(source, str) and source.startswith(MARKET_PREFIX)):
-        provenance = _attr(item, "provenance")
-        provider = (
-            _attr(item, "provider")
-            or (provenance.get("provider") if isinstance(provenance, Mapping) else None)
-            or "unknown"
-        )
-        source = market_source(re.sub(r"[^A-Za-z0-9_.\-]", "_", str(provider)) or "unknown")
-    return _candidate(
-        source,
-        _attr(item, "value"),
-        f"Market metric {metric!r}; recorded only, market data is not applied in this slice.",
-        metric=metric,
-        unit=_attr(item, "unit"),
-        as_of=_attr(item, "as_of"),
-        confidence=_attr(item, "confidence"),
-        horizon=_attr(item, "horizon"),
-        provenance=_attr(item, "provenance"),
-    )
-
-
 def _market_candidates(ctx: _Context, spec: _Spec) -> list[dict[str, Any]]:
-    if ctx.market is None:
-        return []
-    out: list[dict[str, Any]] = []
-    geo = ctx.profile.geo()
-    for metric in spec.market_metrics:
-        observation, candidates = ctx.market.resolve(metric, geo, as_of=None)
-        items = list(candidates or [])
-        if observation is not None and not any(item is observation for item in items):
-            items.insert(0, observation)
-        out.extend(_market_candidate(metric, item) for item in items)
-    return out
+    # Slice 4: market lookups go through the registry with a Geo (curves.py).
+    return _curves().market_candidates(ctx, spec)
 
 
 # ── overrides ────────────────────────────────────────────────────────────
@@ -1070,11 +1049,12 @@ def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -
         cohorts = raw.get("cohort_overrides")
     else:
         value, cohorts = raw, None
-    number = _num(value)
-    if number is None or not math.isfinite(number):
-        raise AssumptionOverrideError(f"override for {key!r} must be a finite number")
-    out: dict[str, Any] = {"value": number, "note": note}
+    # Slice 4: a scalar, a per-year vector, or the curve shape the key writes.
+    value = _curves().normalize_override_value(key, value)
+    out: dict[str, Any] = {"value": value, "note": note}
     if cohorts:
+        if not isinstance(value, float):
+            raise AssumptionOverrideError(f"cohort_overrides for {key!r} need a scalar value")
         if not isinstance(cohorts, Mapping):
             raise AssumptionOverrideError(f"cohort_overrides for {key!r} must be an object")
         cleaned = {}
@@ -1119,7 +1099,11 @@ def overrides_from_patch(
         if not any(_get_path(patch, path)[0] for path in spec.patch_paths):
             continue
         current = spec.read(ctx)
-        if current.state != PRESENT or _num(current.value) is None:
+        if current.state != PRESENT or current.value is None:
+            continue
+        try:  # slice 4: vectors and curve objects are valid override values too
+            _curves().normalize_override_value(spec.key, current.value)
+        except AssumptionOverrideError:
             continue
         override: dict[str, Any] = {"value": current.value, "note": note}
         if current.cohort_overrides:
@@ -1214,6 +1198,8 @@ def _resolve_key(
     current = spec.read(ctx)
     default = spec.default(ctx, current.state)
     candidates = spec.gather(ctx) + _market_candidates(ctx, spec)
+    # Slice 4 hook: re-resolving without market data keeps a market-sourced default.
+    default, candidates = _curves().carry_market_default(ctx, current, prior, default, candidates)
 
     override: Optional[dict[str, Any]] = None
     if explicit is not None:
@@ -1310,9 +1296,12 @@ def resolve_assumptions(
             wins. Overrides already recorded in the canonical are preserved.
         mode: ``"underwrite"`` or ``"pricing"``. Recorded only in this slice;
             guardrail enforcement arrives with ADR 0003 slice 6.
-        market: Optional market source exposing
-            ``resolve(metric, geo, as_of=None) -> (observation | None, candidates)``.
-            Results are recorded as candidates; they never change a value here.
+        market: Optional ``engine.market_data`` registry (anything exposing
+            ``resolve(metric, Geo, as_of=None) -> (observation | None, candidates)``).
+            The deal profile is converted to a ``Geo``. Market observations feed
+            rent_growth, physical_vacancy, concessions and exit_cap_rate under the
+            ADR 0003 §3 precedence (``engine/assumptions/curves.py``) and every
+            observation is recorded as a candidate. Missing data falls through.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")

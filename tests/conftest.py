@@ -9,6 +9,21 @@ import pytest
 from engine.modules.time_grid import TimeGrid
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_market_data(monkeypatch, tmp_path_factory):
+    """Point the market-data feeders at an empty directory for every test.
+
+    Ingest uses ``engine.market_data.default_registry()`` by default, which
+    would otherwise read sibling feeder checkouts on a developer machine. Tests
+    that need market data pass a SyntheticProvider registry explicitly.
+    """
+    empty = tmp_path_factory.getbasetemp() / "no-market-data"
+    for name in ("PLAT_MARKET_STUDY_ROOT", "PLAT_SUPPLY_DEMAND_ROOT"):
+        monkeypatch.setenv(name, str(empty / name.lower()))
+    for name in ("PLAT_MARKET_DATA_PROVIDERS", "PLAT_MARKET_DATA_USER_FILE", "PLAT_MARKET_STUDY_COMPS"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def minimal_time_grid():
     """5-year monthly time grid starting 2026-07."""

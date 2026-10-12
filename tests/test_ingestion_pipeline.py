@@ -83,7 +83,9 @@ def test_collection_loss_default():
     result = _build()
     cl = result["collection_loss_curve"]
     assert len(cl) == 1
-    assert cl[0]["loss_rate"] == pytest.approx(0.005)
+    # ADR 0003 slice 4: no T12 bad debt line and no year built -> house 2.0%
+    # (was the 0.5% engine fallback).
+    assert cl[0]["loss_rate"] == pytest.approx(0.02)
 
 
 def test_metadata_populated():
@@ -330,9 +332,11 @@ class TestBuildDealWithOm:
         }
         loss = assumed["collection_loss_curve.loss_rate"]
         assert loss["source"] == "house_vintage_framework"
-        assert loss["value"] == pytest.approx(0.0075)
+        # ADR 0003 slice 4: the house default is the vintage bad_debt_typical_low
+        # (1980s 1.0%), not the 0.75% collection-loss floor.
+        assert loss["value"] == pytest.approx(0.01)
         assert "OM property_summary.year_built" in loss["basis"]
-        assert result["collection_loss_curve"][0]["loss_rate"] == pytest.approx(0.0075)
+        assert result["collection_loss_curve"][0]["loss_rate"] == pytest.approx(0.01)
 
     def test_cli_flags_override_om(self):
         """CLI purchase_price should override OM extraction."""

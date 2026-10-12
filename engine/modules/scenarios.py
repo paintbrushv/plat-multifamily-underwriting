@@ -269,6 +269,9 @@ def _apply_scenario_deltas(
     ga = modified.get("growth_assumptions", {})
     base_rg = ga.get("annual_growth_rate", 0.03)
     ga["annual_growth_rate"] = base_rg + rg_delta
+    # Shift a per-year vector (ADR 0003 §4) by the same delta.
+    if ga.get("annual_growth_rates"):
+        ga["annual_growth_rates"] = [r + rg_delta for r in ga["annual_growth_rates"]]
     # Preserve required growth_type field (default to annual_compound)
     if "growth_type" not in ga:
         ga["growth_type"] = "annual_compound"

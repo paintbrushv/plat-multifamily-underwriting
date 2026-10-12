@@ -23,7 +23,7 @@ from engine.engine import run_underwriting
 from engine.ingest import rent_roll_parser
 from engine.ingest.ingestion_pipeline import build_deal_from_documents
 from engine.ingest.t12_parser import parse_t12_statement, parse_t12_with_provenance
-from engine.underwriting_policy import default_collection_loss_rate
+from engine.underwriting_policy import default_bad_debt_rate, default_collection_loss_rate
 from engine.validator import validate_deal
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -186,43 +186,52 @@ def test_omitted_policy_rates_are_assumed_defaults_not_blockers():
     assert gate["status"] == "PASS"
     assert gate["blockers"] == []
     assumed = {entry["field"]: entry for entry in gate["assumed_defaults"]}
-    assert set(assumed) == {
-        "growth_assumptions.annual_growth_rate",
-        "collection_loss_curve.loss_rate",
-    }
+    # ADR 0003 slice 4: rent growth is the house long-run vector (was the 3%
+    # engine fallback); collection loss comes from T12 bad debt (1.5%), which
+    # is deal evidence and not an assumed default.
+    assert set(assumed) == {"growth_assumptions.annual_growth_rate"}
     assert all(entry["review_required"] is True for entry in assumed.values())
     growth = assumed["growth_assumptions.annual_growth_rate"]
-    assert growth["value"] == 0.03
-    assert growth["source"] == "engine_fallback"
-    assert deal["growth_assumptions"]["annual_growth_rate"] == 0.03
-    loss = assumed["collection_loss_curve.loss_rate"]
-    assert loss["value"] == 0.005
-    assert loss["source"] == "engine_fallback"
-    assert deal["collection_loss_curve"][0]["loss_rate"] == 0.005
+    assert growth["value"] == 0.025
+    assert growth["source"] == "house:long_run_rent_growth"
+    assert deal["growth_assumptions"]["annual_growth_rate"] == 0.025
+    assert deal["growth_assumptions"]["annual_growth_rates"] == [0.025] * 4
+    assert deal["collection_loss_curve"][0]["loss_rate"] == 0.015
     flags = deal["metadata"]["intake_sanity_flags"]
     assert "assumed_default_annual_growth_rate" in flags
-    assert "assumed_default_loss_rate" in flags
+    assert "assumed_default_loss_rate" not in flags
 
     report = validate_deal(deal)
     assert report.status == "PASS"
     warnings = [i for i in report.issues if i.code == "ASSUMED_DEFAULT"]
-    assert len(warnings) == 2
+    assert len(warnings) == 1
     assert {w.severity for w in warnings} == {"WARNING"}
     assert {w.path for w in warnings} == {"/metadata/ingest_gate/assumed_defaults"}
 
 
-def test_known_year_built_drives_collection_loss_from_vintage_framework():
-    deal = _ingest(rent_growth_rate=0.025, collection_loss_rate=None, year_built=1984)
+def test_known_year_built_drives_collection_loss_from_vintage_framework(tmp_path):
+    # ADR 0003 slice 4: T12 bad debt wins when present, so this T12 has none.
+    # The house default is the vintage bad_debt_typical_low (1980s 1.0%); the
+    # vintage collection-loss floor (0.75%) stays a guardrail, not the default.
+    no_bad_debt = tmp_path / "t12_no_bad_debt.csv"
+    no_bad_debt.write_text(
+        "\n".join(line for line in T12.read_text().splitlines() if not line.startswith("Bad Debt"))
+        .replace("6381000.00", "6471000.00")
+        .replace("531750.00", "539250.00")
+        + "\n"
+    )
+    deal = _ingest(t12=no_bad_debt, rent_growth_rate=0.025, collection_loss_rate=None, year_built=1984)
     gate = deal["metadata"]["ingest_gate"]
 
     assert gate["status"] == "PASS"
     [loss] = gate["assumed_defaults"]
     assert loss["field"] == "collection_loss_curve.loss_rate"
     assert loss["source"] == "house_vintage_framework"
-    assert loss["value"] == float(default_collection_loss_rate(1984, strategy="cashflow"))
-    assert loss["value"] == 0.0075
+    assert loss["value"] == float(default_bad_debt_rate(1984))
+    assert loss["value"] == 0.01
+    assert loss["value"] > float(default_collection_loss_rate(1984, strategy="cashflow"))
     assert "1980s" in loss["basis"]
-    assert deal["collection_loss_curve"][0]["loss_rate"] == 0.0075
+    assert deal["collection_loss_curve"][0]["loss_rate"] == 0.01
     assert deal["metadata"]["year_built"] == 1984
     assert validate_deal(deal).status == "PASS"
 

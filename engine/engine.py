@@ -15,7 +15,7 @@ from engine.modules.opex import compute_opex
 from engine.modules.renovations import compute_renovations
 from engine.modules.revenue import compute_base_rent
 from engine.modules.revenue_programs import compute_program_revenue
-from engine.modules.rent_growth import generate_rent_curves
+from engine.modules.rent_growth import generate_rent_curves, growth_rate_vector
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, month_id, round2
 from engine.property_tax import apply_property_tax_policy
@@ -404,7 +404,10 @@ def _apply_growth_assumptions(
     """Expand growth_assumptions into market_rent_curve segments.
 
     A cohort whose market_rent_curve carries a single rent (the flat shape
-    ingestion produces) is grown from that rent with generate_rent_curves.
+    ingestion produces) is grown from that rent with generate_rent_curves:
+    by ``growth_assumptions.annual_growth_rates`` when present (element ``k``
+    is the increase entering growth year ``k + 2``; the last value repeats past
+    the vector's end), else by the scalar ``annual_growth_rate``.
     A cohort whose curve already varies over time is analyst-authored and is
     used as provided, so growth is never stacked on top of it.
 
@@ -429,8 +432,14 @@ def _apply_growth_assumptions(
         "explicit_curve_cohorts": sorted(cid for cid in segments_by_cohort if cid not in flat),
         "market_rent_curve": curve,
     }
-    rate = dec(growth.get("annual_growth_rate") or 0)
-    if not flat or rate == 0 or growth.get("growth_type") == "step_only":
+    # A per-year vector (annual_growth_rates, ADR 0003 §4) wins over the scalar.
+    vector = growth_rate_vector(growth)
+    if vector is not None:
+        disclosure["annual_growth_rates"] = [float(r) for r in vector]
+        grows = any(r != 0 for r in vector)
+    else:
+        grows = dec(growth.get("annual_growth_rate") or 0) != 0
+    if not flat or not grows or growth.get("growth_type") == "step_only":
         return curve, disclosure
 
     generated = generate_rent_curves(

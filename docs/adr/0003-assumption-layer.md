@@ -122,11 +122,11 @@ How each key combines sources:
 
 | Key | Resolution |
 |---|---|
-| `rent_growth` | Years 1–2 from the submarket forecast, else the MSA forecast (8-quarter ensemble, annualized to analysis years). Years 3+ glide to the long-run rate (MSA long-run, else house long-run constant). Deal evidence is not used for growth. |
+| `rent_growth` | Years with forecast coverage from the submarket forecast, else the MSA forecast (8-quarter ensemble, annualized to analysis years). After the horizon, a linear glide over 2 years to the long-run rate (MSA long-run, else house long-run constant). Deal evidence is not used for growth. |
 | `physical_vacancy` | Curve from current physical vacancy (rent roll) to stabilized vacancy over the profile's stabilization window. Stabilized = submarket stabilized vacancy if available, else house vintage typical. |
 | `loss_to_lease` | Current LTL from the rent roll (market vs in-place) burns off over the lease term (12 months) to the house vintage LTL floor. |
 | `concessions` | Year-1 rate from deal evidence (T12 concessions / GPR, or rent-roll specials), else submarket concession spread (asking − effective) / asking, else house vintage floor. Burns off to the submarket or house stabilized level. |
-| `collection_loss` | T12 bad debt / GPR, else house vintage floor. |
+| `collection_loss` | T12 bad debt / GPR, else the house default (vintage `bad_debt_typical_low`). The vintage collection-loss floor is a guardrail (§5), not the default. |
 | `other_income` | T12 run-rate programs (UPL-42), else the house per-unit default. |
 | `opex.<category>.base` | T12 line (normalized to annual dollars), else the house per-unit default for the category. |
 | `opex.<category>.growth` | House per-category growth table (§6), unless a provider supplies a market trend. |
@@ -139,11 +139,15 @@ How each key combines sources:
 - The engine stays monthly. Assumptions are entered per analysis year
   (vectors) or as start/stabilized/window triples. The resolver expands them
   into monthly segments.
-- `growth_assumptions` gains an optional `annual_growth_rates`. Index 0 is the
-  first analysis year, which the engine treats as year 1 with no growth;
-  index *n* is the rate applied entering year *n+1*. `annual_growth_rate`
-  stays as the scalar shorthand. The engine (UPL-44 path) grows flat curves by
-  the vector when it is present.
+- `growth_assumptions` gains an optional `annual_growth_rates`. Year 1 has no
+  growth. Element *k* is the growth applied at the start of analysis year
+  *k+2*, so the first increase (entering year 2) uses element 0, as the
+  scalar does today. Elements past the hold are ignored; if the vector is
+  shorter than the hold, its last value repeats. `growth_start_month` still
+  shifts the start: years count from it. `annual_growth_rate` stays as the
+  scalar shorthand (the resolver writes element 0 to it). The engine (UPL-44
+  path) grows flat curves by the vector when it is present, else by the
+  scalar; explicit time-varying curves stay authoritative.
 - Assumptions are property-level by default. An entry may carry
   `cohort_overrides: {cohort_id: value}` for cohort-specific curves.
 

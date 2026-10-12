@@ -56,6 +56,10 @@ Assumption layer (ADR 0003):
     keyed by assumption key (rent_growth, collection_loss, physical_vacancy, ...).
     Values a --partial-json patch supplies for an assumption are recorded as
     analyst overrides, and the assumptions are re-resolved after the merge.
+
+    Market data (rent-growth forecast, stabilized vacancy, concession rate,
+    market cap rate) comes from engine.market_data.default_registry(); pass
+    --no-market-data to resolve from deal evidence and house policy only.
 """
 
 from __future__ import annotations
@@ -110,6 +114,17 @@ def _apply_partial_json(base_deal: dict, partial: dict) -> dict:
     merged = _deep_merge(base_deal, partial)
     if not isinstance(merged, dict):  # defensive; _deep_merge returns dict here
         raise ValueError("Merged deal payload must be a dict")
+    growth_patch = partial.get("growth_assumptions")
+    if (
+        isinstance(growth_patch, dict)
+        and "annual_growth_rate" in growth_patch
+        and "annual_growth_rates" not in growth_patch
+        and isinstance(merged.get("growth_assumptions"), dict)
+    ):
+        # A scalar rent-growth patch is a flat rate: drop the resolved per-year vector.
+        merged["growth_assumptions"] = {
+            k: v for k, v in merged["growth_assumptions"].items() if k != "annual_growth_rates"
+        }
 
     metadata = merged.setdefault("metadata", {})
     partial_metadata = partial.get("metadata", {}) if isinstance(partial.get("metadata"), dict) else {}
@@ -120,18 +135,20 @@ def _apply_partial_json(base_deal: dict, partial: dict) -> dict:
     return merged
 
 
-def apply_partial_and_reresolve(base_deal: dict, partial: dict) -> dict:
+def apply_partial_and_reresolve(base_deal: dict, partial: dict, *, market: object = None) -> dict:
     """Merge a partial patch, then re-run the assumption resolver.
 
     Assumption values the patch supplies become analyst overrides, so the
     assumptions section and the legacy ``ingest_gate.assumed_defaults`` reflect
-    the merged deal instead of the pre-merge ingest.
+    the merged deal instead of the pre-merge ingest. ``market`` is the
+    market-data registry used at ingest (market-sourced values are kept when
+    it is None).
     """
     merged = _apply_partial_json(base_deal, partial)
     if "assumptions" not in base_deal:
         return merged
     overrides = overrides_from_patch(partial, merged, note=PARTIAL_JSON_OVERRIDE_NOTE)
-    resolved = resolve_assumptions(merged, overrides=overrides)
+    resolved = resolve_assumptions(merged, overrides=overrides, market=market)
     return sync_ingest_gate_assumptions(resolved)
 
 
@@ -245,6 +262,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Submarket name (deal_profile.submarket)")
     p.add_argument("--metro-slug", default=None,
                    help="Metro slug used by market-data providers (deal_profile.msa.metro_slug)")
+    p.add_argument("--no-market-data", action="store_true",
+                   help="Resolve assumptions without market data. By default the market-data "
+                        "registry (engine.market_data.default_registry) is used; missing feeder "
+                        "data falls through to deal evidence and house policy.")
     p.add_argument("--assumption-overrides", type=Path, default=None, metavar="PATH.json",
                    help="JSON object of analyst assumption overrides: "
                         '{key: value | {"value": v, "note": "..."}}.')
@@ -263,6 +284,13 @@ def main() -> int:
     if args.canonical_json and args.partial_json:
         print("Error: --canonical-json cannot be combined with --partial-json.", file=sys.stderr)
         return 2
+
+    if args.no_market_data:
+        market = None
+    else:
+        from engine.market_data import default_registry
+
+        market = default_registry()
 
     assumption_overrides = None
     if args.assumption_overrides is not None:
@@ -320,6 +348,7 @@ def main() -> int:
                     result,
                     deal_profile=_profile_from_args(args) if _profile_flags_given(args) else None,
                     overrides=assumption_overrides,
+                    market=market,
                 )
             except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
                 print(f"Error: {exc}", file=sys.stderr)
@@ -421,10 +450,11 @@ def main() -> int:
             submarket=args.submarket,
             metro_slug=args.metro_slug,
             assumption_overrides=assumption_overrides,
+            market=market,
         )
         if partial_payload is not None:
             try:
-                result = apply_partial_and_reresolve(result, partial_payload)
+                result = apply_partial_and_reresolve(result, partial_payload, market=market)
             except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
                 print(f"Error: failed to re-resolve assumptions after --partial-json: {exc}", file=sys.stderr)
                 return 2
