@@ -134,6 +134,28 @@ python runs/ingest_deal.py --property-id SYN-A \
   the sheet flags them for review (`review_required: true`).
 - `--validate` prints the validation report and exits 1 when it fails
   (warnings alone exit 0); the output JSON is still written so you can fix it.
+- Capital is budgeted on every deal in three buckets (ADR 0003 §3), printed
+  after ingest:
+  1. **Immediate / deferred capex at close** (`capital_plan.immediate_capex`):
+     one-time capital for deferred maintenance or PCA immediate needs, funded
+     with equity at close (`--immediate-capex-funding lender_holdback` for a
+     holdback). It raises the total equity basis, so it lowers cash-on-cash,
+     IRR and the backsolve price; it never enters NOI. The value-add
+     renovation budget stays its own budget.
+  2. **Recurring capex by vintage** (`capital_plan.recurring_capex`): $/unit a
+     year below NOI, grown at the R&M rate (3%). The default is the vintage
+     economic CapEx band: the low end for a stabilized deal, the midpoint for
+     value-add, the high end with `--deferred-maintenance`.
+  3. **Lender replacement reserve**: $250/unit a year below NOI. It is a
+     floor, not an addition: the charge below NOI each month is
+     max(recurring capex, reserve).
+
+  Precedence is PCA > analyst > house: `--pca pca.json`
+  (`{"immediate_capex", "recurring_capex_per_unit", "as_of", "reference"}`)
+  beats `--immediate-capex` / `--recurring-capex-per-unit`. A deal built
+  before 2000 without a PCA is flagged for review (`CAPEX_PCA_MISSING`). NOI,
+  the going-in cap rate, exit value and DSCR are before capex; cash flow,
+  cash-on-cash, IRR and the equity multiple are after it.
 
 **2. Review** `output/deal.assumptions.json` (one row per assumption: value,
 unit, source, basis, default, override, delta, guardrail). Rows sourced from

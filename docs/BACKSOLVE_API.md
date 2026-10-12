@@ -28,9 +28,9 @@ argument uses percent units (7 means 7%).
 
 The caller must select `plat.backsolve-policy/1` and a strategy (`cashflow` or
 `value_add`). This selects the existing engine house policy: the house
-replacement reserve ($250/unit, lender-style; never the vintage economic
-CapEx), repair/maintenance, vacancy, loss-to-lease, collection-loss,
-concession, and insurance floors. It also selects the fee defaults in
+replacement reserve ($250/unit, lender-style), recurring capex by vintage,
+repair/maintenance, vacancy, loss-to-lease, collection-loss, concession, and
+insurance floors. It also selects the fee defaults in
 `engine.backsolve_policy.DEFAULTS` and the cash-on-cash basis (`coc_basis`,
 below).
 The result discloses resolved fees, benchmark, tax policy, inferred vintage,
@@ -142,6 +142,16 @@ The floors are defined once, in `engine/assumptions/guardrails.py` (ADR 0003
   the analyst's rate). A `free_months` row is compared as months / 12 and keeps
   its type. With no year-1 row, one year-1 `pct_rent` row at the floor is
   added.
+- recurring capex (`capital_plan.recurring_capex.per_unit_annual`, ADR 0003
+  §3): `max(value, vintage band)`, the band being the low end for `cashflow`,
+  the midpoint for `value_add` and the high end when
+  `deal_profile.deferred_maintenance` is set. A hold with none gets the floor
+  (growing at the house R&M rate). An analyst or PCA (`deal:pca`) figure below
+  the floor is priced as given and disclosed, as the insurance override is:
+  `policy_overrides` gets `{input: "recurring_capex_per_unit", action:
+  "floor_waived_by_analyst_override" | "floor_waived_by_deal_evidence",
+  floor, floor_source, waived_by, original, applied}`. The reserve floor never
+  stacks on it: the engine charges max(recurring capex, reserve) below NOI.
 - insurance and R&M: `max` on the annualized line or the R&M floor basis
   (below).
 
@@ -224,6 +234,31 @@ cash flows. A canonical that says `operating_cash_flow` is switched and the
 change is listed in `policy_overrides`. With the budget funded at close,
 cash-on-cash falls with price, so a renovation deal converges over a wide
 bracket. Cashflow pricing keeps the canonical's funding as entered.
+
+### Capital plan: the three capex buckets
+
+Every candidate price carries the canonical's capital plan (ADR 0003 §3):
+
+1. Immediate / deferred capex at close (`capital_plan.immediate_capex`):
+   with `funding: "equity_at_close"` (the default) it is added to
+   `total_equity_basis` and `total_unlevered_basis` at every candidate, like
+   the renovation budget but as its own budget; with `"lender_holdback"` the
+   loan commitment is upsized by it instead (equity unchanged) and it is in
+   the unlevered basis. The priced case records
+   `immediate_capex.amount_in_stated_basis`, so the engine does not add it
+   again. It is never in NOI or the monthly cash flows.
+2. Recurring capex by vintage reduces cash flow below NOI at every candidate,
+   so it lowers cash-on-cash and the price.
+3. The $250/unit replacement reserve is the floor of that charge.
+
+`summary.capital_plan` (also `house_adjustments.capital_plan`) reports
+`immediate_capex` (`amount`, `funding`, `included_in_total_equity_basis`,
+`loan_upsized_by_holdback`), `renovation_budget`, `recurring_capex_per_unit`,
+`recurring_capex_growth`, `recurring_capex_floor_per_unit`,
+`replacement_reserve_per_unit`, `replacement_reserve_floor_per_unit`,
+`binding_year_1` and `below_noi_capex_charge` (the engine's per-analysis-year
+recurring capex, reserve, charge and the bucket that binds). The agency loan
+is still sized on NOI before capex.
 
 The summary discloses `coc_basis` (`basis`, `source`, `analysis_year`,
 `months`, `rule`, `free_cf`, `equity_basis`, and `last_renovation_month` when

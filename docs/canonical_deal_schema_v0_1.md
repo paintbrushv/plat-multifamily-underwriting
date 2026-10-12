@@ -401,6 +401,36 @@ WARNING) and `"enforced"` in pricing mode. See
 `deal_type` supports `stabilized` and `value_add`; `lease_up` and `distressed`
 are reserved and rejected (validator `DEAL_TYPE_UNSUPPORTED`). Entries sourced
 from `house:*` or `engine_fallback` warn with `ASSUMPTION_REVIEW_REQUIRED`.
+`deal_profile.deferred_maintenance` (boolean) puts recurring capex at the high
+end of the vintage band. A waived floor (an analyst or PCA figure kept below
+it) records `action: "floor_waived_by_analyst_override"` or
+`"floor_waived_by_deal_evidence"` with `waived_by`.
+
+### `capital_plan` (ADR 0003 §3): the three capex buckets
+
+```json
+"capital_plan": {
+  "immediate_capex": {"amount": 180000, "funding": "equity_at_close"},
+  "recurring_capex": {"per_unit_annual": 1500, "growth_rate": 0.03},
+  "pca": {"immediate_capex": 180000, "recurring_capex_per_unit": 1500,
+          "as_of": "2026-08-15", "reference": "Synthetic PCA"}
+}
+```
+
+- `immediate_capex` (bucket 1): one-time capital at close. `funding` is
+  `equity_at_close` (default: added to `total_equity_basis` and
+  `total_unlevered_basis`, stated or defaulted) or `lender_holdback` (added to
+  `total_unlevered_basis` only; the debt terms carry the holdback).
+  `amount_in_stated_basis` is how much the stated bases already include
+  (backsolve's priced case sets it). Never in NOI or the monthly cash flows.
+- `recurring_capex` (bucket 2): year-1 $/unit a year below NOI, grown by
+  `growth_rate` from analysis year 2 (optional `start_period` / `end_period`).
+- `replacement_reserves` (bucket 3) is the floor: the engine charges
+  `max(recurring capex, reserve)` each month in the cash flow's
+  `replacement_reserves` line, never both, and reports
+  `recurring_capex_by_vintage`, `replacement_reserve_floor` and
+  `results.capital_plan` (the charge by analysis year and which bucket binds).
+- `pca` is deal evidence the resolver reads (`deal:pca`); the engine ignores it.
 
 ---
 
