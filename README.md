@@ -164,7 +164,8 @@ python runs/ingest_deal.py --property-id SYN-A \
   charge, as agency lenders do (`loan_sizing_noi_basis`: `ncf_after_capex_charge`
   by default, or `ncf_after_lender_reserve` / `noi_before_capex` as an
   override); the NOI-based DSCR is reported beside it
-  (`metrics.dscr.noi_before_capex`).
+  (`metrics.dscr.noi_before_capex`). A DSCR-sized refinance (`refi_event`) and
+  the feasibility DSCR floors use the same basis.
 - `--deferred-maintenance` also raises the house minimums for physical
   vacancy, collection loss, year-1 concessions and R&M to the upper part of
   their vintage bands (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and

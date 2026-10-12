@@ -788,7 +788,14 @@ completed (f):
    projected year of the all-equity preview at that price, and discloses it
    (`summary.loan_sizing`); `results.capital_plan.metric_basis` names it. A
    charge that consumes the NOI sizes no loan rather than falling back to
-   LTV. Where 1.25x DSCR binds the loan is smaller; where 65% LTV binds
+   LTV. A DSCR-sized stabilized refinance (`refi_event`) uses the same basis:
+   trailing NOI less the forward year's deduction from the refi date
+   (`results.refi`: `noi_used`, `below_noi_deduction`, `sizing_cash_flow`,
+   `sizing_noi_basis`, `deduction_window`); an LTV-sized refi values the
+   property on NOI. The feasibility DSCR floors (1.10 hard, 1.20 and 1.30
+   warn) are unchanged and apply to the reported basis, since agency DSCR
+   minimums are stated on underwritten NCF; their reasons name the basis and
+   the NOI-based DSCR. Where 1.25x DSCR binds the loan is smaller; where 65% LTV binds
    nothing changes. With a going-in cap below the debt constant (negative
    leverage) a smaller loan raises cash-on-cash, so a DSCR-bound solve can
    price higher.
