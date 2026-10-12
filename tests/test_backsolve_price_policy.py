@@ -424,7 +424,17 @@ def test_house_revenue_policy_logs_worst_cohort_vacancy_without_applying_propert
         trailing_actuals={"gross_potential_rent": 1000.0, "vacancy_loss": 90.0},
     )
 
-    assert {row["vacancy_rate"] for row in canonical["physical_vacancy_curve"]} == {0.09}
+    # The 0.09 anchor floors each segment: a1 is raised to it, b1 keeps its
+    # own 0.30, which is neither lowered nor spread to a1.
+    rates = {row["cohort_id"]: row["vacancy_rate"] for row in canonical["physical_vacancy_curve"]}
+    assert rates == {"a1": 0.09, "b1": 0.30}
+    assert summary["physical_vacancy_rate_applied"] == 0.09
+    assert summary["physical_vacancy_curve_applied"] == [
+        {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2031-05", "vacancy_rate": 0.09},
+        {"cohort_id": "b1", "start_period": "2026-06", "end_period": "2031-05", "vacancy_rate": 0.30},
+    ]
+    vacancy_overrides = [o for o in summary["policy_overrides"] if o["input"] == "physical_vacancy_curve"]
+    assert [(o["cohort_id"], o["original"], o["applied"]) for o in vacancy_overrides] == [("a1", 0.05, 0.09)]
     vacancy_summary = summary["physical_vacancy_anchor_summary"]
     assert vacancy_summary["base_case_selected_anchor"] == ["t12_vacancy_gpr"]
     assert vacancy_summary["conservative_downside_selected_rate"] == 0.1

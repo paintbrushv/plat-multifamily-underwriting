@@ -76,8 +76,10 @@ def _status_count(status_counts: dict[str, Any], *names: str) -> int:
     wanted = {name.strip().lower().replace("_", " ").replace("-", " ") for name in names}
     total = 0
     for key, value in (status_counts or {}).items():
-        normalized = str(key).strip().lower().replace("_", " ").replace("-", " ")
-        if normalized in wanted:
+        normalized = " ".join(str(key).strip().lower().replace("_", " ").replace("-", " ").split())
+        # Status variants such as "Vacant Unrented" / "Notice Rented" count
+        # toward their leading status.
+        if any(normalized == w or normalized.startswith(w + " ") for w in wanted):
             total += int(value or 0)
     return total
 
@@ -460,10 +462,9 @@ def _rebase_to_house_box_score(
         if unavailable > 0:
             observed_vacancy = Decimal(str(unavailable)) / Decimal(str(total_units))
 
-    existing_vacancy = {
-        _normalized_code(row.get("cohort_id")): deepcopy(row)
-        for row in canonical.get("physical_vacancy_curve") or []
-    }
+    vacancy_by_cohort: dict[str, list[dict]] = {}
+    for row in canonical.get("physical_vacancy_curve") or []:
+        vacancy_by_cohort.setdefault(_normalized_code(row.get("cohort_id")), []).append(deepcopy(row))
     canonical["physical_vacancy_curve"] = []
     start_period = str(canonical["time_grid"]["analysis_start_date"])[:7]
     end_period = str(canonical["time_grid"]["analysis_end_date"])[:7]
@@ -519,18 +520,19 @@ def _rebase_to_house_box_score(
                     "ltl_percent": 0.0,
                 }
             )
-        vacancy_row = existing_vacancy.get(key, {})
-        vacancy_rate = dec(vacancy_row.get("vacancy_rate", 0))
-        if observed_vacancy is not None:
-            vacancy_rate = max(vacancy_rate, observed_vacancy)
-        canonical["physical_vacancy_curve"].append(
-            {
-                "cohort_id": cohort_id,
-                "start_period": start_period,
-                "end_period": end_period,
-                "vacancy_rate": float(vacancy_rate),
-            }
-        )
+        # Keep the analyst's vacancy segments as entered. The observed
+        # unavailable rate is the rent_roll_vacant anchor, which
+        # _apply_house_revenue_policy applies per segment as a floor and
+        # discloses against the analyst's original rate.
+        for vacancy_row in vacancy_by_cohort.get(key) or [{}]:
+            canonical["physical_vacancy_curve"].append(
+                {
+                    "cohort_id": cohort_id,
+                    "start_period": vacancy_row.get("start_period") or start_period,
+                    "end_period": vacancy_row.get("end_period") or end_period,
+                    "vacancy_rate": float(dec(vacancy_row.get("vacancy_rate", 0))),
+                }
+            )
 
     return {
         "applied": True,
@@ -548,11 +550,64 @@ def _rebase_to_house_box_score(
     }
 
 
+def _annual_opex_amount(canonical: dict[str, Any], row: dict[str, Any]) -> Decimal:
+    """Annual dollars for an opex row, whatever its calculation_type.
+
+    Percent-of-revenue rows depend on modeled revenue and cannot be compared
+    with a dollar floor, so they raise rather than being misread.
+    """
+    base = dec(row.get("base_value", 0))
+    calc = row.get("calculation_type") or "fixed_annual"
+    units = Decimal(str(_sum_units(canonical)))
+    if calc == "fixed_annual":
+        return base
+    if calc == "fixed_monthly":
+        return base * Decimal("12")
+    if calc == "per_unit":
+        return base * units
+    if calc == "per_unit_monthly":
+        return base * units * Decimal("12")
+    if calc == "per_sqft":
+        total_sqft = sum(
+            (dec(c.get("sqft") or 0) * dec(c.get("unit_count") or 0) for c in canonical.get("unit_cohorts") or []),
+            Decimal("0"),
+        )
+        return base * total_sqft
+    raise ValueError(
+        f"opex line {row.get('category_name')!r} uses calculation_type={calc!r}, which house policy "
+        "cannot compare with a dollar floor; enter it as an annual dollar amount"
+    )
+
+
+_EXCLUDED_MATCH_CONTEXT = {
+    "internet": ("ad", "advertis", "office", "marketing"),
+    "insurance": ("health", "group", "worker", "employee", "401"),
+}
+
+
+def _matching_opex_rows(canonical: dict[str, Any], name_fragment: str) -> list[dict[str, Any]]:
+    """opex rows naming ``name_fragment``, preferring ones outside excluded contexts
+    (e.g. property insurance over employee health insurance)."""
+    fragment = name_fragment.lower()
+    matches = [
+        row
+        for row in canonical.get("opex_table") or []
+        if fragment in str(row.get("category_name", "")).lower()
+    ]
+    excluded = _EXCLUDED_MATCH_CONTEXT.get(fragment)
+    if excluded:
+        preferred = [
+            row
+            for row in matches
+            if not any(token in str(row.get("category_name", "")).lower() for token in excluded)
+        ]
+        matches = preferred or matches
+    return matches
+
+
 def _find_annual_opex(canonical: dict[str, Any], name_fragment: str) -> Decimal:
-    for row in canonical.get("opex_table") or []:
-        if name_fragment.lower() in str(row.get("category_name", "")).lower():
-            return dec(row.get("base_value", 0))
-    return Decimal("0")
+    matches = _matching_opex_rows(canonical, name_fragment)
+    return _annual_opex_amount(canonical, matches[0]) if matches else Decimal("0")
 
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
@@ -569,6 +624,10 @@ def _opex_bucket_for_policy(label: str) -> str | None:
         return "management_fees"
     if _contains_any(lower, ("water", "sewer", "electric", "gas", "trash", "utility")):
         return "utilities"
+    if _contains_any(lower, ("repair", "r&m", "r & m")):
+        # "Repairs & Maintenance + Turnover" is the analyst's R&M line; the
+        # vintage R&M floor must be compared with it, not stacked on top.
+        return "repairs_maintenance"
     if lower.startswith("t/o ") or "make ready" in lower or "turnover" in lower:
         return "make_ready"
     if _contains_any(
@@ -696,7 +755,7 @@ def _sum_opex_bucket(canonical: dict[str, Any], bucket: str) -> Decimal:
     total = Decimal("0")
     for row in canonical.get("opex_table") or []:
         if _opex_bucket_for_policy(str(row.get("category_name", ""))) == bucket:
-            total += dec(row.get("base_value", 0))
+            total += _annual_opex_amount(canonical, row)
     return total
 
 
@@ -738,7 +797,8 @@ def _extract_t12_vacancy_rate(trailing_actuals: dict[str, Any] | None) -> Decima
     if not trailing_actuals:
         return None
     gpr = dec(trailing_actuals.get("gross_potential_rent", 0))
-    vacancy = dec(trailing_actuals.get("vacancy_loss", 0))
+    # Statements carry vacancy loss as a negative revenue line.
+    vacancy = abs(dec(trailing_actuals.get("vacancy_loss", 0)))
     if gpr <= 0 or vacancy <= 0:
         return None
     return vacancy / gpr
@@ -894,6 +954,8 @@ def _apply_house_revenue_policy(
         row["ltl_percent"] = float(applied)
         applied_ltls.append(float(applied))
 
+    overrides: list[dict[str, Any]] = []
+
     applied_vacancy, vacancy_summary = _vacancy_anchor_summary(
         canonical,
         default_vacancy=default_vacancy,
@@ -901,22 +963,45 @@ def _apply_house_revenue_policy(
         trailing_actuals=trailing_actuals,
         broker_snapshot=broker_snapshot,
     )
+    # The anchor is a per-segment floor: a segment below it is raised to it, a
+    # segment at or above it keeps the analyst's rate. The curve keeps its
+    # shape, and one cohort's higher rate never spreads to other cohorts.
+    applied_curve: list[dict[str, Any]] = []
     for row in canonical.get("physical_vacancy_curve") or []:
-        row["vacancy_rate"] = float(applied_vacancy)
+        if Decimal(str(row.get("vacancy_rate", 0))) < applied_vacancy:
+            overrides.append({
+                "input": "physical_vacancy_curve",
+                "cohort_id": row.get("cohort_id"),
+                "start_period": row.get("start_period"),
+                "end_period": row.get("end_period"),
+                "original": row.get("vacancy_rate"),
+                "applied": float(applied_vacancy),
+            })
+            row["vacancy_rate"] = float(applied_vacancy)
+        applied_curve.append({
+            "cohort_id": row.get("cohort_id"),
+            "start_period": row.get("start_period"),
+            "end_period": row.get("end_period"),
+            "vacancy_rate": float(row.get("vacancy_rate", 0)),
+        })
 
-    current_concessions = Decimal("0")
-    if canonical.get("concession_schedule"):
-        current_concessions = max(
-            Decimal(str(row.get("amount", 0)))
-            for row in canonical["concession_schedule"]
-            if row.get("concession_type") == "pct_rent"
-        )
+    original_concessions = deepcopy(canonical.get("concession_schedule") or [])
+    current_concessions = max(
+        (_concession_pct_rent(row) for row in original_concessions),
+        default=Decimal("0"),
+    )
     applied_concessions = max(
         current_concessions,
         default_concessions,
         broker_concessions or Decimal("0"),
     )
     _ensure_year1_concession_schedule(canonical, rate=applied_concessions)
+    if original_concessions and original_concessions != (canonical.get("concession_schedule") or []):
+        overrides.append({
+            "input": "concession_schedule",
+            "original": original_concessions,
+            "applied": canonical.get("concession_schedule") or [],
+        })
 
     current_collection = Decimal("0")
     if canonical.get("collection_loss_curve"):
@@ -958,6 +1043,7 @@ def _apply_house_revenue_policy(
             round(sum(applied_ltls) / len(applied_ltls), 6) if applied_ltls else 0.0
         ),
         "physical_vacancy_rate_applied": float(applied_vacancy),
+        "physical_vacancy_curve_applied": applied_curve,
         "physical_vacancy_anchor_summary": vacancy_summary,
         "collection_loss_rate_applied": float(applied_collection),
         "year1_concessions_rate_applied": float(applied_concessions),
@@ -968,7 +1054,23 @@ def _apply_house_revenue_policy(
         "annualized_house_gpr": float(annualized_house_gpr),
         "broker_gpr_reference": float(broker_gpr) if broker_gpr else None,
         "market_rent_requires_comp_support": market_rent_requires_comp_support,
+        "policy_overrides": overrides,
     }
+
+
+def _concession_pct_rent(row: dict[str, Any]) -> Decimal:
+    """A concession row as a fraction of rent; unsupported types fail closed."""
+    ctype = row.get("concession_type")
+    amount = Decimal(str(row.get("amount", 0)))
+    if ctype == "pct_rent":
+        return amount
+    if ctype == "free_months":
+        # Schema: free months on a 12-month lease (1 month = 8.33% of rent).
+        return amount / Decimal("12")
+    raise ValueError(
+        f"concession_schedule row {row.get('concession_id')!r} has concession_type={ctype!r}; "
+        "house policy supports pct_rent and free_months only. Re-enter it as pct_rent."
+    )
 
 
 def _upsert_annual_opex(
@@ -1001,20 +1103,8 @@ def _upsert_annual_opex_by_match(
     fallback_category_name: str,
     annual_amount: Decimal,
 ) -> str:
-    opex = canonical.setdefault("opex_table", [])
-    matches = [
-        row
-        for row in opex
-        if name_fragment.lower() in str(row.get("category_name", "")).lower()
-    ]
-    if name_fragment.lower() == "internet":
-        excluded_context = ("ad", "advertis", "office", "marketing")
-        preferred = [
-            row
-            for row in matches
-            if not any(token in str(row.get("category_name", "")).lower() for token in excluded_context)
-        ]
-        matches = preferred or matches
+    canonical.setdefault("opex_table", [])
+    matches = _matching_opex_rows(canonical, name_fragment)
     if matches:
         row = matches[0]
         row["calculation_type"] = "fixed_annual"
@@ -1358,11 +1448,23 @@ def _prepare_house_assumptions(
         if insurance_per_unit_override is not None
         else default_year1_insurance_per_unit(observed_insurance_per_unit)
     )
-    _upsert_annual_opex(
+    applied_insurance = insurance_per_unit * Decimal(str(units))
+    # Replace the same line _find_annual_opex read so the floor never stacks
+    # on top of a differently named analyst insurance line.
+    insurance_category = _upsert_annual_opex_by_match(
         prepared,
-        category_name="Insurance",
-        annual_amount=insurance_per_unit * Decimal(str(units)),
+        name_fragment="insurance",
+        fallback_category_name="Insurance",
+        annual_amount=applied_insurance,
     )
+    policy_overrides: list[dict[str, Any]] = []
+    if observed_insurance != applied_insurance:
+        policy_overrides.append({
+            "input": "opex_table.insurance",
+            "category_name": insurance_category,
+            "original_annual": float(observed_insurance),
+            "applied_annual": float(applied_insurance),
+        })
 
     reserve_per_unit = default_replacement_reserve_per_unit(
         year_built,
@@ -1396,6 +1498,11 @@ def _prepare_house_assumptions(
                 category_name="Repairs & Maintenance Vintage Floor Top-Up",
                 annual_amount=r_and_m_top_up,
             )
+            policy_overrides.append({
+                "input": "opex_table.repairs_maintenance",
+                "original_annual": float(observed_r_and_m),
+                "applied_annual": float(r_and_m_floor_annual),
+            })
 
     if metadata.get("address"):
         property_summary["address"] = metadata["address"]
@@ -1454,6 +1561,7 @@ def _prepare_house_assumptions(
         broker_snapshot=broker_snapshot,
         trailing_actuals=trailing_actuals,
     )
+    revenue_summary["policy_overrides"] = policy_overrides + revenue_summary["policy_overrides"]
     if rebase_summary.get("unsupported_upside_units", 0):
         revenue_summary["market_rent_requires_comp_support"] = True
     bridge_required, bridge_required_reason = _ancillary_income_bridge_required(
