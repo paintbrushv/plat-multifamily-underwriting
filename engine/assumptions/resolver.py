@@ -66,6 +66,7 @@ from engine.assumptions.registry import (
     HOUSE_YEAR1_INSURANCE_FLOOR,
     MARKET_PREFIX,
     MODES,
+    OVERRIDE_METADATA_FIELDS,
     RESOLVER_VERSION,
     HOUSE_EXIT_CAP_SPREAD,
     SOURCE_ANALYST,
@@ -76,6 +77,7 @@ from engine.assumptions.registry import (
     SOURCE_ENGINE_FALLBACK,
     AssumptionEntry,
     house_vintage_source,
+    override_metadata,
     requires_review,
 )
 
@@ -1307,13 +1309,17 @@ def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -
     if isinstance(raw, Mapping):
         if "value" not in raw:
             raise AssumptionOverrideError(f"override for {key!r} must carry a value")
-        unknown = set(raw) - {"value", "note", "cohort_overrides"}
+        unknown = set(raw) - {"value", "note", "cohort_overrides", *OVERRIDE_METADATA_FIELDS}
         if unknown:
             raise AssumptionOverrideError(f"override for {key!r} has unknown fields: {sorted(unknown)}")
         value, note = raw["value"], raw.get("note") or note
         cohorts = raw.get("cohort_overrides")
+        try:  # optional edit metadata (edited_by / edited_at), kept on the override as given
+            metadata = override_metadata(raw)
+        except ValueError as exc:
+            raise AssumptionOverrideError(f"override for {key!r}: {exc}") from None
     else:
-        value, cohorts = raw, None
+        value, cohorts, metadata = raw, None, {}
     if value is None:
         # null clears the key's override: the entry reverts to its resolved default.
         return {CLEAR: True, "note": note}
@@ -1336,6 +1342,7 @@ def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -
                 raise AssumptionOverrideError(f"cohort override {key}.{cohort_id} must be a finite number")
             cleaned[str(cohort_id)] = cohort_number
         out["cohort_overrides"] = cleaned
+    out.update(metadata)
     return out
 
 

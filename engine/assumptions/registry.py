@@ -43,6 +43,52 @@ SOURCE_PATTERN = re.compile(
 CONFIDENCE_LEVELS = ("high", "medium", "low")
 
 
+# Optional edit metadata an override may carry (ADR 0003 §8): who made the
+# edit and on what date. Only a caller supplies them; resolution never reads
+# the clock, and an override without them stays exactly as before.
+OVERRIDE_METADATA_FIELDS = ("edited_by", "edited_at")
+_EDITED_BY_MAX_LENGTH = 120
+
+
+def override_metadata(raw: Mapping[str, Any]) -> dict[str, str]:
+    """Validated ``edited_by`` / ``edited_at`` from an override object.
+
+    ``edited_by`` is a non-blank string (trimmed). ``edited_at`` is an ISO
+    date (``YYYY-MM-DD``; a ``date`` or an ISO datetime string is cut to its
+    date). Absent or null fields are omitted. Raises ``ValueError`` on
+    anything else.
+    """
+    from datetime import date, datetime
+
+    out: dict[str, str] = {}
+    editor = raw.get("edited_by")
+    if editor is not None:
+        if not isinstance(editor, str) or not editor.strip():
+            raise ValueError("edited_by must be a non-blank string")
+        editor = " ".join(editor.split())
+        if len(editor) > _EDITED_BY_MAX_LENGTH:
+            raise ValueError(f"edited_by must be at most {_EDITED_BY_MAX_LENGTH} characters")
+        out["edited_by"] = editor
+    when = raw.get("edited_at")
+    if when is not None:
+        if isinstance(when, datetime):
+            when = when.date()
+        if isinstance(when, date):
+            out["edited_at"] = when.isoformat()
+        elif isinstance(when, str):
+            text = when.strip()
+            try:
+                parsed = date.fromisoformat(text[:10])
+            except ValueError:
+                raise ValueError(f"edited_at must be an ISO date (YYYY-MM-DD), got {when!r}") from None
+            if len(text) > 10 and text[10] not in "T ":
+                raise ValueError(f"edited_at must be an ISO date (YYYY-MM-DD), got {when!r}")
+            out["edited_at"] = parsed.isoformat()
+        else:
+            raise ValueError(f"edited_at must be an ISO date (YYYY-MM-DD), got {when!r}")
+    return out
+
+
 def is_valid_source(source: str) -> bool:
     return bool(isinstance(source, str) and SOURCE_PATTERN.match(source))
 
