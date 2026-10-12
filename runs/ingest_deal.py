@@ -226,6 +226,35 @@ def _property_tax_policy_from_args(args: argparse.Namespace) -> dict | None:
     return analyst_property_tax_policy(args.millage, args.assessment_ratio, source_locator=locator)
 
 
+def _rent_roll_reconciliation_lines(recon: object) -> list[str]:
+    """CLI lines for the rent-roll gate (ADR 0003 §5), next to the T12 lines."""
+    if not isinstance(recon, dict):
+        return []
+    status = recon.get("status", "UNVERIFIED")
+    if not recon.get("source"):
+        return [f"  Rent roll: {status} (no export summary found)"]
+    lines = []
+    for check, label in (
+        ("units", "units"),
+        ("vacant_units", "vacant units"),
+        ("market_rent_total", "market rent"),
+        ("rent_charges_total", "rent charges"),
+    ):
+        entry = recon.get(check)
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("export") is None:
+            lines.append(f"  Rent roll {label}: {entry.get('status', 'UNVERIFIED')} (not in the export summary)")
+        elif check in ("units", "vacant_units"):
+            lines.append(f"  Rent roll {label}: {entry['status']} parsed {entry['parsed']} vs export {entry['export']}")
+        else:
+            lines.append(
+                f"  Rent roll {label}: {entry['status']} parsed ${entry['parsed']:,.0f}/mo vs "
+                f"export ${entry['export']:,.0f}/mo"
+            )
+    return lines
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for this CLI.
 
@@ -630,6 +659,8 @@ def main() -> int:
                     f"  T12 {side}: {entry['status']} parsed ${entry['parsed_total']:,.0f} vs "
                     f"statement ${entry['statement_total']:,.0f}"
                 )
+        for line in _rent_roll_reconciliation_lines(gate.get("rent_roll_reconciliation")):
+            print(line)
         print(f"  Ingest gate: {gate.get('status')}")
         for blocker in gate.get("blockers") or []:
             print(f"    BLOCKER [{blocker.get('code')}] {blocker.get('message')}")

@@ -11,6 +11,13 @@ Output dict:
   market_rent_by_cohort: dict mapping cohort_id → market_rent
   cohort_id_provenance: list of {raw_cohort_key, resolved_cohort_id,
                                  normalization_steps}
+  vacant_units: int
+  export_summary: the export's own unit counts and market-rent total when it
+                  prints them (Yardi "Summary Groups"), else None
+  reconciliation: parsed vs export_summary, see reconcile_rent_roll()
+
+Yardi "Rent Roll with Lease Charges" exports (one block of charge lines per
+unit, no status column) are read by _parse_lease_charges_rows().
 """
 
 from __future__ import annotations
@@ -150,7 +157,8 @@ def parse_rent_roll(
               how raw cohort labels were normalized into cohort_ids
     """
     path = Path(path)
-    rows = _load_rows(path)
+    meta: dict[str, Any] = {}
+    rows = _load_rows(path, meta)
 
     if not rows:
         return {
@@ -159,6 +167,8 @@ def parse_rent_roll(
             "total_units": 0,
             "market_rent_by_cohort": {},
             "cohort_id_provenance": [],
+            "export_summary": meta.get("export_summary"),
+            "reconciliation": reconcile_rent_roll([], meta.get("export_summary")),
         }
 
     # legacy-PMS export fix — when no explicit Beds column was resolvable,
@@ -167,6 +177,8 @@ def parse_rent_roll(
     # emit a blocker so the caller can route to manual review instead
     # of cohort-collapsing every unit to "0BR".
     blockers: list[str] = []
+    flags: list[str] = list(meta.get("flags") or [])
+    bed_bath_inference: dict[str, dict[str, Any]] = {}
     rows_with_beds_col = sum(1 for r in rows if r.get("beds") not in (None, 0))
     if rows_with_beds_col == 0:
         sidecar_bed_bath_map = (
@@ -195,6 +207,9 @@ def parse_rent_roll(
                 r["beds"] = inferred
                 if inferred_bed_bath:
                     r["baths"] = inferred_bed_bath[1]
+                floorplan = _letter_floorplan_bed_bath(unit_type)
+                if floorplan is not None:
+                    bed_bath_inference[str(unit_type).strip()] = floorplan
         if rows and unrecognized / len(rows) > 0.20:
             blockers.append("unit_type_codes_unrecognized")
 
@@ -250,6 +265,11 @@ def parse_rent_roll(
         })
 
         bedrooms, bathrooms = _resolve_beds_baths(sample, cohort_key)
+        inference = bed_bath_inference.get(cohort_key)
+        if inference is not None:
+            # The code gave the bedrooms only; the baths are a house default.
+            bed_bath_inference[cohort_key] = {**inference, "cohort_id": cohort_id}
+            flags.append(f"bathrooms_assumed_for_cohort_{cohort_id}")
 
         cohort_dict: dict[str, Any] = {
             "cohort_id": cohort_id,
@@ -293,16 +313,92 @@ def parse_rent_roll(
     total = sum(len(v) for v in by_type.values())
     vacant = sum(1 for row in rows if not _is_occupied(row))
     vacancy_rate = vacant / total if total > 0 else 0.0
+    if bed_bath_inference:
+        flags.append("bed_bath_inferred_from_floorplan_letter_code")
 
     result = {
         "unit_cohorts": unit_cohorts,
         "physical_vacancy_rate": round(vacancy_rate, 4),
         "total_units": total,
+        "vacant_units": vacant,
         "market_rent_by_cohort": market_rent_by_cohort,
         "cohort_id_provenance": cohort_id_provenance,
+        "export_summary": meta.get("export_summary"),
+        "reconciliation": reconcile_rent_roll(rows, meta.get("export_summary")),
     }
+    if meta.get("layout"):
+        result["layout"] = meta["layout"]
+    if meta.get("pre_leased_vacant_units"):
+        result["pre_leased_vacant_units"] = meta["pre_leased_vacant_units"]
+    if bed_bath_inference:
+        result["bed_bath_inference"] = sorted(
+            bed_bath_inference.values(), key=lambda entry: entry["unit_type"]
+        )
     if blockers:
         result["blockers"] = blockers
+    if flags:
+        result["flags"] = flags
+    return result
+
+
+RENT_ROLL_RECONCILIATION_TOLERANCE = 0.005
+
+
+def reconcile_rent_roll(
+    rows: list[dict[str, Any]],
+    export_summary: dict[str, Any] | None,
+    tolerance: float = RENT_ROLL_RECONCILIATION_TOLERANCE,
+) -> dict[str, Any]:
+    """Tie parsed units, vacant units and market rent to the export's own summary.
+
+    Units and vacant units must match exactly; the monthly market-rent total
+    within ``tolerance``. When the export also totals its rent charge codes,
+    the parsed in-place rent total must tie within ``tolerance`` too. Each
+    check is ``PASS`` or ``BLOCKED``, or ``UNVERIFIED`` when the export has no
+    figure for it. The overall status is ``BLOCKED`` if any check is,
+    ``PASS`` only if units, vacant units and market rent all tie, else
+    ``UNVERIFIED`` (no export summary, or an incomplete one).
+    """
+    summary = export_summary or {}
+    parsed: dict[str, float] = {
+        "units": len(rows),
+        "vacant_units": sum(1 for row in rows if not _is_occupied(row)),
+        "market_rent_total": round(sum(float(row.get("market_rent") or 0.0) for row in rows), 2),
+    }
+    if summary.get("rent_charges_total") is not None:
+        parsed["rent_charges_total"] = round(sum(float(row.get("rent") or 0.0) for row in rows), 2)
+    # Non-revenue units (model, down, employee) are neither vacant nor
+    # occupied in the export's summary; the parser counts a model or down
+    # unit as not occupied and an employee unit as occupied, so either ties.
+    non_revenue = int(summary.get("non_revenue_units") or 0)
+    result: dict[str, Any] = {"tolerance": tolerance, "source": summary.get("source")}
+    for check, parsed_value in parsed.items():
+        export_value = summary.get(check)
+        entry: dict[str, Any] = {"parsed": parsed_value, "export": export_value}
+        if export_value is None:
+            entry["status"] = "UNVERIFIED"
+        elif check in {"market_rent_total", "rent_charges_total"}:
+            variance = parsed_value - export_value
+            pct = abs(variance) / abs(export_value) if export_value else (0.0 if variance == 0 else 1.0)
+            entry["variance"] = round(variance, 2)
+            entry["variance_pct"] = round(pct, 6)
+            entry["status"] = "PASS" if pct <= tolerance else "BLOCKED"
+        else:
+            export_count = int(export_value)
+            slack = non_revenue if check == "vacant_units" else 0
+            entry["variance"] = int(parsed_value) - export_count
+            if slack:
+                entry["non_revenue_units"] = slack
+            tied = export_count <= parsed_value <= export_count + slack
+            entry["status"] = "PASS" if tied else "BLOCKED"
+        result[check] = entry
+    statuses = {result[check]["status"] for check in parsed}
+    core = {result[check]["status"] for check in ("units", "vacant_units", "market_rent_total")}
+    result["status"] = (
+        "BLOCKED" if "BLOCKED" in statuses
+        else "PASS" if core == {"PASS"}
+        else "UNVERIFIED"
+    )
     return result
 
 
@@ -361,9 +457,9 @@ def _beds_from_unit_type_code(unit_type: str) -> int | None:
     m = _UNIT_TYPE_CODE_PATTERN.search(s)
     if m:
         return int(m.group(1))
-    simple_letter_code = re.match(r"^([A-D])(?:\d+)?[A-Z]*$", s)
-    if simple_letter_code:
-        return _LETTER_FLOORPLAN_BEDS[simple_letter_code.group(1).upper()]
+    floorplan = _letter_floorplan_bed_bath(s)
+    if floorplan is not None:
+        return floorplan["bedrooms"]
     # Fall back to the existing cohort-key regex (handles "1BR/1BA",
     # "2 Bedroom" formats already covered by _resolve_beds_baths).
     bed_only = re.search(r"(\d+)\s*(?:BR|Bed)", s, re.IGNORECASE)
@@ -381,7 +477,44 @@ def _bed_bath_from_unit_type_code(unit_type: str) -> tuple[int, float] | None:
     beds = _beds_from_unit_type_code(unit_type)
     if beds is None:
         return None
-    return beds, 1.0 if beds <= 1 else 2.0
+    return beds, _default_baths(beds)
+
+
+def _default_baths(beds: int) -> float:
+    """House default when a code carries no bath count: 1 bath up to 1BR, else 2."""
+    return 1.0 if beds <= 1 else 2.0
+
+
+# Yardi unit types often carry the property code: "<code>_B2P". The prefix
+# is stripped before letter-floorplan inference (A=1BR, B=2BR, C=3BR, D=4BR).
+_PROPERTY_CODE_PREFIX = re.compile(r"^[A-Za-z0-9]+_(?=[A-Za-z])")
+_LETTER_FLOORPLAN = re.compile(r"^([A-D])(?:\d+)?[A-Z]*$")
+
+
+def _letter_floorplan_bed_bath(unit_type: Any) -> dict[str, Any] | None:
+    """Bedrooms for a letter floorplan code such as ``A1``, ``B2P`` or ``<code>_B3G``.
+
+    The letter gives the bedrooms (A=1, B=2, C=3, D=4). The trailing digit is
+    a plan variant, not a bath count (a "B3" plan can be 2BR/1BA), so the code
+    states no baths: the bath count is the house default (1 up to 1BR, else 2)
+    and the caller flags it for review.
+    """
+    if unit_type is None:
+        return None
+    raw = str(unit_type).strip()
+    code = _PROPERTY_CODE_PREFIX.sub("", raw, count=1)
+    match = _LETTER_FLOORPLAN.match(code)
+    if not match:
+        return None
+    beds = _LETTER_FLOORPLAN_BEDS[match.group(1)]
+    return {
+        "unit_type": raw,
+        "floorplan_code": code,
+        "source": "letter_floorplan_code",
+        "bedrooms": beds,
+        "bathrooms": _default_baths(beds),
+        "bathrooms_basis": "house default (1 bath up to 1BR, else 2); the floorplan code states no bath count",
+    }
 
 
 def _normalize_cohort_id(cohort_key: str) -> tuple[str, list[str]]:
@@ -486,12 +619,12 @@ def _is_occupied(row: dict) -> bool:
     return status != "0" and not any(marker in status for marker in vacant_markers)
 
 
-def _load_rows(path: Path) -> list[dict[str, Any]]:
+def _load_rows(path: Path, meta: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     suffix = path.suffix.lower()
     if suffix == ".csv":
         return _load_csv(path)
     elif suffix in (".xlsx", ".xls", ".xlsm"):
-        return _load_excel(path)
+        return _load_excel(path, meta)
     raise ValueError(f"Unsupported file type: {suffix}")
 
 
@@ -507,7 +640,7 @@ def _load_csv(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _load_excel(path: Path) -> list[dict[str, Any]]:
+def _load_excel(path: Path, meta: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Load rent-roll rows from an Excel workbook.
 
     Sheet selection (a production deal / RedIQ multi-sheet fix):
@@ -539,7 +672,7 @@ def _load_excel(path: Path) -> list[dict[str, Any]]:
             all_rows = list(ws.iter_rows(values_only=True))
         finally:
             wb.close()
-    return _parse_excel_rows(all_rows)
+    return _parse_excel_rows(all_rows, meta)
 
 
 def _load_legacy_xls_rows(path: Path) -> list[tuple[Any, ...]]:
@@ -585,8 +718,13 @@ def _select_tabular_sheet(sheets: dict[str, Any]) -> tuple[str, Any]:
     return names[idx], sheets[names[idx]]
 
 
-def _parse_excel_rows(all_rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+def _parse_excel_rows(
+    all_rows: list[tuple[Any, ...]],
+    meta: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     header_idx, headers = _find_header_row(all_rows)
+    if _is_lease_charges_layout(headers):
+        return _parse_lease_charges_rows(all_rows, header_idx, headers, meta)
     has_unit_column = any(str(h).strip().lower() in {"unitid", "unit number", "unit #", "unit no.", "unit", "apt"} for h in headers)
     rows = []
     for i, row in enumerate(all_rows):
@@ -646,6 +784,288 @@ def _parse_excel_rows(all_rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
                 continue
         rows.append(normalized)
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Yardi "Rent Roll with Lease Charges".
+#
+# One block per unit: a header row with the unit fields AND the first charge
+# line (charge code + amount, often a small fee rather than rent), one row per
+# further charge (charge code and amount only), then a "Total" charge row.
+# There is no status column: a vacant unit reads VACANT in the resident and
+# name columns. Sections: "Current/Notice/Vacant Residents", then "Future
+# Residents/Applicants" (which repeats pre-leased vacant units), a grand total,
+# a "Summary Groups" block and a "Summary of Charges by Charge Code" block.
+# ---------------------------------------------------------------------------
+
+# Charge codes that are the unit's contract rent; every other code (pest,
+# trash, cable, parking, employee discount, ...) is not rent.
+RENT_CHARGE_CODES = frozenset({"rent", "rnt"})
+_NON_REVENUE_RESIDENT_MARKERS = ("model", "down", "admin")
+
+
+def _is_lease_charges_layout(headers: list[str]) -> bool:
+    lowered = {str(h).strip().lower() for h in headers if h}
+    return "charge code" in lowered and "amount" in lowered
+
+
+def _header_index(headers: list[str], candidates: tuple[str, ...]) -> int | None:
+    """Column index of the first header equal (case-insensitive) to a candidate."""
+    lowered = [str(h).strip().lower() for h in headers]
+    for candidate in candidates:
+        target = candidate.strip().lower()
+        if target in lowered:
+            return lowered.index(target)
+    return None
+
+
+def _signed_float(value: Any) -> float | None:
+    """Like _to_float but keeps the sign (charge lines can be credits)."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(str(value).replace(",", "").replace("$", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _cell(row: tuple[Any, ...], idx: int | None) -> Any:
+    if idx is None or idx >= len(row):
+        return None
+    return row[idx]
+
+
+def _parse_lease_charges_rows(
+    all_rows: list[tuple[Any, ...]],
+    header_idx: int,
+    headers: list[str],
+    meta: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Unit rows from a Yardi "Rent Roll with Lease Charges" export.
+
+    In-place rent is the sum of the unit's rent charge-code lines
+    (:data:`RENT_CHARGE_CODES`); only when the export carries no charge codes
+    at all does the unit row's own amount stand in for rent. Future residents
+    and applicants are not units: they only mark a vacant unit as pre-leased.
+    ``meta`` receives the layout name, the export's own summary (see
+    :func:`_parse_summary_groups`) and the pre-leased vacant units.
+    """
+    meta = meta if meta is not None else {}
+    unit_idx = _header_index(headers, ("Unit",))
+    type_idx = _header_index(headers, ("Unit Type", "Floor Plan", "Floorplan", "Type"))
+    sqft_idx = _header_index(headers, ("Unit Sq Ft", "Sq Ft", "SqFt", "Square Feet"))
+    resident_idx = _header_index(headers, ("Resident",))
+    name_idx = _header_index(headers, ("Name", "Resident Name"))
+    market_idx = _header_index(headers, ("Market Rent", "Market"))
+    code_idx = _header_index(headers, ("Charge Code",))
+    amount_idx = _header_index(headers, ("Amount",))
+    status_idx = _header_index(headers, _CANONICAL_COLUMNS["status"])
+
+    units: list[dict[str, Any]] = []
+    future_units: list[str] = []
+    current: dict[str, Any] | None = None
+    section = "current"
+    summary: dict[str, Any] | None = None
+
+    for i in range(header_idx + 1, len(all_rows)):
+        row = tuple(all_rows[i] or ())
+        if all(c is None or str(c).strip() == "" for c in row):
+            current = None
+            continue
+        first = str(row[0]).strip().lower() if row and row[0] is not None else ""
+        if first.startswith("summary groups"):
+            summary = _parse_summary_groups(all_rows[i:])
+            if summary is not None:
+                rent_charges = _rent_charges_from_charge_summary(all_rows[i:])
+                if rent_charges is not None:
+                    summary["rent_charges_total"] = rent_charges
+            break
+        if first.startswith("summary of charges"):
+            break
+        unit_val = _cell(row, unit_idx)
+        if not _looks_like_unit_id(unit_val) and first:
+            if "future" in first or "applicant" in first:
+                section = "future"
+            elif "current" in first or "notice" in first:
+                section = "current"
+            current = None
+            continue
+        if _looks_like_unit_id(unit_val) and str(_cell(row, type_idx) or "").strip():
+            if section == "future":
+                future_units.append(str(unit_val).strip())
+                current = None
+                continue
+            current = {
+                "unit": str(unit_val).strip(),
+                "unit_type": str(_cell(row, type_idx)).strip(),
+                "sqft": _to_float(_cell(row, sqft_idx)) or 0.0,
+                "resident": str(_cell(row, resident_idx) or "").strip(),
+                "name": str(_cell(row, name_idx) or "").strip(),
+                "status": str(_cell(row, status_idx) or "").strip() if status_idx is not None else None,
+                "market_rent": _to_float(_cell(row, market_idx)) or 0.0,
+                "first_amount": _signed_float(_cell(row, amount_idx)) or 0.0,
+                "charges": [],
+            }
+            units.append(current)
+        elif current is None:
+            continue  # a future unit's charges, the grand total, a stray line
+        code = str(_cell(row, code_idx) or "").strip()
+        if not code:
+            continue
+        if code.lower() == "total":
+            current = None
+            continue
+        current["charges"].append((code, _signed_float(_cell(row, amount_idx)) or 0.0))
+
+    has_charge_codes = any(unit["charges"] for unit in units)
+    rows: list[dict[str, Any]] = []
+    occupied_without_rent: list[str] = []
+    for unit in units:
+        status = unit["status"] if unit["status"] else _lease_charges_status(unit)
+        if has_charge_codes:
+            rent_lines = [amount for code, amount in unit["charges"] if code.lower() in RENT_CHARGE_CODES]
+            rent = round(sum(rent_lines), 2)
+            if not rent_lines and _is_occupied({"status": status}):
+                occupied_without_rent.append(unit["unit"])
+        else:
+            rent = unit["first_amount"]
+        rows.append({
+            "unit": unit["unit"],
+            "rent": max(rent, 0.0),
+            "market_rent": unit["market_rent"] or max(rent, 0.0),
+            "sqft": unit["sqft"],
+            "status": status,
+            "unit_type": unit["unit_type"],
+            "beds": None,
+            "baths": 1.0,
+        })
+
+    vacant_ids = {row["unit"] for row in rows if not _is_occupied(row)}
+    meta["layout"] = "yardi_lease_charges"
+    meta["export_summary"] = summary
+    meta["pre_leased_vacant_units"] = sorted(
+        {unit for unit in future_units if unit in vacant_ids}, key=_unit_sort_key
+    )
+    flags = meta.setdefault("flags", [])
+    if occupied_without_rent:
+        flags.append("occupied_units_without_rent_charge_code")
+        meta["occupied_units_without_rent_charge"] = occupied_without_rent
+    return rows
+
+
+def _unit_sort_key(unit: str) -> tuple[int, str]:
+    digits = re.sub(r"\D", "", unit)
+    return (int(digits) if digits else 0, unit)
+
+
+def _lease_charges_status(unit: dict[str, Any]) -> str:
+    """Occupancy from the resident and name columns when there is no status column."""
+    resident = unit["resident"].lower()
+    name = unit["name"].lower()
+    if resident == "vacant" or name == "vacant":
+        return "Vacant"
+    for marker in _NON_REVENUE_RESIDENT_MARKERS:
+        if resident == marker or name == marker:
+            return marker.title()
+    return "Occupied"
+
+
+_SUMMARY_GROUP_ROWS = {
+    "current/notice/vacant residents": "current",
+    "occupied units": "occupied",
+    "total non rev units": "non_revenue",
+    "total vacant units": "vacant",
+    "totals:": "totals",
+    "totals": "totals",
+}
+
+
+def _parse_summary_groups(rows: list[tuple[Any, ...]]) -> dict[str, Any] | None:
+    """Unit counts and the market-rent total from a Yardi "Summary Groups" block.
+
+    The block's two header rows name the columns ("Market" over "Rent", "# Of"
+    over "Units"). Returns ``units`` and ``market_rent_total`` from the
+    Current/Notice/Vacant Residents row (else Totals), ``occupied_units``,
+    ``vacant_units`` and ``non_revenue_units``; ``None`` when the block has no
+    unit count.
+    """
+    if len(rows) < 3:
+        return None
+    top, bottom = rows[0], rows[1]
+    width = max(len(top), len(bottom))
+    labels = []
+    for j in range(width):
+        parts = [str(r[j]).strip() for r in (top, bottom) if j < len(r) and r[j] not in (None, "")]
+        labels.append(" ".join(parts).lower())
+    market_idx = next((j for j, label in enumerate(labels) if label == "market rent"), None)
+    units_idx = next((j for j, label in enumerate(labels) if label in {"# of units", "units"}), None)
+    if units_idx is None:
+        return None
+
+    found: dict[str, tuple[Any, ...]] = {}
+    for row in rows[2:]:
+        label = str(row[0]).strip().lower() if row and row[0] is not None else ""
+        if label.startswith("summary of charges"):
+            break
+        key = _SUMMARY_GROUP_ROWS.get(label)
+        if key and key not in found:
+            found[key] = row
+    base = found.get("current") or found.get("totals")
+    if base is None:
+        return None
+
+    def _count(key: str) -> int | None:
+        row = found.get(key)
+        value = _signed_float(_cell(row, units_idx)) if row is not None else None
+        return int(round(value)) if value is not None else None
+
+    units = _signed_float(_cell(base, units_idx))
+    if units is None:
+        return None
+    market_total = _signed_float(_cell(base, market_idx))
+    return {
+        "source": "yardi_summary_groups",
+        "units": int(round(units)),
+        "occupied_units": _count("occupied"),
+        "vacant_units": _count("vacant"),
+        "non_revenue_units": _count("non_revenue"),
+        "market_rent_total": round(market_total, 2) if market_total is not None else None,
+    }
+
+
+def _rent_charges_from_charge_summary(rows: list[tuple[Any, ...]]) -> float | None:
+    """The rent charge-code total from a "Summary of Charges by Charge Code" block."""
+    start = next(
+        (
+            i for i, row in enumerate(rows)
+            if row and row[0] is not None and str(row[0]).strip().lower().startswith("summary of charges")
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    amount_idx: int | None = None
+    total = 0.0
+    found = False
+    for row in rows[start + 1:]:
+        if not row or row[0] is None:
+            continue
+        code = str(row[0]).strip().lower()
+        if code == "charge code":
+            amount_idx = next(
+                (j for j, cell in enumerate(row) if str(cell or "").strip().lower() == "amount"), None
+            )
+            continue
+        if amount_idx is None:
+            continue
+        if code == "total":
+            break
+        if code in RENT_CHARGE_CODES:
+            value = _signed_float(_cell(row, amount_idx))
+            if value is not None:
+                total += value
+                found = True
+    return round(total, 2) if found else None
 
 
 def _is_future_or_applicant_row(normalized: dict[str, Any]) -> bool:

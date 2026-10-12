@@ -70,18 +70,24 @@ _CATEGORY_MAP: list[tuple[str, str, bool]] = [
     ("worker's compensation", "Payroll", False),
     ("workers compensation", "Payroll", False),
     ("401k", "Payroll", False),
+    ("employee benefit", "Payroll", False),
     ("repair", "Repairs & Maintenance", False),
     ("maintenance", "Repairs & Maintenance", False),
     ("contract serv", "Contract Services", False),
+    ("service contract", "Contract Services", False),
     ("security", "Security", False),
     ("turnover", "Turnover / Make-Ready", False),
     ("make-ready", "Turnover / Make-Ready", False),
     ("landscap", "Landscaping / Grounds", False),
+    ("lawn", "Landscaping / Grounds", False),
     ("grounds", "Landscaping / Grounds", False),
     ("marketing", "Marketing / Advertising", False),
     ("advertis", "Marketing / Advertising", False),
     ("leasing", "Marketing / Advertising", False),
+    ("commission", "Marketing / Advertising", False),
     ("admin", "Administrative", False),
+    ("license", "Administrative", False),
+    ("permit", "Administrative", False),
     ("water", "Water & Sewer", True),
     ("sewer", "Water & Sewer", True),
     ("electric", "Electricity", True),
@@ -115,6 +121,20 @@ _SORTED_CATEGORY_MAP: list[tuple[str, str, bool]] = sorted(
 )
 
 _LEADING_ACCOUNT_CODE_RE = re.compile(r"^\d+(?:\.\d+)?\s+")
+
+# Employee-benefit insurance is a payroll cost, not property insurance:
+# "Health/Life Insurance", "Dental Insurance", "Workers Comp Insurance".
+_PAYROLL_BENEFIT_INSURANCE_RE = re.compile(
+    r"\b(?:health|life|dental|vision|medical|disability|workers?|worker's|"
+    r"employees?|group|benefits?|hsa)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_payroll_benefit_insurance(lowered_label: str) -> bool:
+    return "insurance" in lowered_label and bool(
+        _PAYROLL_BENEFIT_INSURANCE_RE.search(lowered_label)
+    )
 
 
 @dataclass
@@ -194,6 +214,8 @@ def _normalize_category(raw_name: str) -> tuple[str, bool]:
     resolve to the most specific category.
     """
     lower = _LEADING_ACCOUNT_CODE_RE.sub("", raw_name.strip().lower())
+    if _is_payroll_benefit_insurance(lower):
+        return "Payroll", False
     best: tuple[int, int, str, int] | None = None  # (pos, -len, canonical, recoverable_rank)
     for pattern, canonical, recoverable in _SORTED_CATEGORY_MAP:
         pos = lower.find(pattern)
@@ -247,6 +269,8 @@ def _text_indent_level(raw_text: str) -> int:
 def _matches_category_map(text: str) -> str | None:
     """Return the canonical _CATEGORY_MAP hit, or None on no match."""
     lower = _LEADING_ACCOUNT_CODE_RE.sub("", text.strip().lower())
+    if _is_payroll_benefit_insurance(lower):
+        return "Payroll"
     best: tuple[int, int, str, bool] | None = None
     for pattern, canonical, recoverable in _SORTED_CATEGORY_MAP:
         pos = lower.find(pattern)
@@ -300,7 +324,8 @@ def parse_t12_with_provenance(
     """
     path = Path(path)
     _warnings: list[ParseWarning] = []
-    rows = _load_rows(path, _warnings)
+    _source_labels: dict[str, list[str]] = {}
+    rows = _load_rows(path, _warnings, _source_labels)
 
     # Accumulate by canonical name (handles duplicate rows)
     totals: dict[str, float] = {}
@@ -320,7 +345,9 @@ def parse_t12_with_provenance(
         totals[canonical] = totals.get(canonical, 0.0) + annual_total
         # OR semantics: any source flagged recoverable → recoverable.
         recoverables[canonical] = recoverables.get(canonical, False) or recoverable
-        source_rows.setdefault(canonical, []).append(category_raw.strip())
+        source_rows.setdefault(canonical, []).extend(
+            _source_labels.get(category_raw) or [category_raw.strip()]
+        )
 
     opex_table = [
         {
@@ -383,6 +410,32 @@ _RENTAL_INCOME_PATTERNS = (
     "NON REVENUE",
     "DELINQUEN",
     "PREPAID RENT",
+    "OVER/UNDER SCHEDULE",
+    "UNDER/OVER SCHEDULE",
+    "RENT DISCOUNT",
+    "EMPLOYEE DISCOUNT",
+)
+
+# Section headers whose lines are utility recoveries, explicit other income,
+# or rent-side adjustments, whatever the individual line says.
+_RECOVERY_SECTION_PATTERNS = ("REIMBURS", "RUBS", "UTILIT", "BILLBACK")
+_OTHER_INCOME_SECTIONS = {
+    "OTHER INCOME",
+    "OTHER REVENUE",
+    "MISC INCOME",
+    "MISC. INCOME",
+    "MISC REVENUE",
+    "MISCELLANEOUS INCOME",
+    "MISCELLANEOUS REVENUE",
+}
+_RENTAL_SECTION_PATTERNS = (
+    "RENTAL LOSS",
+    "RENT LOSS",
+    "GROSS POTENTIAL",
+    "POTENTIAL RENT",
+    "VACANCY",
+    "CONCESSION",
+    "BAD DEBT",
 )
 
 _RECOVERY_INCOME_PATTERNS = (
@@ -464,18 +517,31 @@ def reconcile_t12(
 
 
 def _classify_income_line(label: str, section: str | None) -> str:
+    """``rental``, ``recovery`` or ``other`` for one T12 income line.
+
+    Order: a rent-side label (market rent, loss/gain to lease, vacancy,
+    concessions, discounts, bad debt) is rental wherever it sits. Otherwise the
+    statement's own grouping wins: a utility/RUBS/reimbursement section is
+    recovery and an explicit other/misc income section is other, so the
+    programs tie to the statement's subtotals. Then label patterns, then a
+    rent-loss section, else other.
+    """
     normalized = _normalize_statement_label(label)
     section_normalized = _normalize_statement_label(section or "")
     if any(pattern in normalized for pattern in _RENTAL_INCOME_PATTERNS):
         return "rental"
-    if any(pattern in normalized for pattern in _RECOVERY_INCOME_PATTERNS) or any(
-        pattern in section_normalized for pattern in ("REIMBURS", "RUBS", "UTILIT", "BILLBACK")
-    ):
+    if any(pattern in section_normalized for pattern in _RECOVERY_SECTION_PATTERNS):
+        return "recovery"
+    if section_normalized in _OTHER_INCOME_SECTIONS:
+        return "other"
+    if any(pattern in normalized for pattern in _RECOVERY_INCOME_PATTERNS):
         return "recovery"
     if section_normalized in {"RENT", "RENTS", "RENTAL INCOME", "RENTAL REVENUE"} or normalized in {
         "RENT",
         "RENTS",
     }:
+        return "rental"
+    if any(pattern in section_normalized for pattern in _RENTAL_SECTION_PATTERNS):
         return "rental"
     return "other"
 
@@ -487,6 +553,13 @@ def _is_income_summary_row(label: str) -> bool:
     if normalized.startswith("GROSS ") and ("INCOME" in normalized or "REVENUE" in normalized):
         return True
     return normalized in {"INCOME", "REVENUE", "REVENUES"}
+
+
+def _is_gpr_total_row(label: str) -> bool:
+    normalized = _normalize_statement_label(_LEADING_ACCOUNT_CODE_RE.sub("", label.strip()))
+    return normalized.startswith("TOTAL ") and (
+        "GROSS POTENTIAL" in normalized or "POTENTIAL RENT" in normalized
+    )
 
 
 def _annual_statement_amount(values: list[float | None]) -> float:
@@ -501,7 +574,10 @@ def _extract_income_and_totals(
 
     Income lines are rows above the statement's income boundary (``Total
     Income`` and similar) or, failing that, above the operating-expense
-    header. Opex-only schedules return no income lines and no totals.
+    header. Opex-only schedules return no income lines and no totals. A
+    non-zero gross potential rent total row (``TOTAL GROSS POTENTIAL RENT``)
+    is kept as ``totals["gross_potential_rent"]``, the rent basis for T12
+    loss rates.
     """
     prepared: list[tuple[str, list[float | None], bool]] = []
     for raw_row in raw_rows:
@@ -553,6 +629,10 @@ def _extract_income_and_totals(
             section_amounts = []
             continue
         if _is_income_summary_row(label):
+            if "gross_potential_rent" not in totals and _is_gpr_total_row(label):
+                gpr_total = _annual_statement_amount(values)
+                if gpr_total:
+                    totals["gross_potential_rent"] = gpr_total
             continue
         amount = _annual_statement_amount(values)
         if (
@@ -577,9 +657,15 @@ def _extract_income_and_totals(
 def _load_rows(
     path: Path,
     warnings: list[ParseWarning] | None = None,
+    source_labels: dict[str, list[str]] | None = None,
 ) -> list[tuple[str, list[float | None]]]:
-    """Load rows from CSV or Excel. Returns (category_name, [month_values...])."""
-    return _extract_statement_rows(_load_raw_rows(path), warnings)
+    """Load rows from CSV or Excel. Returns (category_name, [month_values...]).
+
+    When ``source_labels`` is given and the statement resolves through its own
+    nested sections, it is filled with canonical category -> the raw statement
+    lines that fed it.
+    """
+    return _extract_statement_rows(_load_raw_rows(path), warnings, source_labels)
 
 
 def _load_raw_rows(path: Path) -> list[Any]:
@@ -795,6 +881,187 @@ def _detect_hierarchy(
     return groups
 
 
+@dataclass
+class _Section:
+    """One statement section: a header row, its lines, nested sections, its total."""
+
+    header: str
+    detail_rows: list[tuple[str, float]]
+    children: list["_Section"]
+    total_label: str | None = None
+    total: float | None = None
+
+    def content_total(self) -> float:
+        return sum(amount for _, amount in self.detail_rows) + sum(
+            child.total or 0.0 for child in self.children
+        )
+
+
+def _annual_row_amount(values: list[float | None]) -> float:
+    numeric = _strip_trailing_total_column([v for v in values if v is not None])
+    return sum(numeric[:12])
+
+
+def _parse_nested_sections(
+    opex_rows: list[tuple[str, str, list[float | None]]],
+) -> list[_Section] | None:
+    """Parse an opex window where every section closes with its own total row.
+
+    Yardi ``ysi_is`` and similar exports open each section with a value-less
+    header row and close it with a ``TOTAL ...`` row (or, sometimes, a row named
+    exactly like the header), and sections nest (``REPAIRS & MAINTENANCE``
+    holding ``EXTERIOR`` and ``INTERIOR``, each with its own total). A total
+    row closes the innermost open section and must tie to that section's
+    lines plus its closed child sections.
+
+    Returns the top-level sections, or ``None`` when the window is not cleanly
+    nested (a line outside any section, a total that doesn't tie, a section
+    with lines that never closes, fewer than two closed sections). The caller
+    then falls back to the flat/grouped heuristics, so other layouts are
+    unaffected.
+    """
+    roots: list[_Section] = []
+    stack: list[_Section] = []
+    closed = 0
+
+    def _close(label: str, amount: float) -> None:
+        nonlocal closed
+        section = stack.pop()
+        section.total_label = label
+        section.total = amount
+        closed += 1
+        (stack[-1].children if stack else roots).append(section)
+
+    for stripped, _raw, values in opex_rows:
+        if _matches_section_total(stripped):
+            break
+        if not any(v is not None for v in values):
+            stack.append(_Section(header=stripped, detail_rows=[], children=[]))
+            continue
+        if not stack:
+            return None
+        amount = _annual_row_amount(values)
+        top = stack[-1]
+        normalized = _normalize_statement_label(stripped)
+        has_content = bool(top.detail_rows or top.children)
+        if normalized.startswith("TOTAL "):
+            if has_content and not _ties_to_section(amount, [top.content_total()]):
+                return None
+            if not has_content and abs(amount) > 0.005:
+                return None
+            _close(stripped, amount)
+        elif (
+            has_content
+            and normalized == _normalize_statement_label(top.header)
+            and _ties_to_section(amount, [top.content_total()])
+        ):
+            # A total row named like its header (e.g. " OTHER INCOME").
+            _close(stripped, amount)
+        else:
+            top.detail_rows.append((stripped, amount))
+
+    # A wrapper header that never closes is transparent only when it holds
+    # nothing but closed sections; open lines mean the structure is not nested.
+    while stack:
+        section = stack.pop()
+        if section.detail_rows:
+            return None
+        (stack[-1].children if stack else roots).extend(section.children)
+    if closed < 2:
+        return None
+    return roots
+
+
+def _is_combined_tax_insurance(label: str) -> bool:
+    """True for "TAXES AND INSURANCE", "TAXES & INSURANCE", "TAX & INSURANCE"."""
+    normalized = " ".join(_normalize_statement_label(label).replace("&", " AND ").split())
+    return bool(re.search(r"\bTAX(?:ES)? AND INSURANCE\b", normalized))
+
+
+# A section mapped to one of these is a container: some of its lines are
+# tracked as their own categories. Every other mapped section is taken whole
+# at its own total, so payroll benefit insurance stays in Payroll and repair
+# lines named like utilities stay in Repairs & Maintenance.
+_CONTAINER_SPLITS: dict[str, frozenset[str]] = {
+    "Contract Services": frozenset({"Trash", "Landscaping / Grounds", "Security"}),
+}
+_OTHER_OPEX = "Other Operating Expenses"
+
+
+def _section_category(section: _Section) -> str | None:
+    for label in (section.total_label, section.header):
+        if not label or _matches_section_total(label):
+            continue
+        canonical = _normalize_subtotal_category(label) or _matches_category_map(label)
+        if canonical is not None:
+            return canonical
+    return None
+
+
+def _resolve_sections(
+    sections: list[_Section],
+    warnings: list[ParseWarning],
+    fallback: str | None = None,
+) -> list[tuple[str, float, list[str]]]:
+    """Resolve nested sections to (canonical category, annual amount, source lines).
+
+    A section is never added on top of its own lines or child sections: it is
+    taken whole at its total (a homogeneous category), or split into its lines
+    (a container, a combined taxes & insurance section, or an unmapped
+    section), never both.
+    """
+    resolved: list[tuple[str, float, list[str]]] = []
+    for section in sections:
+        amount = section.total if section.total is not None else section.content_total()
+        nonzero = [label for label, value in section.detail_rows if value != 0]
+        if amount == 0 and not nonzero and not section.children:
+            continue
+        category = _section_category(section)
+        combined = _is_combined_tax_insurance(section.total_label or "") or _is_combined_tax_insurance(
+            section.header
+        )
+        if category is not None and not combined and category not in _CONTAINER_SPLITS:
+            child_labels = [
+                label
+                for _, _, labels in _resolve_sections(section.children, [], category)
+                for label in labels
+            ]
+            resolved.append((category, amount, nonzero + child_labels or [section.header]))
+            continue
+
+        section_fallback = category or fallback
+        splits = _CONTAINER_SPLITS.get(category or "", frozenset())
+        for label, value in section.detail_rows:
+            if value == 0:
+                continue
+            match = _matches_category_map(label)
+            if combined:
+                if match is None:
+                    lowered = label.lower()
+                    match = (
+                        "Real Estate Taxes" if "tax" in lowered
+                        else "Insurance" if "insur" in lowered
+                        else None
+                    )
+            elif category is not None:
+                match = match if match in splits else category
+            if match is None:
+                match = section_fallback
+            if match is None:
+                warnings.append(
+                    ParseWarning(
+                        tier_reached=4,
+                        raw_label=label,
+                        amount=value,
+                        category_assigned=_OTHER_OPEX,
+                    )
+                )
+                match = _OTHER_OPEX
+            resolved.append((match, value, [label]))
+        resolved.extend(_resolve_sections(section.children, warnings, section_fallback))
+    return resolved
+
+
 def _resolve_groups(
     groups: list[OpexGroup],
     warnings: list[ParseWarning],
@@ -838,7 +1105,7 @@ def _resolve_groups(
         # must remain separate when they reconcile to the subtotal.
         if (
             group.subtotal_row and group.detail_rows
-            and "TAXES AND INSURANCE" in _normalize_statement_label(group.subtotal_row[0])
+            and _is_combined_tax_insurance(group.subtotal_row[0])
         ):
             detail_categories = {
                 match for detail_label, _ in group.detail_rows
@@ -952,6 +1219,7 @@ def _get_raw_label(raw_row: Any) -> str:
 def _extract_statement_rows(
     raw_rows: Any,
     warnings: list[ParseWarning] | None = None,
+    source_labels: dict[str, list[str]] | None = None,
 ) -> list[tuple[str, list[float | None]]]:
     """Extract expense rows from a T12/P&L export.
 
@@ -1007,6 +1275,15 @@ def _extract_statement_rows(
         )
         if in_opex and current_macro_section != "non_operating_expenses":
             opex_raw_rows.append((label, raw_label, values))
+
+    nested = _parse_nested_sections(opex_raw_rows)
+    if nested is not None:
+        totals_by_category: dict[str, float] = {}
+        for canonical, amount, labels in _resolve_sections(nested, warnings):
+            totals_by_category[canonical] = totals_by_category.get(canonical, 0.0) + amount
+            if source_labels is not None:
+                source_labels.setdefault(canonical, []).extend(labels)
+        return [(label, [round(amount, 2)]) for label, amount in totals_by_category.items()]
 
     groups = _detect_hierarchy(opex_raw_rows)
     if groups:
@@ -1341,10 +1618,10 @@ def _is_income_boundary_row(label: str, has_numeric_values: bool) -> bool:
     if not has_numeric_values:
         return False
     normalized = _normalize_statement_label(label)
-    if not normalized.startswith(("TOTAL ", "NET ", "GROSS ")):
-        return False
     if "NON-OPERATING" in normalized:
         return False
+    # Exact labels only. "EFFECTIVE GROSS INCOME" (Yardi `ysi_is` and others)
+    # is the income boundary even though it carries no TOTAL/NET/GROSS prefix.
     return normalized in {
         "TOTAL INCOME",
         "TOTAL REVENUE",
