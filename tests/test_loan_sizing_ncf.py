@@ -24,7 +24,9 @@ from engine.assumptions.rationale import rationale_for
 from engine.assumptions.resolver import AssumptionOverrideError
 from engine.backsolve_policy import BacksolveInputError, resolve_policy
 from engine.engine import run_underwriting
-from engine.modules.debt import AGENCY_MIN_DSCR, _annual_debt_constant, compute_agency_loan_terms
+from engine.feasibility import classify
+from engine.modules.debt import AGENCY_MIN_DSCR, _annual_debt_constant, compute_agency_loan_terms, size_refi_loan
+from engine.modules.time_grid import TimeGrid
 from engine.validator import validate_deal
 from tests import deal_library as dl
 
@@ -274,3 +276,127 @@ def test_backsolve_discloses_the_basis_and_prices_dscr_on_it():
     assert overridden["results"]["metrics"]["dscr"]["basis"] == "noi_before_capex"
     entry = overridden["case"]["assumptions"]["entries"]["loan_sizing_noi_basis"]
     assert entry["source"] == "house:backsolve_policy" and entry["value"] == "noi_before_capex"
+
+
+# ── the stabilized refinance: sized on the same basis ────────────────────
+
+REFI = {
+    "trigger_month": "2027-01",
+    "sizing_method": "dscr",
+    "target_dscr": 1.25,
+    "perm_loan_terms": {"rate": 0.055, "amort_years": 30},
+}
+
+
+def _refi_rows(charge_per_month=None, floor_per_month=None):
+    rows = []
+    for month in TimeGrid.build("2025-01", "2030-12").month_ids:
+        row = {"month": month, "net_operating_income": 50_000.0}
+        if charge_per_month is not None:
+            row["replacement_reserves"] = charge_per_month
+        if floor_per_month is not None:
+            row["replacement_reserve_floor"] = floor_per_month
+        rows.append(row)
+    return rows
+
+
+def _debt_rows():
+    return [{"month": r["month"], "ending_balance": 5_000_000.0} for r in _refi_rows()]
+
+
+def _expected_refi_loan(cash_flow):
+    constant = _annual_debt_constant(Decimal("0.055"), 30)
+    return float((Decimal(str(cash_flow)) / (Decimal("1.25") * constant) / 1000).quantize(Decimal("1")) * 1000)
+
+
+def test_refi_without_a_charge_sizes_on_noi_as_before():
+    result = size_refi_loan(REFI, _refi_rows(), _debt_rows())
+    assert result["sized_commitment"] == _expected_refi_loan(600_000)
+    assert result["noi_used"] == result["sizing_cash_flow"] == 600_000.0
+    assert result["below_noi_deduction"] == 0.0
+    assert result["sizing_noi_basis"] == "ncf_after_capex_charge"
+
+
+def test_refi_loan_falls_when_the_capex_charge_rises():
+    light = size_refi_loan(REFI, _refi_rows(2_500.0), _debt_rows())
+    heavy = size_refi_loan(REFI, _refi_rows(7_500.0), _debt_rows())
+    assert heavy["sized_commitment"] < light["sized_commitment"]
+    # The forward year's charge (12 months from the refi date) comes off the trailing NOI.
+    assert heavy["below_noi_deduction"] == 90_000.0
+    assert heavy["sizing_cash_flow"] == 510_000.0
+    assert heavy["sized_commitment"] == _expected_refi_loan(510_000)
+    assert heavy["deduction_window"] == ["2027-01", "2027-12"]
+    assert heavy["stabilized_noi"] == 600_000.0  # NOI itself is unchanged
+
+
+@pytest.mark.parametrize("basis, deduction", [
+    ("ncf_after_capex_charge", 90_000.0),
+    ("ncf_after_lender_reserve", 36_000.0),
+    ("noi_before_capex", 0.0),
+])
+def test_refi_respects_the_basis_override(basis, deduction):
+    result = size_refi_loan(REFI, _refi_rows(7_500.0, 3_000.0), _debt_rows(), noi_basis=basis)
+    assert result["sizing_noi_basis"] == basis
+    assert result["below_noi_deduction"] == deduction
+    assert result["sized_commitment"] == _expected_refi_loan(600_000 - deduction)
+
+
+def test_engine_refi_is_sized_on_the_canonical_basis(minimal_deal_inputs):
+    def run(per_unit, basis=None):
+        deal = _with_recurring(minimal_deal_inputs, per_unit, basis)
+        deal["refi_event"] = dict(REFI, trigger_month="2028-07")
+        return run_underwriting(deal, skip_validation=True)["refi"]
+
+    light, heavy = run(300.0), run(1_200.0)
+    assert heavy["sized_commitment"] < light["sized_commitment"]
+    assert heavy["below_noi_deduction"] == pytest.approx(1_200.0 * UNITS, abs=1.0)
+    assert heavy["sizing_noi_basis"] == "ncf_after_capex_charge"
+    on_noi = run(1_200.0, "noi_before_capex")
+    assert on_noi["below_noi_deduction"] == 0.0
+    assert on_noi["sized_commitment"] > heavy["sized_commitment"]
+
+
+# ── feasibility: the DSCR floors apply on the reported basis ─────────────
+
+
+def _feasibility_metrics(min_dscr, **dscr):
+    return {
+        "irr": {"levered_irr": 0.15},
+        "equity_multiple": {"levered_em": 1.8},
+        "dscr": {"minimum_dscr": min_dscr, "average_dscr": min_dscr, **dscr},
+        "yields": {"going_in_cap_rate": 0.065, "exit_cap_rate": 0.07},
+    }
+
+
+def test_feasibility_floors_apply_to_the_ncf_dscr_and_name_the_basis():
+    metrics = _feasibility_metrics(
+        1.08, basis="ncf_after_capex_charge", noi_before_capex={"minimum_dscr": 1.30},
+    )
+    result = classify(metrics)
+    assert result.verdict == "fail"
+    assert "dscr_below_1_10_likely_covenant_breach" in result.sanity_flags
+    reason = result.reasons[result.sanity_flags.index("dscr_below_1_10_likely_covenant_breach")]
+    assert "NCF after capex charge" in reason and "1.30 on NOI" in reason
+    warn = classify(_feasibility_metrics(1.15, basis="ncf_after_lender_reserve"))
+    assert warn.sanity_flags == ["dscr_below_1_20"]
+    assert "NCF after lender reserve" in warn.reasons[0]
+
+
+def test_feasibility_without_a_basis_reads_as_before():
+    result = classify(_feasibility_metrics(1.08))
+    assert result.reasons == ["Min DSCR 1.08 is below the 1.10 covenant-breach threshold."]
+
+
+def test_the_engine_feasibility_reads_the_ncf_dscr(minimal_deal_inputs):
+    deal = _with_recurring(minimal_deal_inputs, 1_500.0)
+    # Lever the deal up until the NOI-based minimum DSCR is about 1.16x.
+    noi_dscr = run_underwriting(copy.deepcopy(deal))["metrics"]["dscr"]["noi_before_capex"]["minimum_dscr"]
+    deal["debt_terms"]["commitment"] = round(deal["debt_terms"]["commitment"] * noi_dscr / 1.16, -3)
+    results = run_underwriting(deal)
+    dscr = results["metrics"]["dscr"]
+    # The NOI-based DSCR alone would clear 1.10; the NCF one does not.
+    assert dscr["noi_before_capex"]["minimum_dscr"] >= 1.10 > dscr["minimum_dscr"]
+    flags = results["feasibility"]["sanity_flags"]
+    assert "dscr_below_1_10_likely_covenant_breach" in flags
+    reason = results["feasibility"]["reasons"][flags.index("dscr_below_1_10_likely_covenant_breach")]
+    assert "NCF after capex charge" in reason
