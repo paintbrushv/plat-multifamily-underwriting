@@ -206,8 +206,25 @@ How each key combines sources:
 ### 5. Gates and guardrails
 
 - **Blockers** are data-integrity failures only: the T12 doesn't reconcile
-  (UPL-42), required tax millage is missing, or the deal has no unit cohorts.
+  (UPL-42), the rent roll doesn't reconcile to its own export summary,
+  required tax millage is missing, or the deal has no unit cohorts.
   The validator emits an ERROR and the engine refuses to run.
+- **Ingest reconciliation gates** (`metadata.ingest_gate`) tie each parsed
+  document to the totals the export itself prints; the ingest CLI prints each
+  check:
+  - T12 (`t12_reconciliation`): parsed opex vs the statement's total
+    operating expenses and parsed income vs its income boundary (total income,
+    total revenue or effective gross income), each within 0.5%.
+  - Rent roll (`rent_roll_reconciliation`): when the export carries its own
+    summary (e.g. a Yardi "Summary Groups" block), parsed units and vacant
+    units must match it exactly (non-revenue units may count either way) and
+    the monthly market-rent total within 0.5%; when the export also totals its
+    rent charge codes, the parsed in-place rent must tie within 0.5% too.
+  - A check that fails is a blocker (`t12_<side>_does_not_reconcile`,
+    `rent_roll_<check>_does_not_reconcile`) and the gate is BLOCKED. A
+    document with no totals to tie to is UNVERIFIED: an intake sanity flag
+    (`t12_totals_not_found_reconciliation_unverified`,
+    `rent_roll_summary_not_found_reconciliation_unverified`), never a blocker.
 - **Flags** are review prompts. They cover any entry from `house:*` or
   `engine_fallback`, provider data with low confidence, and values outside the
   submarket or vintage typical band. The validator emits a WARNING and
