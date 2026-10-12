@@ -178,6 +178,13 @@ python runs/ingest_deal.py --property-id SYN-A \
   when R&M is short and payroll is high; override the row to set the credit
   (ADR 0003 decision (j)).
 
+  Every run also reports an exit-cap sensitivity grid
+  (`results.exit_cap_sensitivity`, and an `Exit_Cap_Sensitivity` sheet with
+  `--xlsx`): the base case at -50, -25, 0, +25, +50, +75, +100 and +150 bps
+  around the exit cap it ran with (`HOUSE_EXIT_CAP_SENSITIVITY_OFFSETS_BPS`),
+  each point pinned, with exit value, net sale proceeds, IRR and equity
+  multiples per point.
+
 **2. Review** `output/deal.assumptions.json` (one row per assumption: value,
 unit, source, basis, default, override, delta, guardrail). Rows sourced from
 `house:*` or `engine_fallback` are flagged for review. For Excel, run
