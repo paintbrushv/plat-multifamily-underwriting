@@ -375,6 +375,48 @@ def test_the_register_shows_the_three_buckets_with_their_rationale():
     assert "binds in year 1" in html and "max(recurring capex, replacement reserve)" in html
 
 
+# ── ingest CLI ───────────────────────────────────────────────────────────
+
+
+def test_ingest_cli_capital_plan_flags(tmp_path, monkeypatch, capsys):
+    from runs import ingest_deal
+
+    deal = dl.load_deal("c_value_add_1970s_reno")
+    folder = deal["_dir"]
+    pca = tmp_path / "pca.json"
+    pca.write_text(json.dumps({"immediate_capex": 250_000, "recurring_capex_per_unit": 2_400,
+                               "as_of": "2026-08-01", "reference": "Synthetic PCA"}), encoding="utf-8")
+    output = tmp_path / "deal.json"
+    monkeypatch.setattr(sys, "argv", [
+        "ingest_deal.py", "--property-id", "Synthetic CLI", "--rent-roll", str(folder / "rent_roll.csv"),
+        "--t12", str(folder / "t12.csv"), "--start", deal["analysis"]["start"], "--end", deal["analysis"]["end"],
+        "--deal-type", "value_add", "--year-built", "1974", "--deferred-maintenance", "--no-market-data",
+        "--pca", str(pca), "--recurring-capex-per-unit", "1800", "--immediate-capex", "90000",
+        "--immediate-capex-funding", "lender_holdback", "--output", str(output),
+    ])
+    assert ingest_deal.main() == 0
+    out = capsys.readouterr().out
+    canonical = json.loads(output.read_text(encoding="utf-8"))
+    assert canonical["deal_profile"]["deferred_maintenance"] is True
+    plan = canonical["capital_plan"]
+    assert plan["pca"]["recurring_capex_per_unit"] == 2_400.0
+    assert plan["recurring_capex"]["per_unit_annual"] == 2_400.0  # PCA > analyst
+    assert plan["immediate_capex"] == {"amount": 250_000.0, "funding": "lender_holdback"}
+    entries = canonical["assumptions"]["entries"]
+    assert [c["source"] for c in entries["recurring_capex_per_unit"]["candidates"]][:2] == ["analyst", "deal:pca"]
+    assert "1. Immediate capex at close: $250,000 (deal:pca)" in out
+    assert "recurring capex binds" in out
+    assert "superseded by the PCA" in out
+
+    # Without a PCA, the analyst figures are the values; a bad funding mode is refused.
+    monkeypatch.setattr(sys, "argv", [
+        "ingest_deal.py", "--canonical-json", str(output), "--immediate-capex-funding", "seller_credit",
+        "--output", str(tmp_path / "bad.json"),
+    ])
+    with pytest.raises(SystemExit):
+        ingest_deal.main()
+
+
 def test_the_workbook_shows_the_buckets_and_the_charge(tmp_path, minimal_deal_inputs):
     from openpyxl import load_workbook
 
