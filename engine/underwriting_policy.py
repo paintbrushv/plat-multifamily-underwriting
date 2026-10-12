@@ -858,6 +858,29 @@ def house_exit_cap_rate(
     }
 
 
+# ── Loan sizing NOI basis (ADR 0003 §3) ──────────────────────────────────
+# HOUSE POLICY. Agency lenders size the loan on underwritten net cash flow
+# (NOI less replacement reserves), not on NOI. The house sizes the DSCR
+# constraint, and reports DSCR, on NOI less the same below-NOI capex charge
+# the cash flow deducts: max(recurring capex by vintage, lender replacement
+# reserve). An older asset that needs more capital every year therefore
+# carries a smaller loan. The basis is an overridable assumption
+# (``loan_sizing_noi_basis``); NOI-based DSCR stays visible beside it.
+#
+# - ncf_after_capex_charge: NOI - max(recurring capex, lender reserve) (default)
+# - ncf_after_lender_reserve: NOI - the lender replacement reserve only
+# - noi_before_capex: NOI (the engine's convention before this decision)
+LOAN_SIZING_NCF_AFTER_CAPEX_CHARGE = "ncf_after_capex_charge"
+LOAN_SIZING_NCF_AFTER_LENDER_RESERVE = "ncf_after_lender_reserve"
+LOAN_SIZING_NOI_BEFORE_CAPEX = "noi_before_capex"
+LOAN_SIZING_NOI_BASES = (
+    LOAN_SIZING_NCF_AFTER_CAPEX_CHARGE,
+    LOAN_SIZING_NCF_AFTER_LENDER_RESERVE,
+    LOAN_SIZING_NOI_BEFORE_CAPEX,
+)
+HOUSE_LOAN_SIZING_NOI_BASIS = LOAN_SIZING_NCF_AFTER_CAPEX_CHARGE
+
+
 def default_bad_debt_rate(
     year_built: Optional[int],
     *,

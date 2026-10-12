@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from engine.underwriting_policy import PRIMARY_COC_TARGET_PCT
+from engine.modules import loan_sizing
 from engine.modules.analysis_years import aggregate_analysis_years
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import calculate_irr, dec, month_id, round2, round4
@@ -408,6 +409,34 @@ def _full_year_unlevered_noi(
     return float(round2(dec(surface["net_operating_income"])))
 
 
+def _dscr_block(cashflow_by_year: List[Dict[str, Any]], basis: str) -> Dict[str, Any]:
+    """Minimum, average and by-year DSCR: ``loan_sizing`` cash flow on ``basis`` / debt service."""
+    by_year: List[Dict[str, Any]] = []
+    total_cf = Decimal("0")
+    total_debt_service = Decimal("0")
+    minimum: Optional[Decimal] = None
+    for year_data in cashflow_by_year:
+        cash_flow = loan_sizing.sizing_cash_flow(year_data, basis)
+        ds = dec(year_data.get("debt_service", 0))
+        total_cf += cash_flow
+        total_debt_service += ds
+        if ds > 0:
+            dscr = cash_flow / ds
+            if minimum is None or dscr < minimum:
+                minimum = dscr
+            by_year.append({"year": year_data["year"], "dscr": round2(dscr)})
+        else:
+            by_year.append({"year": year_data["year"], "dscr": None})  # No debt service
+    average = total_cf / total_debt_service if total_debt_service > 0 else None
+    return {
+        "minimum_dscr": round2(minimum) if minimum is not None else None,
+        "average_dscr": round2(average) if average is not None else None,
+        "by_year": by_year,
+        "basis": basis,
+        "basis_label": loan_sizing.LABELS[basis],
+    }
+
+
 def compute_metrics(
     time_grid: TimeGrid,
     cashflow_by_month: List[Dict[str, Any]],
@@ -416,6 +445,7 @@ def compute_metrics(
     purchase_assumptions: Optional[Dict[str, Any]] = None,
     exit_assumptions: Optional[Dict[str, Any]] = None,
     fund_by_year: Optional[List[Dict[str, Any]]] = None,
+    dscr_basis: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Compute investment performance metrics.
@@ -427,6 +457,10 @@ def compute_metrics(
         debt_by_month: Debt service details (for payoff balance)
         purchase_assumptions: Initial investment structure
         exit_assumptions: Exit parameters (cap rate, costs, timing)
+        dscr_basis: The ``loan_sizing_noi_basis`` DSCR is reported on
+            (``engine/modules/loan_sizing.py``); None is the house default,
+            underwritten NCF after the below-NOI capex charge. The NOI-based
+            DSCR is always reported beside it (``dscr.noi_before_capex``).
 
     Returns:
         Dict with irr, equity_multiple, dscr, cash_on_cash, exit, yields
@@ -472,33 +506,11 @@ def compute_metrics(
     net_sale_proceeds = dec(exit_result.get("net_sale_proceeds", 0))
     exit_month_idx = exit_result.get("exit_month_idx", len(time_grid.month_ids) - 1)
 
-    # Calculate DSCR
-    dscr_by_year: List[Dict[str, Any]] = []
-    total_noi = Decimal("0")
-    total_debt_service = Decimal("0")
-    min_dscr: Optional[Decimal] = None
-
-    for year_data in cashflow_by_year:
-        noi = dec(year_data.get("net_operating_income", 0))
-        ds = dec(year_data.get("debt_service", 0))
-        total_noi += noi
-        total_debt_service += ds
-
-        if ds > 0:
-            dscr = noi / ds
-            if min_dscr is None or dscr < min_dscr:
-                min_dscr = dscr
-            dscr_by_year.append({
-                "year": year_data["year"],
-                "dscr": round2(dscr),
-            })
-        else:
-            dscr_by_year.append({
-                "year": year_data["year"],
-                "dscr": None,  # No debt service
-            })
-
-    avg_dscr = total_noi / total_debt_service if total_debt_service > 0 else None
+    # Calculate DSCR on the loan sizing basis (underwritten NCF by default),
+    # and on NOI beside it.
+    dscr_basis = loan_sizing.resolve_basis(dscr_basis)
+    dscr_block = _dscr_block(cashflow_by_year, dscr_basis)
+    dscr_block["noi_before_capex"] = _dscr_block(cashflow_by_year, loan_sizing.NOI_BEFORE_CAPEX)
 
     # Calculate Cash-on-Cash yield by year.
     # House policy uses actual Day-0 cash outlay as the denominator everywhere:
@@ -674,11 +686,7 @@ def compute_metrics(
             "unlevered_em": round(unlev_em, 2) if unlev_em is not None else None,
             "levered_em": round(lev_em, 2) if lev_em is not None else None,
         },
-        "dscr": {
-            "minimum_dscr": round2(min_dscr) if min_dscr is not None else None,
-            "average_dscr": round2(avg_dscr) if avg_dscr is not None else None,
-            "by_year": dscr_by_year,
-        },
+        "dscr": dscr_block,
         "cash_on_cash": {
             "by_year": coc_by_year,
             "average": round2(avg_coc) if avg_coc is not None else None,

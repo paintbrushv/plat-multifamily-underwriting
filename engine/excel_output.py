@@ -135,6 +135,13 @@ def _write_summary_sheet(
     ws[f"D{row}"] = "DSCR (Min):"
     ws[f"E{row}"] = dscr_data.get("minimum_dscr")
     ws[f"E{row}"].number_format = '0.00"x"'
+    if dscr_data.get("basis_label"):
+        # DSCR is on the loan sizing basis (ADR 0003 §3); the NOI-based minimum beside it.
+        ws[f"F{row}"] = f"Basis: {dscr_data['basis_label']}"
+        row += 1
+        ws[f"D{row}"] = "DSCR on NOI (Min):"
+        ws[f"E{row}"] = (dscr_data.get("noi_before_capex") or {}).get("minimum_dscr")
+        ws[f"E{row}"].number_format = '0.00"x"'
     row += 1
 
     # Yields

@@ -243,6 +243,8 @@ def compute_agency_loan_terms(
     purchase_price: Optional[float | Decimal] = None,
     benchmark_5yr_treasury: Optional[Decimal] = None,
     agency_spread: Optional[Decimal] = None,
+    below_noi_deduction: float | Decimal = 0,
+    noi_basis: str = "noi_before_capex",
 ) -> Dict[str, Any]:
     """Size an agency (Fannie permanent) loan under DSCR + LTV constraints.
 
@@ -253,7 +255,10 @@ def compute_agency_loan_terms(
     2. **DSCR-constrained:** ``loan = NOI / (1.25 × annual debt constant)``
        where the debt constant is the lifetime amortizing payment factor at
        the all-in rate over a 30-year amort. NOI used = the more
-       conservative of T12 vs projected.
+       conservative of T12 vs projected, less ``below_noi_deduction``: agency
+       lenders size on underwritten NCF (NOI less replacement reserves), and
+       the house deducts the below-NOI capex charge its ``noi_basis``
+       (``loan_sizing_noi_basis``, ADR 0003 §3) names.
     3. **Vintage-DSCR-constrained:** identical to (2) but using the vintage-
        adjusted required DSCR from :func:`_vintage_required_dscr`. With the
        current flat-1.25 implementation this collapses onto rule (2);
@@ -272,6 +277,11 @@ def compute_agency_loan_terms(
             LTV constraint.
         benchmark_5yr_treasury: Override the hardcoded 4.0% benchmark.
         agency_spread: Override the hardcoded 150bps spread.
+        below_noi_deduction: Annual below-NOI charge deducted from the sizing
+            NOI (the caller computes it for ``noi_basis``; see
+            ``engine/modules/loan_sizing.py``). ``0`` sizes on NOI.
+        noi_basis: The ``loan_sizing_noi_basis`` the deduction is for; with
+            ``noi_before_capex`` the deduction must be 0.
 
     Returns:
         Dict matching the ``debt_terms`` shape consumed by
@@ -287,8 +297,14 @@ def compute_agency_loan_terms(
         - ``sizing_method``: one of ``"ltv_constrained"``,
           ``"dscr_constrained"``, ``"vintage_dscr_constrained"``.
         - ``rate_breakdown``: dict with treasury/spread components for audit.
-        - ``noi_used``: which NOI fed the DSCR sizing (min of t12/projected).
+        - ``noi_used``: which NOI fed the DSCR sizing (min of t12/projected),
+          before the deduction.
+        - ``below_noi_deduction``, ``sizing_cash_flow`` (``noi_used`` less the
+          deduction: what the DSCR rules size on) and ``sizing_noi_basis``.
     """
+    deduction = dec(below_noi_deduction or 0)
+    if noi_basis == "noi_before_capex" and deduction != 0:
+        raise ValueError("noi_basis noi_before_capex sizes on NOI: below_noi_deduction must be 0")
     treasury = (
         dec(benchmark_5yr_treasury) if benchmark_5yr_treasury is not None
         else BENCHMARK_5YR_TREASURY
@@ -315,6 +331,7 @@ def compute_agency_loan_terms(
         noi_for_sizing = proj
     else:
         noi_for_sizing = Decimal("0")
+    cash_flow_for_sizing = noi_for_sizing - deduction
 
     debt_constant = _annual_debt_constant(all_in_rate, AGENCY_AMORT_YEARS)
 
@@ -325,16 +342,16 @@ def compute_agency_loan_terms(
         if pp > 0:
             ltv_loan = AGENCY_MAX_LTV * pp
 
-    # Rule 2: flat 1.25 DSCR
-    if debt_constant > 0 and noi_for_sizing > 0:
-        dscr_loan = noi_for_sizing / (AGENCY_MIN_DSCR * debt_constant)
+    # Rule 2: flat 1.25 DSCR on the sizing cash flow (NOI less the deduction)
+    if debt_constant > 0 and cash_flow_for_sizing > 0:
+        dscr_loan = cash_flow_for_sizing / (AGENCY_MIN_DSCR * debt_constant)
     else:
         dscr_loan = Decimal("0")
 
     # Rule 3: vintage-adjusted DSCR
     vintage_required = _vintage_required_dscr(vintage)
-    if debt_constant > 0 and noi_for_sizing > 0:
-        vintage_loan = noi_for_sizing / (vintage_required * debt_constant)
+    if debt_constant > 0 and cash_flow_for_sizing > 0:
+        vintage_loan = cash_flow_for_sizing / (vintage_required * debt_constant)
     else:
         vintage_loan = Decimal("0")
 
@@ -348,7 +365,8 @@ def compute_agency_loan_terms(
 
     # Filter out zero/None
     valid = [(name, amt) for name, amt in candidates if amt > 0]
-    if not valid:
+    if not valid or (noi_for_sizing > 0 and cash_flow_for_sizing <= 0):
+        # No NOI to size on, or a below-NOI charge that consumes it: no DSCR loan.
         loan_amount = Decimal("0")
         sizing_method = "dscr_constrained"
     else:
@@ -387,6 +405,9 @@ def compute_agency_loan_terms(
             "all_in_rate": float(all_in_rate),
         },
         "noi_used": float(noi_for_sizing),
+        "below_noi_deduction": float(deduction),
+        "sizing_cash_flow": float(cash_flow_for_sizing),
+        "sizing_noi_basis": noi_basis,
         "required_dscr": float(vintage_required),
     }
 

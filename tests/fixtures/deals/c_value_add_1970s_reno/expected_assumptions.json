@@ -968,6 +968,23 @@
     "extra": null
   },
   {
+    "key": "loan_sizing_noi_basis",
+    "value": "ncf_after_capex_charge",
+    "unit": "enum",
+    "source": "house:loan_sizing_noi_basis",
+    "basis": "House loan sizing basis 'ncf_after_capex_charge' (HOUSE_LOAN_SIZING_NOI_BASIS): agency DSCR sizing and the reported DSCR use underwritten NCF, NOI less the below-NOI capex charge max(recurring capex, lender reserve), as agency lenders size on NOI less replacement reserves. The NOI-based DSCR is reported beside it. Alternatives: 'ncf_after_lender_reserve' (NOI less the lender reserve only) or 'noi_before_capex'.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": "ncf_after_capex_charge",
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
     "key": "opex.insurance.base",
     "value": 102000.0,
     "unit": "usd_per_year",

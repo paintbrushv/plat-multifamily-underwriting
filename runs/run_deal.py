@@ -154,6 +154,13 @@ def _fmt(value: Any, kind: str) -> str:
     return f"{value:.2f}x"
 
 
+def _dscr_basis_label(metrics: dict[str, Any]) -> str:
+    from engine.modules.loan_sizing import SHORT_LABELS
+
+    basis = _get(metrics, "dscr", "basis")
+    return SHORT_LABELS.get(basis, "NOI before capex")
+
+
 def key_metrics(results: dict[str, Any]) -> list[tuple[str, Any, str]]:
     """(label, value, kind) for the headline metrics of an engine result."""
     metrics = results.get("metrics") or {}
@@ -163,7 +170,8 @@ def key_metrics(results: dict[str, Any]) -> list[tuple[str, Any, str]]:
         ("Levered IRR", _get(metrics, "irr", "levered_irr"), "pct"),
         ("Levered equity multiple", _get(metrics, "equity_multiple", "levered_em"), "x"),
         ("Unlevered equity multiple", _get(metrics, "equity_multiple", "unlevered_em"), "x"),
-        ("Minimum DSCR", _get(metrics, "dscr", "minimum_dscr"), "x"),
+        (f"Minimum DSCR ({_dscr_basis_label(metrics)})", _get(metrics, "dscr", "minimum_dscr"), "x"),
+        ("Minimum DSCR (NOI before capex)", _get(metrics, "dscr", "noi_before_capex", "minimum_dscr"), "x"),
         ("Exit value (gross sale price)", _get(metrics, "exit", "gross_sale_price"), "usd"),
         ("Exit cap rate", _get(metrics, "yields", "exit_cap_rate"), "pct"),
     ]
