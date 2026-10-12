@@ -359,6 +359,22 @@ The whole section is optional; legacy canonical_inputs.json files without it rem
 
 ---
 
+## 13.6 Deal Profile and Assumptions (Optional, ADR 0003)
+
+`deal_profile` (`deal_type`, `msa`, `submarket`, `year_built`, `asset_class`,
+`star_tier`) and `assumptions` (`resolver_version`, `mode`, `entries`) are
+written by `engine.assumptions.resolve_assumptions`. The engine ignores both;
+the resolver writes resolved values into the canonical fields above. Each entry
+records `value`, `unit`, `source`, `basis`, `as_of`, `confidence`,
+`candidates`, `default_value`, `override`, `review_required`, and optional
+`cohort_overrides`. See `docs/adr/0003-assumption-layer.md`.
+
+`deal_type` supports `stabilized` and `value_add`; `lease_up` and `distressed`
+are reserved and rejected (validator `DEAL_TYPE_UNSUPPORTED`). Entries sourced
+from `house:*` or `engine_fallback` warn with `ASSUMPTION_REVIEW_REQUIRED`.
+
+---
+
 ## 14. Derived Outputs (Not Inputs)
 
 - Net Rental Income

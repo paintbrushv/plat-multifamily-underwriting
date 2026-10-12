@@ -21,7 +21,14 @@ from engine.ingest.property_tax_migration import (
     migrate_legacy_property_tax_policy,
 )
 from engine.property_tax import build_property_tax_policy
-from engine.underwriting_policy import default_collection_loss_rate, vintage_bucket
+from engine.assumptions import DealProfile, resolve_assumptions
+from engine.assumptions.canonical_ops import (
+    annual_opex_amount,
+    matching_opex_rows,
+    opex_bucket_for_policy,
+    sum_opex_bucket,
+)
+from engine.assumptions.profile import check_deal_type
 
 
 _KNOWN_PROPERTY_TAX_PRODUCERS = frozenset(
@@ -187,15 +194,21 @@ def build_deal_from_documents(
     term_months: int | None = None,
     exit_cap_rate: float | None = None,
     exit_month: str | None = None,
-    sale_cost_pct: float = 0.02,
+    sale_cost_pct: float | None = None,
     # Fund structure (optional)
     sponsor_equity_pct: float | None = None,
     pref_return: float | None = None,
-    acq_fee_pct: float = 0.01,
-    am_fee_pct: float = 0.015,
-    disposition_fee_pct: float = 0.01,
+    acq_fee_pct: float | None = None,
+    am_fee_pct: float | None = None,
+    disposition_fee_pct: float | None = None,
     scan_sidecar_workbooks: bool = False,
     year_built: int | None = None,
+    # Assumption layer (ADR 0003)
+    deal_type: str = "stabilized",
+    msa: str | Mapping[str, Any] | None = None,
+    submarket: str | Mapping[str, Any] | None = None,
+    metro_slug: str | None = None,
+    assumption_overrides: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a canonical deal JSON from a rent roll, T12, and optional OM.
 
@@ -230,25 +243,38 @@ def build_deal_from_documents(
         term_months: Loan term in months (default: analysis duration)
         exit_cap_rate: Exit cap rate (0-1)
         exit_month: Exit month "YYYY-MM" (default: analysis end)
-        sale_cost_pct: Sale cost percent (default 2%)
+        sale_cost_pct: Sale cost percent. When omitted, the house default
+            (``backsolve_policy.DEFAULTS``, 2%) is used and flagged for review.
         sponsor_equity_pct: GP equity share (0-1)
         pref_return: LP preferred return rate (0-1)
-        acq_fee_pct: Acquisition fee percent (default 1%)
-        am_fee_pct: Asset management fee percent (default 1.5%)
-        disposition_fee_pct: Disposition fee percent (default 1%)
+        acq_fee_pct: Acquisition fee percent (house default 1% when omitted)
+        am_fee_pct: Asset management fee percent (house default 1.5% when omitted)
+        disposition_fee_pct: Disposition fee percent (house default 1% when omitted)
         scan_sidecar_workbooks: Opt in to reading sibling workbooks in the rent
             roll's folder for bed/bath labels. Off by default: the scan opens
             every workbook in the folder.
         year_built: Subject year built. Drives the house vintage default for
             an omitted collection loss rate. When omitted, an OM-extracted
             ``year_built`` is used if available.
+        deal_type: ``stabilized`` or ``value_add`` (ADR 0003 §1). ``lease_up``
+            and ``distressed`` are reserved and raise ``UnsupportedDealTypeError``.
+        msa: MSA name, five-digit CBSA code, or a ``deal_profile.msa`` mapping.
+        submarket: Submarket name or a ``deal_profile.submarket`` mapping.
+        metro_slug: Metro slug used by market-data providers.
+        assumption_overrides: ``{key: value | {"value": ..., "note": ...}}``
+            analyst overrides applied by the assumption resolver. They win over
+            the explicit kwargs above for the same key.
 
     Returns:
-        Canonical deal inputs dict (schema_version 0.1). ``metadata.ingest_gate``
-        carries the T12 reconciliation, any blockers, and the policy defaults
-        assumed for omitted inputs; a BLOCKED gate fails validation, assumed
-        defaults only warn.
+        Canonical deal inputs dict (schema_version 0.1) with ``deal_profile``
+        and ``assumptions`` sections (ADR 0003). Every explicit rate kwarg is
+        recorded as an analyst override; omitted ones resolve to disclosed
+        defaults. ``metadata.ingest_gate`` carries the T12 reconciliation, any
+        blockers, the deal evidence the resolver reads, and (for backward
+        compatibility) ``assumed_defaults`` derived from the resolver entries;
+        a BLOCKED gate fails validation, assumed defaults only warn.
     """
+    check_deal_type(deal_type)
     from engine.modules.time_grid import TimeGrid
     from engine.ingest.t12_parser import parse_t12_statement
     from engine.ingest.rent_roll_parser import parse_rent_roll
@@ -273,7 +299,9 @@ def build_deal_from_documents(
             })
 
     unit_cohorts = roll["unit_cohorts"]
-    vacancy_rate = vacancy_rate_override if vacancy_rate_override is not None else roll["physical_vacancy_rate"]
+    # The rent-roll rate is deal evidence; an explicit vacancy_rate_override is
+    # applied by the assumption resolver as an analyst override.
+    vacancy_rate = roll["physical_vacancy_rate"]
     market_rents = roll.get("market_rent_by_cohort", {})
     start = tg.month_ids[0]
     end = tg.month_ids[-1]
@@ -307,6 +335,10 @@ def build_deal_from_documents(
         "assumed_defaults": [],
         "t12_reconciliation": reconciliation,
         "t12_other_income": other_income,
+        "evidence": {
+            "rent_roll": _rent_roll_evidence(roll, unit_cohorts, market_rents),
+            "t12": _t12_rent_evidence(statement["income_lines"]),
+        },
     }
 
     deal: dict[str, Any] = {
@@ -318,10 +350,11 @@ def build_deal_from_documents(
         },
         "unit_cohorts": unit_cohorts,
         "market_rent_curve": _build_market_rent_curve(unit_cohorts, market_rents, start, end),
+        # Flat 0% loss to lease; the resolver records it as an engine fallback.
         "loss_to_lease": _build_cohort_curve(unit_cohorts, "ltl_percent", 0.0, start, end),
         "physical_vacancy_curve": _build_cohort_curve(unit_cohorts, "vacancy_rate", vacancy_rate, start, end),
         "collection_loss_curve": [
-            # loss_rate is resolved after the OM merge (year_built may come from the OM).
+            # loss_rate is filled by the assumption resolver (year_built may come from the OM).
             {"applies_to": "ALL", "start_period": start, "end_period": end, "loss_rate": None}
         ],
         "revenue_programs": revenue_programs,
@@ -329,9 +362,10 @@ def build_deal_from_documents(
         "opex_table": opex_table,
         "growth_assumptions": {
             "growth_type": "annual_compound",
-            "annual_growth_rate": None,  # resolved after the OM merge
+            "annual_growth_rate": None,  # filled by the assumption resolver
         },
     }
+    _record_t12_opex_evidence(deal)
 
     # Merge OM data if provided (before CLI overrides, so CLI wins).
     # V1.2 — when om_parser auto-populates purchase_assumptions or
@@ -394,6 +428,9 @@ def build_deal_from_documents(
         if "exit_assumptions" in partial and exit_cap_rate is None:
             deal["exit_assumptions"] = partial["exit_assumptions"]
             if partial["exit_assumptions"].get("exit_cap_rate") is not None:
+                deal["metadata"]["ingest_gate"]["evidence"]["om"] = {
+                    "exit_cap_rate": partial["exit_assumptions"]["exit_cap_rate"],
+                }
                 om_extracted_anything = True
                 deal["metadata"]["analyst_review_required"] = True
         if (
@@ -436,60 +473,16 @@ def build_deal_from_documents(
                 "om_extraction_unavailable"
             )
 
-    # Policy inputs the analyst omitted resolve to disclosed house defaults.
-    # They never block the gate; each is recorded for review instead.
-    assumed_defaults = deal["metadata"]["ingest_gate"]["assumed_defaults"]
-    if rent_growth_rate is None:
-        rent_growth_rate = _DEFAULT_RENT_GROWTH_RATE
-        assumed_defaults.append({
-            "field": "growth_assumptions.annual_growth_rate",
-            "value": rent_growth_rate,
-            "source": "engine_fallback",
-            "basis": (
-                "No market or house rent-growth assumption was available; "
-                f"engine fallback of {rent_growth_rate:.2%} annual compound applied."
-            ),
-            "review_required": True,
-        })
-    if collection_loss_rate is None:
-        resolved_year_built, year_built_origin = _resolve_year_built(
-            year_built, deal["metadata"]
-        )
-        house_rate = default_collection_loss_rate(resolved_year_built, strategy="cashflow")
-        if house_rate is not None:
-            bucket = vintage_bucket(resolved_year_built)
-            collection_loss_rate = float(house_rate)
-            assumed_defaults.append({
-                "field": "collection_loss_curve.loss_rate",
-                "value": collection_loss_rate,
-                "source": "house_vintage_framework",
-                "basis": (
-                    f"Year built {resolved_year_built} ({year_built_origin}) maps to the "
-                    f"{bucket} vintage bucket; house collection-loss floor "
-                    f"{collection_loss_rate:.2%} (VINTAGE_FRAMEWORK_2026, cashflow strategy)."
-                ),
-                "review_required": True,
-            })
-            deal["metadata"].setdefault("year_built", resolved_year_built)
-        else:
-            collection_loss_rate = _DEFAULT_COLLECTION_LOSS_RATE
-            assumed_defaults.append({
-                "field": "collection_loss_curve.loss_rate",
-                "value": collection_loss_rate,
-                "source": "engine_fallback",
-                "basis": (
-                    "Year built unknown, so the house vintage framework could not be "
-                    f"applied; engine fallback of {collection_loss_rate:.2%} applied."
-                ),
-                "review_required": True,
-            })
-    deal["growth_assumptions"]["annual_growth_rate"] = rent_growth_rate
-    deal["collection_loss_curve"][0]["loss_rate"] = collection_loss_rate
-    for assumed in assumed_defaults:
-        short_field = assumed["field"].rsplit(".", 1)[-1]
-        deal["metadata"].setdefault("intake_sanity_flags", []).append(
-            f"assumed_default_{short_field}"
-        )
+    # Explicit rate inputs are analyst overrides; omitted ones stay as
+    # placeholders the assumption resolver fills with disclosed defaults.
+    overrides: dict[str, Any] = {}
+    for key, value, flag in (
+        ("rent_growth", rent_growth_rate, "rent_growth_rate"),
+        ("collection_loss", collection_loss_rate, "collection_loss_rate"),
+        ("physical_vacancy", vacancy_rate_override, "vacancy_rate_override"),
+    ):
+        if value is not None:
+            overrides[key] = {"value": value, "note": f"ingest input {flag}"}
 
     # Build purchase_assumptions from CLI flags
     if purchase_price is not None and "purchase_assumptions" not in deal:
@@ -516,10 +509,13 @@ def build_deal_from_documents(
     # Build exit_assumptions from CLI flags (or OM)
     if exit_cap_rate is not None and "exit_assumptions" not in deal:
         deal["exit_assumptions"] = {
-            "exit_cap_rate": exit_cap_rate,
+            "exit_cap_rate": None,
             "exit_month": exit_month or end,
-            "sale_cost_percent": sale_cost_pct,
+            "sale_cost_percent": None,
         }
+        overrides["exit_cap_rate"] = {"value": exit_cap_rate, "note": "ingest input exit_cap_rate"}
+        if sale_cost_pct is not None:
+            overrides["sale_cost_percent"] = {"value": sale_cost_pct, "note": "ingest input sale_cost_pct"}
 
     # Build fund_assumptions from CLI flags
     if sponsor_equity_pct is not None:
@@ -528,20 +524,160 @@ def build_deal_from_documents(
             "sponsor_equity_pct": sponsor_equity_pct,
             "lp_equity_pct": lp_pct,
             "preferred_return": pref_return or 0.08,
-            "acquisition_fee_pct": acq_fee_pct,
-            "asset_management_fee_pct": am_fee_pct,
-            "disposition_fee_pct": disposition_fee_pct,
+            "acquisition_fee_pct": None,
+            "asset_management_fee_pct": None,
+            "disposition_fee_pct": None,
             "promote_splits": [
                 {"tier": "Tier 1", "hurdle_irr": pref_return or 0.08,
                  "lp_share": 0.7, "gp_share": 0.3},
             ],
         }
+        for key, value, flag in (
+            ("acquisition_fee_pct", acq_fee_pct, "acq_fee_pct"),
+            ("asset_management_fee_pct", am_fee_pct, "am_fee_pct"),
+            ("disposition_fee_pct", disposition_fee_pct, "disposition_fee_pct"),
+        ):
+            if value is not None:
+                overrides[key] = {"value": value, "note": f"ingest input {flag}"}
 
+    resolved_year_built, year_built_origin = _resolve_year_built(year_built, deal["metadata"])
+    if resolved_year_built is not None:
+        deal["metadata"]["ingest_gate"]["evidence"]["year_built"] = {
+            "value": resolved_year_built,
+            "origin": year_built_origin,
+        }
+    profile = DealProfile.from_inputs(
+        deal_type=deal_type,
+        msa=msa,
+        submarket=submarket,
+        metro_slug=metro_slug,
+        year_built=resolved_year_built,
+    )
+    deal = resolve_assumptions(
+        deal,
+        deal_profile=profile,
+        overrides={**overrides, **dict(assumption_overrides or {})},
+    )
+    return sync_ingest_gate_assumptions(deal)
+
+
+# Legacy ``metadata.ingest_gate.assumed_defaults`` view of the resolver
+# entries: the two policy inputs ingest has always disclosed this way.
+_LEGACY_ASSUMED_DEFAULT_FIELDS = (
+    ("rent_growth", "growth_assumptions.annual_growth_rate"),
+    ("collection_loss", "collection_loss_curve.loss_rate"),
+)
+_ASSUMED_DEFAULT_FLAG_PREFIX = "assumed_default_"
+
+
+def _legacy_source(source: str) -> str:
+    return "house_vintage_framework" if source.startswith("house:vintage_") else source
+
+
+def sync_ingest_gate_assumptions(deal: dict[str, Any]) -> dict[str, Any]:
+    """Refresh the backward-compatible ingest disclosures from ``deal["assumptions"]``.
+
+    Rebuilds ``metadata.ingest_gate.assumed_defaults`` and the matching
+    ``assumed_default_*`` intake sanity flags from the resolver entries so
+    they never go stale after a re-resolve. A canonical without an ingest
+    gate is returned unchanged. Mutates and returns ``deal``.
+    """
+    metadata = deal.get("metadata")
+    gate = metadata.get("ingest_gate") if isinstance(metadata, dict) else None
+    if not isinstance(gate, dict):
+        return deal
+    entries = (deal.get("assumptions") or {}).get("entries") or {}
+    assumed: list[dict[str, Any]] = []
+    for key, field in _LEGACY_ASSUMED_DEFAULT_FIELDS:
+        entry = entries.get(key)
+        if not entry or not entry.get("review_required") or entry.get("value") is None:
+            continue
+        assumed.append({
+            "field": field,
+            "value": entry["value"],
+            "source": _legacy_source(entry["source"]),
+            "basis": entry.get("basis", ""),
+            "review_required": True,
+        })
+    gate["assumed_defaults"] = assumed
+    flags = [
+        flag
+        for flag in metadata.get("intake_sanity_flags") or []
+        if not flag.startswith(_ASSUMED_DEFAULT_FLAG_PREFIX)
+    ]
+    flags.extend(
+        f"{_ASSUMED_DEFAULT_FLAG_PREFIX}{item['field'].rsplit('.', 1)[-1]}" for item in assumed
+    )
+    if flags:
+        metadata["intake_sanity_flags"] = flags
+    else:
+        metadata.pop("intake_sanity_flags", None)
+    collection = entries.get("collection_loss") or {}
+    year_built = (deal.get("deal_profile") or {}).get("year_built")
+    if str(collection.get("source", "")).startswith("house:vintage_") and year_built is not None:
+        metadata.setdefault("year_built", year_built)
     return deal
 
 
-_DEFAULT_RENT_GROWTH_RATE = 0.03
-_DEFAULT_COLLECTION_LOSS_RATE = 0.005
+_T12_GPR_PATTERNS = ("GROSS POTENTIAL", "POTENTIAL RENT", "GPR")
+_T12_BAD_DEBT_PATTERNS = ("BAD DEBT", "WRITE OFF", "WRITE-OFF", "WRITEOFF", "COLLECTION LOSS")
+_T12_CONCESSION_PATTERNS = ("CONCESSION",)
+
+
+def _t12_rent_evidence(income_lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """GPR, bad debt and concessions from the T12 income section, in absolute dollars."""
+    totals: dict[str, float] = {}
+    lines: dict[str, list[str]] = {}
+    for line in income_lines:
+        label = str(line.get("label", "")).upper()
+        for field, patterns in (
+            ("gross_potential_rent", _T12_GPR_PATTERNS),
+            ("bad_debt", _T12_BAD_DEBT_PATTERNS),
+            ("concessions", _T12_CONCESSION_PATTERNS),
+        ):
+            if any(pattern in label for pattern in patterns):
+                totals[field] = round(totals.get(field, 0.0) + abs(float(line["annual_amount"])), 2)
+                lines.setdefault(field, []).append(str(line.get("label", "")))
+                break
+    if not totals:
+        return {}
+    return {**totals, "source_lines": lines}
+
+
+def _rent_roll_evidence(
+    roll: Mapping[str, Any],
+    unit_cohorts: Sequence[Mapping[str, Any]],
+    market_rents: Mapping[str, float],
+) -> dict[str, Any]:
+    """Current physical vacancy and unit-weighted loss to lease from the rent roll."""
+    evidence: dict[str, Any] = {"physical_vacancy_rate": roll["physical_vacancy_rate"]}
+    market_total = Decimal("0")
+    gap_total = Decimal("0")
+    for cohort in unit_cohorts:
+        market = market_rents.get(cohort["cohort_id"])
+        if not market:
+            continue
+        units = Decimal(str(cohort.get("unit_count") or 0))
+        market_dec = Decimal(str(market))
+        inplace = Decimal(str(cohort.get("initial_inplace_rent") or 0))
+        market_total += market_dec * units
+        gap_total += max(Decimal("0"), market_dec - inplace) * units
+    if market_total > 0:
+        evidence["loss_to_lease_rate"] = float(round(gap_total / market_total, 6))
+    return evidence
+
+
+def _record_t12_opex_evidence(deal: dict[str, Any]) -> None:
+    """T12 insurance and R&M annual dollars, annualized by calculation_type."""
+    evidence = deal["metadata"]["ingest_gate"]["evidence"]["t12"]
+    insurance_rows = matching_opex_rows(deal, "insurance")
+    if insurance_rows:
+        evidence["insurance_annual"] = float(annual_opex_amount(deal, insurance_rows[0]))
+    if any(
+        opex_bucket_for_policy(str(row.get("category_name", ""))) == "repairs_maintenance"
+        for row in deal.get("opex_table") or []
+    ):
+        evidence["repairs_maintenance_annual"] = float(sum_opex_bucket(deal, "repairs_maintenance"))
 
 
 def _resolve_year_built(

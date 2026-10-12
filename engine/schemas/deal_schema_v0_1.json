@@ -118,7 +118,15 @@
               }
             },
             "t12_reconciliation": { "type": "object" },
-            "t12_other_income": { "type": "array", "items": { "type": "object" } }
+            "t12_other_income": { "type": "array", "items": { "type": "object" } },
+            "evidence": {
+              "type": "object",
+              "description": "Deal evidence captured at ingest for the assumption resolver (ADR 0003): rent-roll physical vacancy and loss to lease, T12 GPR / bad debt / concessions, and T12 insurance and R&M annual dollars. Provenance only; the engine ignores it.",
+              "properties": {
+                "rent_roll": { "type": "object" },
+                "t12": { "type": "object" }
+              }
+            }
           }
         },
         "purchase_assumptions_source": {
@@ -272,9 +280,111 @@
           "description": "Override path to market intel JSON. Defaults to data/market_intel/{metro_slug}.json derived from deal metro."
         }
       }
-    }
+    },
+    "deal_profile": { "$ref": "#/$defs/deal_profile" },
+    "assumptions": { "$ref": "#/$defs/assumptions" }
   },
   "$defs": {
+    "deal_profile": {
+      "type": "object",
+      "description": "ADR 0003 §1. Deal context that drives assumption defaults. The engine ignores this section; engine.assumptions.resolve_assumptions reads it. lease_up and distressed are reserved deal types: the resolver and the validator reject them until those profiles exist.",
+      "additionalProperties": false,
+      "required": ["deal_type"],
+      "properties": {
+        "deal_type": {
+          "type": "string",
+          "enum": ["stabilized", "value_add", "lease_up", "distressed"],
+          "description": "stabilized maps to the house cashflow strategy and value_add to value_add. lease_up and distressed are reserved and rejected by the resolver and validator."
+        },
+        "msa": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cbsa_code": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "metro_slug": { "type": "string", "minLength": 1 }
+          }
+        },
+        "submarket": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "source_id": { "type": "string", "minLength": 1 }
+          }
+        },
+        "year_built": { "type": ["integer", "null"], "minimum": 1800, "maximum": 2100 },
+        "asset_class": { "type": "string", "enum": ["A", "B", "C"] },
+        "star_tier": { "type": "string", "enum": ["1_2", "3", "4_5"] }
+      }
+    },
+    "assumptions": {
+      "type": "object",
+      "description": "ADR 0003 §2. Provenance and override surface for resolved assumptions. Resolved values are written into the existing canonical fields; the engine ignores this section.",
+      "additionalProperties": false,
+      "required": ["resolver_version", "mode", "entries"],
+      "properties": {
+        "resolver_version": { "type": "string", "const": "plat.assumptions/1" },
+        "mode": { "type": "string", "enum": ["underwrite", "pricing"] },
+        "entries": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9_.]*$" },
+          "additionalProperties": { "$ref": "#/$defs/assumption_entry" }
+        }
+      }
+    },
+    "assumption_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value", "unit", "source", "basis", "as_of", "confidence",
+        "candidates", "default_value", "override", "review_required"
+      ],
+      "properties": {
+        "value": { "description": "What the engine uses (scalar, per-period vector, or null when the canonical does not model it)." },
+        "unit": { "type": "string", "minLength": 1 },
+        "source": {
+          "type": "string",
+          "pattern": "^(analyst|engine_fallback|deal:[a-z0-9_]+|market:[A-Za-z0-9_.\\-]+|house:[a-z0-9_]+)$"
+        },
+        "basis": { "type": "string" },
+        "as_of": { "type": ["string", "null"] },
+        "confidence": { "type": ["string", "null"], "enum": ["high", "medium", "low", null] },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source", "value"],
+            "properties": {
+              "source": { "type": "string", "minLength": 1 },
+              "value": {},
+              "basis": { "type": "string" }
+            }
+          }
+        },
+        "default_value": { "description": "What the resolver produced before any override." },
+        "override": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["value"],
+              "additionalProperties": false,
+              "properties": {
+                "value": {},
+                "note": { "type": ["string", "null"] },
+                "cohort_overrides": { "type": "object" }
+              }
+            }
+          ]
+        },
+        "review_required": { "type": "boolean" },
+        "cohort_overrides": {
+          "type": "object",
+          "description": "Optional cohort-specific values keyed by cohort_id."
+        }
+      }
+    },
     "property_summary": {
       "type": "object",
       "properties": {
