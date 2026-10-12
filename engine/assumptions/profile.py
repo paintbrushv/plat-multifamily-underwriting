@@ -72,9 +72,15 @@ class DealProfile:
     year_built: Optional[int] = None
     asset_class: Optional[str] = None
     star_tier: Optional[str] = None
+    # The asset has known deferred maintenance (ADR 0003 §3): recurring capex
+    # defaults to the high end of the vintage band and the immediate-capex
+    # budget is flagged for review. Recorded only when true.
+    deferred_maintenance: bool = False
 
     def __post_init__(self) -> None:
         check_deal_type(self.deal_type)
+        if not isinstance(self.deferred_maintenance, bool):
+            raise ValueError("deal_profile.deferred_maintenance must be true or false")
         object.__setattr__(self, "msa", _clean_mapping(self.msa, _MSA_FIELDS, "msa"))
         object.__setattr__(
             self, "submarket", _clean_mapping(self.submarket, _SUBMARKET_FIELDS, "submarket")
@@ -117,6 +123,7 @@ class DealProfile:
             year_built=year_built,
             asset_class=self.asset_class,
             star_tier=self.star_tier,
+            deferred_maintenance=self.deferred_maintenance,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -131,13 +138,17 @@ class DealProfile:
             out["asset_class"] = self.asset_class
         if self.star_tier is not None:
             out["star_tier"] = self.star_tier
+        if self.deferred_maintenance:
+            out["deferred_maintenance"] = True
         return out
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "DealProfile":
         if not isinstance(data, Mapping):
             raise ValueError("deal_profile must be an object")
-        allowed = {"deal_type", "msa", "submarket", "year_built", "asset_class", "star_tier"}
+        allowed = {
+            "deal_type", "msa", "submarket", "year_built", "asset_class", "star_tier", "deferred_maintenance",
+        }
         unknown = set(data) - allowed
         if unknown:
             raise ValueError(f"deal_profile has unknown fields: {sorted(unknown)}")
@@ -148,6 +159,9 @@ class DealProfile:
             year_built=data.get("year_built"),
             asset_class=data.get("asset_class"),
             star_tier=data.get("star_tier"),
+            deferred_maintenance=(
+                False if data.get("deferred_maintenance") is None else data["deferred_maintenance"]
+            ),
         )
 
     @classmethod
@@ -159,6 +173,7 @@ class DealProfile:
         submarket: Any = None,
         metro_slug: Optional[str] = None,
         year_built: Optional[int] = None,
+        deferred_maintenance: bool = False,
     ) -> "DealProfile":
         """Build a profile from CLI-style strings.
 
@@ -184,4 +199,5 @@ class DealProfile:
             msa=msa_map or None,
             submarket=submarket_map,
             year_built=year_built,
+            deferred_maintenance=bool(deferred_maintenance),
         )
