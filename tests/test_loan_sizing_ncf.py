@@ -70,6 +70,11 @@ def test_ltv_constrained_loan_is_unaffected_by_the_charge():
     assert light["loan_amount"] == heavy["loan_amount"] == 19_500_000.0
 
 
+def test_a_charge_that_consumes_the_noi_sizes_no_loan_rather_than_falling_back_to_ltv():
+    terms = _terms(3_000_000, price=30_000_000)
+    assert terms["loan_amount"] == 0.0 and terms["sizing_method"] == "dscr_constrained"
+
+
 def test_without_a_deduction_sizing_is_on_noi_as_before():
     before = compute_agency_loan_terms(2000, t12_noi=3_000_000, projected_noi=3_000_000, purchase_price=60_000_000)
     assert before["sizing_noi_basis"] == "noi_before_capex"
