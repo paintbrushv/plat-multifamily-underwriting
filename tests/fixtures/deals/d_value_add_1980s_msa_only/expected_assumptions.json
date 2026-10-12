@@ -189,7 +189,7 @@
     "value": 250.0,
     "unit": "usd_per_unit_year",
     "source": "house:replacement_reserve",
-    "basis": "House lender-style replacement reserve $250.00/unit/year below NOI (HOUSE_REPLACEMENT_RESERVE_PER_UNIT, the same for every vintage). Economic CapEx is disclosed separately as economic_capex_per_unit. Written as replacement_reserves = reserve per unit x units over the analysis window when the canonical carries none.",
+    "basis": "House lender-style replacement reserve $250.00/unit/year below NOI (HOUSE_REPLACEMENT_RESERVE_PER_UNIT, the same for every vintage). It is a floor, not an addition: the charge below NOI is max(recurring capex by vintage, this reserve). Written as replacement_reserves = reserve per unit x units over the analysis window when the canonical carries none.",
     "as_of": null,
     "confidence": "medium",
     "review_required": true,
@@ -202,15 +202,77 @@
     "extra": null
   },
   {
-    "key": "economic_capex_per_unit",
-    "value": 1750.0,
+    "key": "immediate_capex",
+    "value": 180000.0,
+    "unit": "usd",
+    "source": "deal:pca",
+    "basis": "Property condition assessment (Synthetic PCA (deal d), 2026-08-15): immediate needs $180,000.00. One-time capital at close for deferred maintenance / PCA immediate needs, funded with equity at close (or a lender holdback): it adds to the total equity basis and never enters NOI. It is separate from the renovation budget.",
+    "as_of": "2026-08-15",
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 180000.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "bucket": "1: immediate / deferred capex at close"
+      }
+    }
+  },
+  {
+    "key": "recurring_capex_per_unit",
+    "value": 1500.0,
     "unit": "usd_per_unit_year",
-    "source": "house:vintage_1980s",
-    "basis": "Year built 1986 (analyst input) maps to the 1980s vintage bucket; house economic CapEx per unit $1,750.00 (VINTAGE_FRAMEWORK_2026, value_add strategy). Informational: sustaining capital, not the replacement reserve. It does not reach the cash flows unless the analyst opts in (an override of this key writes an annual capex_schedule line; a capex budget or renovation program can carry it instead). Review it against the PCA / capex plan.",
+    "source": "deal:pca",
+    "basis": "Property condition assessment (Synthetic PCA (deal d), 2026-08-15): annual capital needs $1,500.00/unit/year. Recurring capex sits below NOI (not opex) and grows every analysis year; the charge below NOI each month is max(recurring capex, replacement reserve), never both.",
+    "as_of": "2026-08-15",
+    "confidence": "high",
+    "review_required": false,
+    "default_value": 1500.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": "below_floor",
+    "extra": {
+      "detail": {
+        "bucket": "2: recurring capex by vintage (below NOI)",
+        "vintage_bucket": "1980s",
+        "band_low": 1000.0,
+        "band_high": 2500.0,
+        "band_pick": "midpoint",
+        "deal_type": "value_add",
+        "deferred_maintenance": false,
+        "pca_evidence": true,
+        "pca_review_required": false,
+        "replacement_reserve_floor_per_unit": 250.0,
+        "charge_rule": "max(recurring capex, replacement reserve) per month below NOI"
+      },
+      "guardrail": {
+        "floor": 1750.0,
+        "floor_source": "house:recurring_capex_vintage",
+        "status": "below_floor",
+        "action": "floor_waived_by_deal_evidence",
+        "original": 1500.0,
+        "applied": 1500.0,
+        "basis": "recurring_capex_per_unit $1,500.00 is below the house floor $1,750.00 (house:recurring_capex_vintage); the PCA (deal:pca) recurring capex waives the floor, so pricing keeps the figure. Review it.",
+        "waived_by": "the PCA (deal:pca) recurring capex"
+      }
+    }
+  },
+  {
+    "key": "recurring_capex_growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Recurring capex grows like repairs & maintenance (OPEX_GROWTH_REPAIRS_MAINTENANCE 3.00% a year), applied from analysis year 2.",
     "as_of": null,
     "confidence": "medium",
     "review_required": true,
-    "default_value": 1750.0,
+    "default_value": 0.03,
     "delta": 0.0,
     "override_value": null,
     "override_note": null,

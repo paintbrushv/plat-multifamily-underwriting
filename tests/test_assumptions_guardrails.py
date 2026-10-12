@@ -43,6 +43,10 @@ def _strip_guardrail(canonical):
     return out
 
 
+def entries_of(canonical):
+    return canonical["assumptions"]["entries"]
+
+
 def _below_floor_deal(minimal_deal_inputs):
     """The conftest deal with a 1984 vintage and values below several floors."""
     deal = copy.deepcopy(minimal_deal_inputs)
@@ -129,8 +133,11 @@ def test_resolver_underwrite_mode_records_findings_and_keeps_values(minimal_deal
     deal = _below_floor_deal(minimal_deal_inputs)
     resolved = resolve_assumptions(deal, deal_profile=PROFILE)
 
-    stripped = {k: v for k, v in resolved.items() if k not in ("assumptions", "deal_profile")}
+    stripped = {k: v for k, v in resolved.items() if k not in ("assumptions", "deal_profile", "capital_plan")}
     assert stripped == deal
+    # The resolver fills the missing capex buckets (ADR 0003 §3); no floor raised a value.
+    assert resolved["capital_plan"]["recurring_capex"] == {"per_unit_annual": 1_000.0, "growth_rate": 0.03}
+    assert "guardrail" not in entries_of(resolved)["recurring_capex_per_unit"]
     entries = resolved["assumptions"]["entries"]
     assert entries["r_and_m_per_unit"]["guardrail"]["original"] == 750.0
     assert entries["r_and_m_per_unit"]["guardrail"]["floor"] == 900.0

@@ -17,13 +17,14 @@ Semantics (v1):
   treated alike: where a field the engine reads is missing, the resolver
   fills it with the resolved default and flags house or fallback values
   ``review_required``. That covers rent growth (a ``growth_assumptions``
-  section is created when there is none), opex growth rates, the
-  replacement reserve (the house lender-style reserve x units over the
-  analysis window; economic CapEx is a separate, informational key that is
-  written only when the analyst opts in), purchase closing costs (house
-  percent of price), the exit cap rate of a modeled exit (the going-in cap
-  at the modeled price + the house spread; ``engine/assumptions/exit_cap.py``)
-  and a renovation program's missing rent premium.
+  section is created when there is none), opex growth rates, the three
+  capex buckets (``capital_plan``: immediate capex at close, recurring capex
+  by vintage and its growth; the replacement reserve, the house lender-style
+  reserve x units over the analysis window, is the floor of the charge below
+  NOI), purchase closing costs (house percent of price), the exit cap rate of
+  a modeled exit (the going-in cap at the modeled price + the house spread;
+  ``engine/assumptions/exit_cap.py``) and a renovation program's missing rent
+  premium.
 - Overrides: ``{key: value | {"value", "note"[, "cohort_overrides"]}}``. A
   ``null`` value (``{key: None}`` or ``{key: {"value": None}}``) clears the
   key's override: the entry reverts to its resolved default and source.
@@ -64,7 +65,9 @@ from engine.assumptions.profile import DealProfile, check_deal_type
 from engine.assumptions.registry import (
     DEAL_PREFIX,
     HOUSE_BACKSOLVE_POLICY,
+    HOUSE_DEFERRED_CAPEX,
     HOUSE_PREFIX,
+    HOUSE_RECURRING_CAPEX,
     HOUSE_REPLACEMENT_RESERVE,
     HOUSE_YEAR1_INSURANCE_FLOOR,
     MARKET_PREFIX,
@@ -75,6 +78,7 @@ from engine.assumptions.registry import (
     SOURCE_ANALYST,
     SOURCE_DEAL_COMPS,
     SOURCE_DEAL_OM,
+    SOURCE_DEAL_PCA,
     SOURCE_DEAL_RENT_ROLL,
     SOURCE_DEAL_T12,
     SOURCE_ENGINE_FALLBACK,
@@ -104,6 +108,8 @@ NO_FIELD = "no_field"        # no canonical field; the engine does not consume i
 
 _NOTE_PRESENT = "present in the canonical before resolution"
 _NOTE_EDITED = "changed in the canonical after the last resolution"
+# Basis of an analyst candidate that deal evidence outranked (``evidence_first``).
+_SUPERSEDED = "Analyst value in the canonical, superseded by"
 
 
 class AssumptionOverrideError(ValueError):
@@ -128,6 +134,9 @@ class _Choice:
     review: Optional[bool] = None
     # Display-only facts recorded on the entry (e.g. how the exit cap was anchored).
     detail: Optional[dict[str, Any]] = None
+    # Keeps review_required on even when the analyst overrides the value (a
+    # pre-2000 vintage without PCA evidence stays a review prompt).
+    review_always: bool = False
 
 
 @dataclass
@@ -176,6 +185,10 @@ class _Spec:
     # resolved after every other key, and a value that moved with the price is
     # not an analyst edit.
     price_linked: bool = False
+    # Deal evidence outranks an analyst value already in the canonical on a
+    # first resolution (the capex buckets: PCA > analyst > house). The analyst
+    # value is kept as a candidate. An explicit or later edit still wins.
+    evidence_first: bool = False
 
 
 # ── small helpers ────────────────────────────────────────────────────────
@@ -512,8 +525,49 @@ def _write_reserves(ctx: _Context, value: Any, _cohorts: Optional[dict[str, floa
     return True
 
 
-# The capex_schedule row an analyst's economic CapEx opt-in writes (ADR 0003 §3).
+# ── capital plan: the three capex buckets (ADR 0003 §3) ──────────────────
+#
+# Bucket 1 (immediate_capex) and bucket 2 (recurring_capex_per_unit and its
+# growth) are written into ``capital_plan``; bucket 3 is the replacement
+# reserve above. The engine charges max(recurring capex, reserve) below NOI.
+
+# The capex_schedule row the retired economic_capex_per_unit opt-in wrote. A
+# canonical that still carries one is read as the analyst's recurring capex,
+# and the row is removed when recurring capex is written (never charged twice).
 ECONOMIC_CAPEX_CATEGORY = "Economic CapEx (analyst opt-in)"
+# Retired keys still accepted in overrides and sheets.
+KEY_ALIASES = {"economic_capex_per_unit": "recurring_capex_per_unit"}
+
+
+def _capital_plan(ctx: _Context) -> Mapping[str, Any]:
+    plan = ctx.canonical.get("capital_plan")
+    return plan if isinstance(plan, Mapping) else {}
+
+
+def _pca(ctx: _Context) -> Mapping[str, Any]:
+    pca = _capital_plan(ctx).get("pca")
+    return pca if isinstance(pca, Mapping) else {}
+
+
+def _pca_label(pca: Mapping[str, Any]) -> str:
+    parts = [str(pca[name]) for name in ("reference", "as_of") if pca.get(name)]
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _plan_block(ctx: _Context, name: str) -> dict[str, Any]:
+    plan = ctx.canonical.get("capital_plan")
+    if not isinstance(plan, dict):
+        plan = {}
+        ctx.canonical["capital_plan"] = plan
+    block = plan.get(name)
+    if not isinstance(block, dict):
+        block = {}
+        plan[name] = block
+    return block
+
+
+def _fillable(ctx: _Context) -> bool:
+    return bool(ctx.units and len(ctx.start) == 7 and len(ctx.end) == 7)
 
 
 def _economic_capex_rows(ctx: _Context) -> list[dict[str, Any]]:
@@ -523,31 +577,67 @@ def _economic_capex_rows(ctx: _Context) -> list[dict[str, Any]]:
     ]
 
 
-def _read_economic_capex(ctx: _Context) -> _Current:
-    """The analyst's opt-in row, else ABSENT: the house value is never written."""
-    rows = _economic_capex_rows(ctx)
-    if not rows:
-        return _Current(ABSENT)
-    return _Current(PRESENT, _num(rows[0].get("amount_per_unit")))
+def _read_immediate_capex(ctx: _Context) -> _Current:
+    block = _capital_plan(ctx).get("immediate_capex")
+    if not isinstance(block, Mapping) or block.get("amount") is None:
+        return _Current(PLACEHOLDER if ctx.units else ABSENT)
+    return _Current(PRESENT, _num(block.get("amount")))
 
 
-def _write_economic_capex(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
-    """Write the opt-in row (an annual reserve-type capex line), or remove it for ``None``."""
+def _write_immediate_capex(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    if _num(value) is None:
+        return False
+    block = _plan_block(ctx, "immediate_capex")
+    block["amount"] = float(value)
+    block.setdefault("funding", house.IMMEDIATE_CAPEX_EQUITY_AT_CLOSE)
+    return True
+
+
+def _read_recurring_capex(ctx: _Context) -> _Current:
+    block = _capital_plan(ctx).get("recurring_capex")
+    if isinstance(block, Mapping) and block.get("per_unit_annual") is not None:
+        return _Current(PRESENT, _num(block.get("per_unit_annual")))
+    legacy = _economic_capex_rows(ctx)
+    if legacy and _num(legacy[0].get("amount_per_unit")) is not None:
+        # The retired economic CapEx opt-in is the analyst's recurring capex: it
+        # moves to capital_plan (ctx.canonical is the resolver's own copy) and
+        # leaves the operating capex schedule, so it is charged once, below NOI.
+        value = _num(legacy[0].get("amount_per_unit"))
+        _write_recurring_capex(ctx, value, None)
+        return _Current(PRESENT, value)
+    return _Current(PLACEHOLDER if _fillable(ctx) else ABSENT)
+
+
+def _write_recurring_capex(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    """Write the year-1 recurring capex per unit; its growth is its own key."""
+    if _num(value) is None:
+        return False
+    _plan_block(ctx, "recurring_capex")["per_unit_annual"] = float(value)
     schedule = [
         row for row in ctx.canonical.get("capex_schedule") or []
         if not (isinstance(row, dict) and row.get("category") == ECONOMIC_CAPEX_CATEGORY)
     ]
-    if _num(value) is not None:
-        schedule.append({
-            "category": ECONOMIC_CAPEX_CATEGORY,
-            "capex_type": "reserve",
-            "amount_per_unit": float(value),
-            "timing": "annual",
-        })
     if schedule:
         ctx.canonical["capex_schedule"] = schedule
     else:
         ctx.canonical.pop("capex_schedule", None)
+    return True
+
+
+def _read_recurring_growth(ctx: _Context) -> _Current:
+    block = _capital_plan(ctx).get("recurring_capex")
+    if not isinstance(block, Mapping):
+        return _Current(NO_SECTION)
+    if block.get("growth_rate") is None:
+        return _Current(PLACEHOLDER)
+    return _Current(PRESENT, _num(block.get("growth_rate")))
+
+
+def _write_recurring_growth(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    block = _capital_plan(ctx).get("recurring_capex")
+    if not isinstance(block, dict) or _num(value) is None:
+        return False
+    block["growth_rate"] = float(value)
     return True
 
 
@@ -787,8 +877,8 @@ def _reserve_candidates(ctx: _Context) -> list[dict[str, Any]]:
             HOUSE_REPLACEMENT_RESERVE,
             float(reserve),
             f"House lender-style replacement reserve {_fmt(reserve, 'usd')}/unit/year below NOI "
-            "(HOUSE_REPLACEMENT_RESERVE_PER_UNIT, the same for every vintage). Economic CapEx is "
-            "disclosed separately as economic_capex_per_unit.",
+            "(HOUSE_REPLACEMENT_RESERVE_PER_UNIT, the same for every vintage). It is a floor, not an "
+            "addition: the charge below NOI is max(recurring capex by vintage, this reserve).",
         ),
         _candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No replacement_reserves: the engine reserves nothing."),
     ]
@@ -804,29 +894,139 @@ def _reserve_default(ctx: _Context, state: str) -> _Choice:
     )
 
 
-_ECONOMIC_CAPEX_NOTE = (
-    " Informational: sustaining capital, not the replacement reserve. It does not reach the cash flows "
-    "unless the analyst opts in (an override of this key writes an annual capex_schedule line; a capex "
-    "budget or renovation program can carry it instead). Review it against the PCA / capex plan."
+_CHARGE_NOTE = (
+    " Recurring capex sits below NOI (not opex) and grows every analysis year; the charge below NOI each "
+    "month is max(recurring capex, replacement reserve), never both."
 )
 
 
-def _economic_capex_candidates(ctx: _Context) -> list[dict[str, Any]]:
-    house_candidate = _house_vintage(
-        ctx, house.default_economic_capex_per_unit, "economic CapEx per unit", "usd_per_unit_year"
+def _pre_2000_without_pca(ctx: _Context) -> bool:
+    return (
+        ctx.year_built is not None
+        and ctx.year_built < house.CAPEX_PCA_REVIEW_BEFORE_YEAR
+        and _num(_pca(ctx).get("recurring_capex_per_unit")) is None
     )
-    return [house_candidate] if house_candidate else []
 
 
-def _economic_capex_default(ctx: _Context, state: str) -> _Choice:
-    candidates = _economic_capex_candidates(ctx)
-    if candidates:
-        choice = _choice_from(candidates[0], ctx, candidates[0]["basis"] + _ECONOMIC_CAPEX_NOTE)
-        choice.review = True
-        return choice
-    return _fallback(
-        None, "Year built unknown, so no house vintage economic CapEx is available." + _ECONOMIC_CAPEX_NOTE
+def _recurring_house_candidate(ctx: _Context) -> Optional[dict[str, Any]]:
+    deferred = ctx.profile.deferred_maintenance
+    value = house.default_recurring_capex_per_unit(ctx.year_built, strategy=ctx.strategy, deferred=deferred)
+    band = house.recurring_capex_band(ctx.year_built)
+    if value is None or band is None:
+        return None
+    pick = house.recurring_capex_band_pick(strategy=ctx.strategy, deferred=deferred)
+    reason = (
+        "deferred maintenance flagged" if deferred
+        else ("value-add deal" if ctx.strategy == "value_add" else "stabilized deal")
     )
+    return _candidate(
+        HOUSE_RECURRING_CAPEX,
+        float(value),
+        f"Year built {ctx.year_built} ({ctx.year_built_origin}) maps to the {ctx.bucket} vintage; house "
+        f"recurring capex is the {pick} of its economic CapEx band {_fmt(band[0], 'usd')}-"
+        f"{_fmt(band[1], 'usd')}/unit/year ({reason}; VINTAGE_FRAMEWORK_2026).",
+    )
+
+
+def _recurring_capex_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    pca = _pca(ctx)
+    pca_value = _num(pca.get("recurring_capex_per_unit"))
+    if pca_value is not None:
+        out.append(_candidate(
+            SOURCE_DEAL_PCA, pca_value,
+            f"Property condition assessment{_pca_label(pca)}: annual capital needs "
+            f"{_fmt(pca_value, 'usd')}/unit/year.",
+            as_of=pca.get("as_of"),
+        ))
+    house_candidate = _recurring_house_candidate(ctx)
+    if house_candidate:
+        out.append(house_candidate)
+    else:
+        reserve = house.default_replacement_reserve_per_unit()
+        out.append(_candidate(
+            HOUSE_REPLACEMENT_RESERVE, float(reserve),
+            f"Year built unknown: no vintage band, so recurring capex falls back to the "
+            f"{_fmt(reserve, 'usd')}/unit lender replacement reserve.",
+        ))
+    return out
+
+
+def _recurring_capex_detail(ctx: _Context) -> dict[str, Any]:
+    deferred = ctx.profile.deferred_maintenance
+    band = house.recurring_capex_band(ctx.year_built)
+    return {
+        "bucket": "2: recurring capex by vintage (below NOI)",
+        "vintage_bucket": ctx.bucket,
+        "band_low": float(band[0]) if band else None,
+        "band_high": float(band[1]) if band else None,
+        "band_pick": house.recurring_capex_band_pick(strategy=ctx.strategy, deferred=deferred) if band else None,
+        "deal_type": ctx.profile.deal_type,
+        "deferred_maintenance": deferred,
+        "pca_evidence": _num(_pca(ctx).get("recurring_capex_per_unit")) is not None,
+        "pca_review_required": _pre_2000_without_pca(ctx),
+        "replacement_reserve_floor_per_unit": float(house.default_replacement_reserve_per_unit()),
+        "charge_rule": "max(recurring capex, replacement reserve) per month below NOI",
+    }
+
+
+def _recurring_capex_default(ctx: _Context, state: str) -> _Choice:
+    candidates = _recurring_capex_candidates(ctx)
+    choice = _choice_from(candidates[0], ctx, candidates[0]["basis"] + _CHARGE_NOTE)
+    if _pre_2000_without_pca(ctx):
+        choice.basis += (
+            f" Built {ctx.year_built}, before {house.CAPEX_PCA_REVIEW_BEFORE_YEAR}, with no PCA: review the "
+            "recurring capex against a property condition assessment."
+        )
+        choice.review_always = True
+    choice.detail = _recurring_capex_detail(ctx)
+    return choice
+
+
+def _recurring_growth_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    return [_candidate(
+        "house:opex_growth_table", float(house.HOUSE_RECURRING_CAPEX_GROWTH),
+        f"Recurring capex grows like repairs & maintenance ({house.HOUSE_RECURRING_CAPEX_GROWTH_CONSTANT} "
+        f"{_fmt(house.HOUSE_RECURRING_CAPEX_GROWTH, 'decimal')} a year), applied from analysis year 2.",
+    )]
+
+
+def _recurring_growth_default(ctx: _Context, state: str) -> _Choice:
+    if state == NO_SECTION:
+        return _not_modeled("capital_plan.recurring_capex")
+    return _choice_from(_recurring_growth_candidates(ctx)[0], ctx)
+
+
+def _immediate_capex_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    pca = _pca(ctx)
+    pca_value = _num(pca.get("immediate_capex"))
+    if pca_value is not None:
+        out.append(_candidate(
+            SOURCE_DEAL_PCA, pca_value,
+            f"Property condition assessment{_pca_label(pca)}: immediate needs {_fmt(pca_value, 'usd')}.",
+            as_of=pca.get("as_of"),
+        ))
+    out.append(_candidate(
+        HOUSE_DEFERRED_CAPEX, float(house.HOUSE_IMMEDIATE_CAPEX_DEFAULT),
+        "No PCA immediate needs and no analyst figure: nothing is budgeted at close.",
+    ))
+    return out
+
+
+def _immediate_capex_default(ctx: _Context, state: str) -> _Choice:
+    candidates = _immediate_capex_candidates(ctx)
+    note = (
+        " One-time capital at close for deferred maintenance / PCA immediate needs, funded with equity at "
+        "close (or a lender holdback): it adds to the total equity basis and never enters NOI. It is "
+        "separate from the renovation budget."
+    )
+    choice = _choice_from(candidates[0], ctx, candidates[0]["basis"] + note)
+    if ctx.profile.deferred_maintenance and candidates[0]["source"] != SOURCE_DEAL_PCA:
+        choice.basis += " Deferred maintenance is flagged: budget the immediate needs (PCA or analyst)."
+        choice.review_always = True
+    choice.detail = {"bucket": "1: immediate / deferred capex at close"}
+    return choice
 
 
 def _turn_candidates(ctx: _Context) -> list[dict[str, Any]]:
@@ -1311,14 +1511,33 @@ def _base_specs() -> tuple[_Spec, ...]:
             patch_paths=(("replacement_reserves",),),
         ),
         _Spec(
-            key="economic_capex_per_unit",
+            key="immediate_capex",
+            unit="usd",
+            read=_read_immediate_capex,
+            write=_write_immediate_capex,
+            default=_immediate_capex_default,
+            gather=_immediate_capex_candidates,
+            patch_paths=(("capital_plan", "immediate_capex"),),
+            evidence_first=True,
+        ),
+        _Spec(
+            key="recurring_capex_per_unit",
             unit="usd_per_unit_year",
-            read=_read_economic_capex,
-            write=_write_economic_capex,
-            default=_economic_capex_default,
-            gather=_economic_capex_candidates,
-            patch_paths=(("capex_schedule",),),
-            informational=True,
+            read=_read_recurring_capex,
+            write=_write_recurring_capex,
+            default=_recurring_capex_default,
+            gather=_recurring_capex_candidates,
+            patch_paths=(("capital_plan", "recurring_capex", "per_unit_annual"),),
+            evidence_first=True,
+        ),
+        _Spec(
+            key="recurring_capex_growth",
+            unit="decimal_yoy",
+            read=_read_recurring_growth,
+            write=_write_recurring_growth,
+            default=_recurring_growth_default,
+            gather=_recurring_growth_candidates,
+            patch_paths=(("capital_plan", "recurring_capex", "growth_rate"),),
         ),
         _Spec(
             key="turn_cost_per_unit",
@@ -1500,6 +1719,8 @@ def normalize_overrides(overrides: Optional[Mapping[str, Any]]) -> dict[str, dic
         return {}
     if not isinstance(overrides, Mapping):
         raise AssumptionOverrideError("assumption overrides must be an object keyed by assumption key")
+    # Retired keys (economic_capex_per_unit) map to the key that replaced them.
+    overrides = {KEY_ALIASES.get(key, key): raw for key, raw in overrides.items()}
     # ── ADR 0003 slice 5 hook: per-line opex growth keys (opex.<slug>.growth) ──
     opex_keys = _opex_slice().check_override_keys(overrides)
     unknown = sorted(set(overrides) - set(ASSUMPTION_KEYS) - opex_keys)
@@ -1672,10 +1893,26 @@ def _resolve_key(
             ctx.ingested and not spec.informational
             and _same(current.value, default.value) and not current.cohort_overrides
         )
-        if not is_default:
+        if not is_default and spec.evidence_first and default.source.startswith(DEAL_PREFIX):
+            # Deal evidence outranks the analyst value already in the canonical
+            # (PCA > analyst > house); the analyst value stays a candidate.
+            candidates = [_candidate(
+                SOURCE_ANALYST, current.value,
+                f"{_SUPERSEDED} {default.source} evidence (precedence: PCA > analyst > house).",
+            )] + candidates
+        elif not is_default:
             override = {"value": current.value, "note": _NOTE_PRESENT}
             if current.cohort_overrides:
                 override["cohort_overrides"] = dict(current.cohort_overrides)
+
+    if spec.evidence_first and override is None and prior is not None and default.source.startswith(DEAL_PREFIX):
+        # Keep the record of an analyst value the deal evidence superseded.
+        kept = [
+            c for c in prior.get("candidates") or []
+            if c.get("source") == SOURCE_ANALYST and str(c.get("basis", "")).startswith(_SUPERSEDED)
+        ]
+        if kept and not any(c.get("source") == SOURCE_ANALYST for c in candidates):
+            candidates = deepcopy(kept) + candidates
 
     notes: list[str] = list(ctx.notes.get(spec.key, []))
     if override is not None:
@@ -1742,7 +1979,9 @@ def _resolve_key(
         candidates=candidates,
         default_value=_jsonable(default.value),
         override=_jsonable(override),
-        review_required=requires_review(source) or (override is None and default.review is True),
+        review_required=(
+            requires_review(source) or (override is None and default.review is True) or default.review_always
+        ),
         cohort_overrides=_jsonable(cohorts),
         detail=_jsonable(default.detail) if default.detail else None,
     )
@@ -1763,10 +2002,16 @@ def _apply_guardrail_mode(
 
     context = dict(context or {})
     enforced = context.pop("enforced", None)
+    # The guardrails read who set a value (an analyst or PCA recurring capex below
+    # the vintage floor is waived and disclosed, not raised) from these entries.
+    context["assumption_entries"] = entries
     if ctx.mode == guardrails.MODE_PRICING and enforced is not None:
         findings = list(enforced)
     else:
-        profile = guardrails.GuardrailProfile(strategy=ctx.strategy, year_built=ctx.year_built)
+        profile = guardrails.GuardrailProfile(
+            strategy=ctx.strategy, year_built=ctx.year_built,
+            deferred_maintenance=ctx.profile.deferred_maintenance,
+        )
         findings = guardrails.enforce_floors(ctx.canonical, mode=ctx.mode, profile=profile, context=context)
         if any(f["action"] == guardrails.ACTION_ENFORCED for f in findings):
             # Re-read the raised values, with the first pass as the prior resolution.

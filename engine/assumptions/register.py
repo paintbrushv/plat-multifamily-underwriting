@@ -71,6 +71,9 @@ _GROUP_BY_KEY: dict[str, str] = {
     "collection_loss": GROUP_VACANCY_CREDIT,
     "insurance_per_unit": GROUP_OPEX,
     "r_and_m_per_unit": GROUP_OPEX,
+    "immediate_capex": GROUP_CAPITAL,
+    "recurring_capex_per_unit": GROUP_CAPITAL,
+    "recurring_capex_growth": GROUP_CAPITAL,
     "replacement_reserve_per_unit": GROUP_CAPITAL,
     "turn_cost_per_unit": GROUP_CAPITAL,
     "exit_cap_rate": GROUP_EXIT,
@@ -141,7 +144,10 @@ _LABELS: dict[str, str] = {
     "concessions": "Concessions",
     "insurance_per_unit": "Insurance per unit",
     "r_and_m_per_unit": "Repairs & maintenance per unit",
-    "replacement_reserve_per_unit": "Replacement reserve per unit",
+    "immediate_capex": "Capex bucket 1: immediate / deferred capex at close",
+    "recurring_capex_per_unit": "Capex bucket 2: recurring capex per unit (year 1)",
+    "recurring_capex_growth": "Capex bucket 2: recurring capex growth",
+    "replacement_reserve_per_unit": "Capex bucket 3: replacement reserve per unit (floor)",
     "turn_cost_per_unit": "Turn cost per unit",
     "renovation_premium": "Renovation rent premium",
     "exit_cap_rate": "Exit cap rate",
@@ -645,6 +651,57 @@ def register_row(key: str, entry: Any, *, include_candidates: bool = True) -> di
     return row
 
 
+# ── capital plan: the three capex buckets (ADR 0003 §3) ──────────────────
+
+CAPITAL_PLAN_KEYS = (
+    ("immediate_capex", 1, "Immediate / deferred capex at close",
+     "One-time, funded with equity at close (or a lender holdback); in the equity basis, never in NOI."),
+    ("recurring_capex_per_unit", 2, "Recurring capex by vintage",
+     "Annual $/unit below NOI, grown every year."),
+    ("replacement_reserve_per_unit", 3, "Lender replacement reserve",
+     "Annual $/unit below NOI; a floor, not an addition."),
+)
+CAPITAL_PLAN_RULE = "The charge below NOI each year is max(recurring capex, replacement reserve), never both."
+
+
+def capital_plan_summary(entries: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """The three capex buckets side by side, with the one that binds in year 1.
+
+    ``None`` when the canonical resolved none of the bucket keys.
+    """
+    if not any(key in entries for key, *_ in CAPITAL_PLAN_KEYS):
+        return None
+    buckets = []
+    for key, number, label, note in CAPITAL_PLAN_KEYS:
+        entry = entries.get(key) if isinstance(entries.get(key), Mapping) else None
+        value = _jsonable(entry.get("value")) if entry else None
+        unit = entry.get("unit") if entry else None
+        buckets.append({
+            "bucket": number,
+            "key": key,
+            "label": label,
+            "note": note,
+            "value": value,
+            "value_display": format_value(value, unit) if entry else "not modeled",
+            "source": entry.get("source") if entry else None,
+            "review_required": bool(entry.get("review_required")) if entry else False,
+        })
+    growth = entries.get("recurring_capex_growth")
+    recurring = _number(buckets[1]["value"])
+    reserve = _number(buckets[2]["value"])
+    binding = None
+    if recurring is not None or reserve is not None:
+        recurring, reserve = recurring or 0.0, reserve or 0.0
+        binding = "recurring_capex_per_unit" if recurring > reserve else "replacement_reserve_per_unit"
+    return {
+        "rule": CAPITAL_PLAN_RULE,
+        "buckets": buckets,
+        "recurring_capex_growth": _jsonable(growth.get("value")) if isinstance(growth, Mapping) else None,
+        "binding_year_1": binding,
+        "charge_year_1_per_unit": max(recurring, reserve) if binding else None,
+    }
+
+
 # ── the register ─────────────────────────────────────────────────────────
 
 
@@ -724,7 +781,8 @@ def build_register(
     """The assumption register of a canonical: a deterministic, JSON-serializable dict.
 
     ``{register_version, resolver_version, mode, deal_id, deal_profile,
-    summary, groups, filter, rows}``. ``rows`` follow ``ordered_keys``;
+    summary, capital_plan, groups, filter, rows}``. ``capital_plan`` shows the
+    three capex buckets side by side (``capital_plan_summary``). ``rows`` follow ``ordered_keys``;
     ``groups`` lists each non-empty group with its keys in that order.
     ``summary`` always counts every entry; ``filter`` (one of ``FILTERS``)
     only narrows ``rows`` and ``groups``. ``include_candidates=False`` drops
@@ -755,6 +813,7 @@ def build_register(
         "deal_id": metadata.get("deal_id"),
         "deal_profile": _jsonable(profile) if isinstance(profile, Mapping) else None,
         "summary": _summary(all_rows),
+        "capital_plan": capital_plan_summary(entries),
         "filter": filter,
         "groups": groups,
         "rows": rows,

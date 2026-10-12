@@ -132,9 +132,27 @@ SOURCE_RATIONALES: dict[str, str] = {
         "reflects the property, not how the seller's documents happened to be prepared."
     ),
     "house:replacement_reserve": (
-        "Buildings wear out whether or not the seller budgeted for it. The house carries a per-unit "
-        "replacement reserve so ongoing capital needs are funded from operations rather than surprising "
-        "the equity later."
+        "Lenders require a per-unit replacement reserve below NOI on every loan, whatever the vintage. "
+        "The house carries the same lender-style figure as the floor of the annual capital charge: the "
+        "charge is the larger of recurring capex and this reserve, never both, so capital is never "
+        "underwritten below what a lender would escrow."
+    ),
+    "deal:pca": (
+        "A property condition assessment is an engineer's inspection of this building: what must be fixed "
+        "now and what the systems will need each year. It describes the actual asset rather than its "
+        "decade, so it outranks an analyst estimate and the house vintage band for both immediate and "
+        "recurring capex."
+    ),
+    "house:recurring_capex_vintage": (
+        "Older buildings need more capital every year (roofs, HVAC, plumbing, paving, unit interiors), so "
+        "the house budgets recurring capex below NOI from the vintage band: the low end for a stabilized "
+        "deal, the midpoint for value-add, the high end when deferred maintenance is flagged. It grows "
+        "with repairs and maintenance, and in pricing the band is a floor."
+    ),
+    "house:deferred_capex": (
+        "Without a property condition assessment or an analyst budget there is no evidence of what must "
+        "be fixed at closing, so nothing is budgeted at close and the entry is flagged. Inspect the asset "
+        "and enter the immediate needs: they are funded with equity at close and lower returns."
     ),
 }
 

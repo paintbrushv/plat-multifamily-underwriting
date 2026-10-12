@@ -115,3 +115,25 @@ def test_operating_profile_summary_reflects_house_policy():
     assert profile["physical_vacancy_rate"] == 0.05
     assert profile["collection_loss_rate"] == 0.0075
     assert profile["year1_concessions_rate"] == 0.0075
+
+
+def test_recurring_capex_by_vintage_band_pick_and_growth():
+    """ADR 0003 §3 bucket 2: low end stabilized, midpoint value-add, high end deferred."""
+    from engine.underwriting_policy import (
+        HOUSE_RECURRING_CAPEX_GROWTH,
+        OPEX_GROWTH_REPAIRS_MAINTENANCE,
+        default_recurring_capex_per_unit,
+        recurring_capex_band,
+        recurring_capex_band_pick,
+    )
+
+    assert recurring_capex_band(1975) == (Decimal("1250"), Decimal("3000"))
+    assert default_recurring_capex_per_unit(1975) == Decimal("1250")
+    assert default_recurring_capex_per_unit(1975, strategy="value_add") == Decimal("2125")
+    assert default_recurring_capex_per_unit(1975, strategy="value_add", deferred=True) == Decimal("3000")
+    assert default_recurring_capex_per_unit(None) is None
+    assert recurring_capex_band_pick(strategy="cashflow", deferred=True) == "high"
+    # The retired name returns the same values.
+    assert default_economic_capex_per_unit(1975, strategy="value_add") == Decimal("2125")
+    # Grown like repairs & maintenance.
+    assert HOUSE_RECURRING_CAPEX_GROWTH == OPEX_GROWTH_REPAIRS_MAINTENANCE == Decimal("0.030")

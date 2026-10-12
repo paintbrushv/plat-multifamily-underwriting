@@ -115,6 +115,8 @@ class DealSpec:
     market: Optional[dict[str, Any]]
     expected: dict[str, Any]
     renovation_programs: list[dict[str, Any]] = field(default_factory=list)
+    # Property condition assessment evidence (capital_plan.pca, source deal:pca).
+    pca: Optional[dict[str, Any]] = None
 
 
 # ── shared opex sections ─────────────────────────────────────────────────
@@ -227,7 +229,9 @@ DEALS: tuple[DealSpec, ...] = (
                 "insurance_per_unit": "deal:t12",
                 "r_and_m_per_unit": "deal:t12",
                 "replacement_reserve_per_unit": "house:replacement_reserve",
-                "economic_capex_per_unit": "house:vintage_1990s",
+                "immediate_capex": "house:deferred_capex",
+                "recurring_capex_per_unit": "house:recurring_capex_vintage",
+                "recurring_capex_growth": "house:opex_growth_table",
                 "purchase_closing_cost_pct": "house:backsolve_policy",
                 "sale_cost_percent": "analyst",
             },
@@ -244,6 +248,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "insurance_per_unit": [600, 700],
                 "r_and_m_per_unit": [990, 1050],
                 "replacement_reserve_per_unit": [250, 250],
+                "recurring_capex_per_unit": [750, 750],
+                "immediate_capex": [0, 0],
             },
             "opex_growth": {
                 "Payroll": [0.035, 0.035],
@@ -266,6 +272,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "going_in_cap_rate": [0.048, 0.060],
             },
             "guardrail_warnings": [],
+            "guardrail_waivers": [],
         },
     ),
     DealSpec(
@@ -348,7 +355,9 @@ DEALS: tuple[DealSpec, ...] = (
                 "insurance_per_unit": "deal:t12",
                 "r_and_m_per_unit": "deal:t12",
                 "replacement_reserve_per_unit": "house:replacement_reserve",
-                "economic_capex_per_unit": "house:vintage_2010s",
+                "immediate_capex": "house:deferred_capex",
+                "recurring_capex_per_unit": "house:recurring_capex_vintage",
+                "recurring_capex_growth": "house:opex_growth_table",
                 "purchase_closing_cost_pct": "house:backsolve_policy",
                 "sale_cost_percent": "analyst",
             },
@@ -365,6 +374,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "insurance_per_unit": [540, 580],
                 "r_and_m_per_unit": [750, 850],
                 "replacement_reserve_per_unit": [250, 250],
+                "recurring_capex_per_unit": [300, 300],
+                "immediate_capex": [0, 0],
             },
             "opex_growth": {
                 "Payroll": [0.035, 0.035],
@@ -387,6 +398,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "going_in_cap_rate": [0.045, 0.058],
             },
             "guardrail_warnings": ["insurance_per_unit"],
+            "guardrail_waivers": [],
         },
     ),
     DealSpec(
@@ -508,7 +520,9 @@ DEALS: tuple[DealSpec, ...] = (
                 "insurance_per_unit": "deal:t12",
                 "r_and_m_per_unit": "deal:t12",
                 "replacement_reserve_per_unit": "house:replacement_reserve",
-                "economic_capex_per_unit": "house:vintage_1970s",
+                "immediate_capex": "house:deferred_capex",
+                "recurring_capex_per_unit": "house:recurring_capex_vintage",
+                "recurring_capex_growth": "house:opex_growth_table",
                 "purchase_closing_cost_pct": "house:backsolve_policy",
                 "renovation_premium": "analyst",
                 "turn_cost_per_unit": "house:vintage_1970s",
@@ -527,6 +541,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "insurance_per_unit": [680, 760],
                 "r_and_m_per_unit": [1630, 1730],
                 "replacement_reserve_per_unit": [250, 250],
+                "recurring_capex_per_unit": [2125, 2125],
+                "immediate_capex": [0, 0],
             },
             "opex_growth": {
                 "Payroll": [0.035, 0.035],
@@ -543,12 +559,14 @@ DEALS: tuple[DealSpec, ...] = (
                 "Property Management Fee": [0.0, 0.0],
             },
             "results": {
-                "unlevered_irr": [0.05, 0.12],
-                "levered_irr": [0.04, 0.20],
+                # At the asking price, after $2,125/unit of recurring capex (1970s value-add midpoint).
+                "unlevered_irr": [0.03, 0.12],
+                "levered_irr": [0.01, 0.20],
                 "minimum_dscr": [1.0, 2.0],
                 "going_in_cap_rate": [0.050, 0.066],
             },
             "guardrail_warnings": ["physical_vacancy", "concessions"],
+            "guardrail_waivers": [],
         },
     ),
     DealSpec(
@@ -648,6 +666,10 @@ DEALS: tuple[DealSpec, ...] = (
                     "2030Q4": 0.0614, "2031Q1": 0.0613, "2031Q2": 0.0615, "2031Q3": 0.0616, "2031Q4": 0.0616}},
             ],
         },
+        # A synthetic PCA: recurring capex below the value-add vintage midpoint (the
+        # floor is waived and disclosed) and immediate needs funded at close.
+        pca={"immediate_capex": 180000.0, "recurring_capex_per_unit": 1500.0, "as_of": "2026-08-15",
+             "reference": "Synthetic PCA (deal d)"},
         expected={
             "sources": {
                 "rent_growth": "market:synthetic",
@@ -659,7 +681,9 @@ DEALS: tuple[DealSpec, ...] = (
                 "insurance_per_unit": "deal:t12",
                 "r_and_m_per_unit": "deal:t12",
                 "replacement_reserve_per_unit": "house:replacement_reserve",
-                "economic_capex_per_unit": "house:vintage_1980s",
+                "immediate_capex": "deal:pca",
+                "recurring_capex_per_unit": "deal:pca",
+                "recurring_capex_growth": "house:opex_growth_table",
                 "purchase_closing_cost_pct": "house:backsolve_policy",
                 "renovation_premium": "engine_fallback",
                 "turn_cost_per_unit": "house:vintage_1980s",
@@ -678,6 +702,8 @@ DEALS: tuple[DealSpec, ...] = (
                 "insurance_per_unit": [600, 680],
                 "r_and_m_per_unit": [1710, 1810],
                 "replacement_reserve_per_unit": [250, 250],
+                "recurring_capex_per_unit": [1500, 1500],
+                "immediate_capex": [180000, 180000],
             },
             "opex_growth": {
                 "Payroll": [0.035, 0.035],
@@ -704,6 +730,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "going_in_cap_rate": [0.052, 0.068],
             },
             "guardrail_warnings": ["collection_loss"],
+            "guardrail_waivers": ["recurring_capex_per_unit"],
         },
     ),
 )
@@ -906,6 +933,8 @@ def deal_document(spec: DealSpec, roll: list[list[str]], t12: T12) -> dict[str, 
     }
     if programs:
         analyst_inputs["renovation_programs"] = programs
+    if spec.pca:
+        analyst_inputs["capital_plan"] = {"pca": dict(spec.pca)}
     market = None
     if spec.market is not None:
         market = {"provider": PROVIDER, "as_of": MARKET_AS_OF, **spec.market}

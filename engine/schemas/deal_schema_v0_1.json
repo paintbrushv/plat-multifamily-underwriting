@@ -263,6 +263,46 @@
       "default": "operating_cash_flow",
       "description": "How the renovation budget (renovation_programs and unit_renovations costs) is funded. operating_cash_flow: spent as CapEx out of operating cash flow. equity_at_close: funded by equity at close, so it is excluded from operating cash flow (shown as equity_funded_capex) and must be included in purchase_assumptions.total_equity_basis (and total_unlevered_basis); a basis left out defaults to the usual basis plus the budget."
     },
+    "capital_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "ADR 0003 §3: the three capex buckets. (1) immediate_capex: one-time deferred-maintenance / PCA immediate-needs capital at close, funded with equity at close (added to purchase_assumptions.total_equity_basis and total_unlevered_basis, stated or defaulted, less amount_in_stated_basis) or a lender holdback (added to total_unlevered_basis only; the debt terms carry the holdback). It is separate from the renovation budget. (2) recurring_capex: annual $/unit below NOI, grown every analysis year at growth_rate. (3) The lender replacement reserve stays in replacement_reserves and is a floor: the charge below NOI each month is max(recurring capex, replacement reserve), never both. pca is deal evidence the assumption resolver reads (source deal:pca); the engine ignores it.",
+      "properties": {
+        "immediate_capex": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["amount"],
+          "properties": {
+            "amount": { "type": "number", "minimum": 0, "description": "Total dollars at close." },
+            "funding": { "type": "string", "enum": ["equity_at_close", "lender_holdback"], "default": "equity_at_close" },
+            "amount_in_stated_basis": { "type": "number", "minimum": 0, "description": "How much of amount the stated purchase_assumptions.total_equity_basis / total_unlevered_basis already include (backsolve's priced case sets it); the engine adds the rest." },
+            "description": { "type": "string" }
+          }
+        },
+        "recurring_capex": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["per_unit_annual"],
+          "properties": {
+            "per_unit_annual": { "type": "number", "minimum": 0, "description": "Year-1 recurring capex per unit per year." },
+            "growth_rate": { "type": "number", "minimum": -0.5, "maximum": 0.5, "default": 0, "description": "Annual growth applied from analysis year 2 (house default: OPEX_GROWTH_REPAIRS_MAINTENANCE)." },
+            "start_period": { "$ref": "#/$defs/month" },
+            "end_period": { "$ref": "#/$defs/month" }
+          }
+        },
+        "pca": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Property condition assessment evidence (deal:pca). The resolver prefers it to an analyst figure and to the house vintage band.",
+          "properties": {
+            "immediate_capex": { "type": "number", "minimum": 0, "description": "PCA immediate needs (total dollars)." },
+            "recurring_capex_per_unit": { "type": "number", "minimum": 0, "description": "PCA annual capital needs per unit (year 1)." },
+            "as_of": { "type": "string" },
+            "reference": { "type": "string" }
+          }
+        }
+      }
+    },
     "refi_event": { "$ref": "#/$defs/refi_event" },
     "concession_schedule": {
       "type": "array",
@@ -322,7 +362,8 @@
         },
         "year_built": { "type": ["integer", "null"], "minimum": 1800, "maximum": 2100 },
         "asset_class": { "type": "string", "enum": ["A", "B", "C"] },
-        "star_tier": { "type": "string", "enum": ["1_2", "3", "4_5"] }
+        "star_tier": { "type": "string", "enum": ["1_2", "3", "4_5"] },
+        "deferred_maintenance": { "type": "boolean", "default": false, "description": "Known deferred maintenance: recurring capex defaults to the high end of the vintage band and the immediate-capex budget is flagged for review." }
       }
     },
     "assumptions": {
@@ -396,14 +437,15 @@
         },
         "guardrail": {
           "type": "object",
-          "description": "ADR 0003 §5. Present when a value is below its house floor: warned in underwrite mode, enforced in pricing mode.",
+          "description": "ADR 0003 §5. Present when a value is below its house floor: warned in underwrite mode, enforced in pricing mode, or waived (kept and disclosed) when an explicit analyst figure or PCA evidence set it (insurance, recurring capex).",
           "additionalProperties": false,
           "required": ["floor", "floor_source", "status", "action", "original"],
           "properties": {
             "floor": { "type": "number" },
             "floor_source": { "type": ["string", "null"] },
             "status": { "type": "string", "enum": ["below_floor"] },
-            "action": { "type": "string", "enum": ["warned", "enforced"] },
+            "action": { "type": "string", "enum": ["warned", "enforced", "floor_waived_by_analyst_override", "floor_waived_by_deal_evidence"] },
+            "waived_by": { "type": "string" },
             "original": { "type": ["number", "null"] },
             "applied": { "type": "number" },
             "segments": { "type": "array", "items": { "type": "object" } },

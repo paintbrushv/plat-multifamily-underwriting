@@ -3,9 +3,11 @@
 One place defines the house floors for a (deal_type -> strategy, year_built)
 profile: physical vacancy (the property-level vacancy anchor), loss to lease,
 collection loss, year-1 concessions, insurance per unit, R&M per unit (floor
-and top-up) and replacement reserves per unit (the house lender-style reserve,
-``HOUSE_REPLACEMENT_RESERVE_PER_UNIT``, the same for every vintage). The
-vintage values come from ``engine/underwriting_policy.py``; deal evidence
+and top-up), replacement reserves per unit (the house lender-style reserve,
+``HOUSE_REPLACEMENT_RESERVE_PER_UNIT``, the same for every vintage) and
+recurring capex per unit (the vintage band: low end stabilized, midpoint
+value-add, high end with deferred maintenance). The vintage values come from
+``engine/underwriting_policy.py``; deal evidence
 passed in ``context`` (broker notes, trailing actuals) can raise a floor,
 exactly as backsolve has always done.
 
@@ -50,11 +52,13 @@ from engine.assumptions.registry import (
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_PREFIX,
     HOUSE_PRICING_NORMALIZATION,
+    HOUSE_RECURRING_CAPEX,
     HOUSE_REPLACEMENT_RESERVE,
     HOUSE_YEAR1_INSURANCE_FLOOR,
     MODES,
     SOURCE_ANALYST,
     SOURCE_DEAL_OM,
+    SOURCE_DEAL_PCA,
     SOURCE_DEAL_RENT_ROLL,
     SOURCE_DEAL_T12,
     house_vintage_source,
@@ -74,6 +78,9 @@ ACTION_ENFORCED = "enforced"
 # An explicit analyst insurance figure below the insurance floor: the value is
 # kept (no price change) and the waiver is disclosed.
 ACTION_WAIVED = "floor_waived_by_analyst_override"
+# PCA evidence (deal:pca) below the recurring capex floor: kept and disclosed too.
+ACTION_WAIVED_BY_EVIDENCE = "floor_waived_by_deal_evidence"
+WAIVER_ACTIONS = frozenset({ACTION_WAIVED, ACTION_WAIVED_BY_EVIDENCE})
 
 STRATEGIES = ("cashflow", "value_add")
 STRATEGY_DEAL_TYPE = {strategy: deal_type for deal_type, strategy in DEAL_TYPE_STRATEGY.items()}
@@ -87,6 +94,7 @@ GUARDRAIL_KEYS = (
     "insurance_per_unit",
     "r_and_m_per_unit",
     "replacement_reserve_per_unit",
+    "recurring_capex_per_unit",
 )
 CURVE_KEYS = frozenset({
     "physical_vacancy", "loss_to_lease", "collection_loss", "concessions", "replacement_reserve_per_unit",
@@ -101,6 +109,7 @@ GUARDRAIL_INPUTS = {
     "insurance_per_unit": "opex_table.insurance",
     "r_and_m_per_unit": "opex_table.repairs_maintenance",
     "replacement_reserve_per_unit": "replacement_reserves",
+    "recurring_capex_per_unit": "capital_plan.recurring_capex",
 }
 _UNITS = {
     "physical_vacancy": "decimal",
@@ -110,6 +119,7 @@ _UNITS = {
     "insurance_per_unit": "usd",
     "r_and_m_per_unit": "usd",
     "replacement_reserve_per_unit": "usd",
+    "recurring_capex_per_unit": "usd",
 }
 
 R_AND_M_TOP_UP_CATEGORY = "Repairs & Maintenance Vintage Floor Top-Up"
@@ -183,6 +193,9 @@ class GuardrailProfile:
     strategy: str = "cashflow"
     year_built: Optional[int] = None
     deferred: bool = False
+    # deal_profile.deferred_maintenance: only the recurring capex floor reads it
+    # (the high end of the vintage band). ``deferred`` keeps its older meaning.
+    deferred_maintenance: bool = False
 
     def __post_init__(self) -> None:
         if self.strategy not in STRATEGIES:
@@ -199,7 +212,8 @@ class GuardrailProfile:
         if isinstance(profile, cls):
             out = profile
         elif isinstance(profile, DealProfile):
-            out = cls(strategy=profile.strategy, year_built=profile.year_built)
+            out = cls(strategy=profile.strategy, year_built=profile.year_built,
+                      deferred_maintenance=profile.deferred_maintenance)
         elif isinstance(profile, Mapping):
             if profile.get("strategy") is not None:
                 strategy = profile["strategy"]
@@ -209,16 +223,19 @@ class GuardrailProfile:
                 strategy=strategy,
                 year_built=_normalize_year(profile.get("year_built")),
                 deferred=bool(profile.get("deferred", False)),
+                deferred_maintenance=bool(profile.get("deferred_maintenance", False)),
             )
         elif profile is None:
             stored = (canonical or {}).get("deal_profile") or {}
-            out = cls(strategy=DEAL_TYPE_STRATEGY[check_deal_type(stored.get("deal_type", "stabilized"))])
+            out = cls(strategy=DEAL_TYPE_STRATEGY[check_deal_type(stored.get("deal_type", "stabilized"))],
+                      deferred_maintenance=bool(stored.get("deferred_maintenance", False)))
         else:
             raise TypeError("profile must be a GuardrailProfile, a DealProfile, a mapping, or None")
         if out.year_built is None and canonical is not None:
             year = canonical_year_built(canonical)
             if year is not None:
-                out = cls(strategy=out.strategy, year_built=year, deferred=out.deferred)
+                out = cls(strategy=out.strategy, year_built=year, deferred=out.deferred,
+                          deferred_maintenance=out.deferred_maintenance)
         return out
 
     @property
@@ -250,18 +267,28 @@ class GuardrailProfile:
 
     def replacement_reserve_per_unit(self) -> Decimal:
         # The lender-style house reserve: the same for every vintage, so this
-        # floor applies even when the year built is unknown. Economic CapEx is
-        # not a reserve floor (``economic_capex_per_unit`` is disclosed only).
+        # floor applies even when the year built is unknown. Recurring capex by
+        # vintage has its own floor; the charge below NOI is the larger of the two.
         return house.default_replacement_reserve_per_unit()
 
+    def recurring_capex_per_unit(self) -> Optional[Decimal]:
+        # The vintage band pick for the deal type (None when the year built is
+        # unknown: the reserve, the floor of the charge, still applies).
+        return house.default_recurring_capex_per_unit(
+            self.year_built, strategy=self.strategy, deferred=self.deferred_maintenance
+        )
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "strategy": self.strategy,
             "deal_type": STRATEGY_DEAL_TYPE[self.strategy],
             "year_built": self.year_built,
             "vintage_bucket": self.bucket,
             "deferred": self.deferred,
         }
+        if self.deferred_maintenance:
+            out["deferred_maintenance"] = True
+        return out
 
 
 def year1_insurance_per_unit(observed_per_unit: Optional[Decimal]) -> Decimal:
@@ -479,6 +506,7 @@ def house_floors(
         broker_snapshot=context.get("broker_snapshot"),
         strict=strict,
     )
+    band_pick = house.recurring_capex_band_pick(strategy=gp.strategy, deferred=gp.deferred_maintenance)
     selected = vacancy_summary["base_case_selected_anchor"]
     if "vintage_house_floor" in selected:
         vacancy_source = gp.vintage_source or SOURCE_HOUSE_VACANCY_ANCHOR
@@ -516,7 +544,12 @@ def house_floors(
         "replacement_reserve_per_unit": Floor(
             "replacement_reserve_per_unit", gp.replacement_reserve_per_unit(), HOUSE_REPLACEMENT_RESERVE,
             "House lender-style replacement reserve per unit below NOI (HOUSE_REPLACEMENT_RESERVE_PER_UNIT); "
-            "economic CapEx is disclosed separately (economic_capex_per_unit) and is not a reserve floor.",
+            "it is the floor of the charge below NOI, max(recurring capex, reserve).",
+        ),
+        "recurring_capex_per_unit": Floor(
+            "recurring_capex_per_unit", gp.recurring_capex_per_unit(), HOUSE_RECURRING_CAPEX,
+            f"House recurring capex per unit: the {band_pick} of the vintage economic CapEx band "
+            "(VINTAGE_FRAMEWORK_2026). An analyst or PCA figure below it is kept and disclosed (floor waived).",
         ),
     }
     return floors, vacancy_summary
@@ -851,13 +884,19 @@ def recorded_insurance_waiver(canonical: Mapping[str, Any]) -> Optional[dict[str
     return {"value": override.get("value"), "original": record.get("original")}
 
 
-def waiver_finding(floor: Floor, *, original: Any, applied: Any, **extra: Any) -> dict[str, Any]:
-    """A disclosed insurance floor waiver (the value is kept as the analyst set it)."""
+def waiver_finding(
+    floor: Floor, *, original: Any, applied: Any, action: str = ACTION_WAIVED, **extra: Any
+) -> dict[str, Any]:
+    """A disclosed floor waiver (the value is kept as the analyst or the PCA set it).
+
+    The insurance floor is waived by an explicit analyst insurance figure; the
+    recurring capex floor by an analyst or PCA (``deal:pca``) figure.
+    """
     return {
-        "key": "insurance_per_unit",
-        "input": "insurance_per_unit",
+        "key": floor.key,
+        "input": floor.key,
         "status": STATUS_BELOW_FLOOR,
-        "action": ACTION_WAIVED,
+        "action": action,
         "floor": float(floor.value),
         "floor_source": floor.source,
         **extra,
@@ -1002,6 +1041,66 @@ def _guard_reserves(canonical: dict[str, Any], floor: Floor, mode: str, units: i
     return findings
 
 
+def _recurring_capex_waiver(
+    canonical: Mapping[str, Any], context: Mapping[str, Any], per_unit: Decimal
+) -> Optional[tuple[str, str]]:
+    """``(action, waived_by)`` when an analyst or PCA figure set the recurring capex, else None.
+
+    The entries are the caller's freshly resolved ones (``assumption_entries``
+    in ``context``), else the canonical's own ``assumptions`` section.
+    """
+    entries = context.get("assumption_entries")
+    if not isinstance(entries, Mapping):
+        section = canonical.get("assumptions")
+        entries = section.get("entries") if isinstance(section, Mapping) else None
+    entry = entries.get("recurring_capex_per_unit") if isinstance(entries, Mapping) else None
+    if not isinstance(entry, Mapping) or not _same(entry.get("value"), float(per_unit)):
+        return None
+    if entry.get("source") == SOURCE_ANALYST:
+        return ACTION_WAIVED, "the analyst's recurring capex figure"
+    if entry.get("source") == SOURCE_DEAL_PCA:
+        return ACTION_WAIVED_BY_EVIDENCE, "the PCA (deal:pca) recurring capex"
+    return None
+
+
+def _guard_recurring_capex(
+    canonical: dict[str, Any], floor: Floor, mode: str, units: int, context: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Recurring capex per unit against the vintage band floor (a scalar: max(value, floor)).
+
+    An analyst or PCA figure below the floor is kept and disclosed (the
+    insurance waiver convention). Any other value below it is warned in
+    underwrite and raised in pricing; a hold with no recurring capex gets the
+    floor in pricing, at the house growth rate.
+    """
+    if not units:
+        return []
+    plan = canonical.get("capital_plan") if isinstance(canonical.get("capital_plan"), dict) else None
+    block = (plan or {}).get("recurring_capex")
+    raw = block.get("per_unit_annual") if isinstance(block, Mapping) else None
+    per_unit = Decimal(str(raw)) if raw is not None else Decimal("0")
+    if per_unit >= floor.value:
+        return []
+    if raw is not None:
+        waiver = _recurring_capex_waiver(canonical, context, per_unit)
+        if waiver is not None:
+            action, waived_by = waiver
+            return [waiver_finding(floor, original=float(per_unit), applied=float(per_unit),
+                                   action=action, waived_by=waived_by)]
+    finding = _finding("recurring_capex_per_unit", floor, float(per_unit), mode)
+    if mode == MODE_PRICING:
+        if plan is None:
+            plan = {}
+            canonical["capital_plan"] = plan
+        if not isinstance(block, dict):
+            block = {}
+            plan["recurring_capex"] = block
+        block["per_unit_annual"] = float(floor.value)
+        if block.get("growth_rate") is None:
+            block["growth_rate"] = float(house.HOUSE_RECURRING_CAPEX_GROWTH)
+    return [finding]
+
+
 def _check_mode(mode: str) -> None:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
@@ -1069,9 +1168,12 @@ def enforce_floors(
             findings += _guard_r_and_m(canonical, floor, mode, units)
         elif key == "replacement_reserve_per_unit":
             findings += _guard_reserves(canonical, floor, mode, units)
+        elif key == "recurring_capex_per_unit":
+            findings += _guard_recurring_capex(canonical, floor, mode, units, context)
     sink = context.get("policy_overrides")
     if isinstance(sink, list):
-        sink.extend(policy_override(f) for f in findings if f["action"] in (ACTION_ENFORCED, ACTION_WAIVED))
+        sink.extend(policy_override(f) for f in findings if f["action"] == ACTION_ENFORCED
+                    or f["action"] in WAIVER_ACTIONS)
     return findings
 
 
@@ -1082,7 +1184,7 @@ def policy_override(finding: Mapping[str, Any]) -> dict[str, Any]:
     waived floor is ``{input: "insurance_per_unit", action:
     "floor_waived_by_analyst_override", floor, floor_source, original, applied}``.
     """
-    if finding["action"] == ACTION_WAIVED:
+    if finding["action"] in WAIVER_ACTIONS:
         out = {k: v for k, v in finding.items() if k not in ("key", "status")}
         return out
     out = {
@@ -1118,24 +1220,33 @@ _SEGMENT_FIELDS = (
 
 
 def _waiver_record(key: str, first: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+    waived_by = first.get("waived_by")
+    tail = (
+        f"{waived_by} waives the floor, so pricing keeps the figure. Review it."
+        if waived_by
+        else "the analyst's explicit insurance override waives the floor, so pricing keeps the analyst's "
+        "figure. Review the override."
+    )
+    record = {
         "floor": first["floor"],
         "floor_source": first["floor_source"],
         "status": STATUS_BELOW_FLOOR,
-        "action": ACTION_WAIVED,
+        "action": first["action"],
         "original": first.get("original"),
         "applied": first.get("applied"),
         "basis": (
             f"{key} {_fmt(first.get('applied'), key)} is below the house floor {_fmt(first['floor'], key)} "
-            f"({first['floor_source']}); the analyst's explicit insurance override waives the floor, so "
-            "pricing keeps the analyst's figure. Review the override."
+            f"({first['floor_source']}); {tail}"
         ),
     }
+    if first.get("waived_by"):
+        record["waived_by"] = first["waived_by"]
+    return record
 
 
 def _entry_record(key: str, items: list[Mapping[str, Any]]) -> dict[str, Any]:
     first = items[0]
-    if first["action"] == ACTION_WAIVED:
+    if first["action"] in WAIVER_ACTIONS:
         return _waiver_record(key, first)
     originals = [float(i["original"]) for i in items if i.get("original") is not None]
     lowest = min(originals) if originals else None
@@ -1418,4 +1529,5 @@ def pricing_profile(canonical: Mapping[str, Any], *, strategy: str, year_built: 
         year_built=year_built if year_built is not None else stored.get("year_built"),
         asset_class=stored.get("asset_class"),
         star_tier=stored.get("star_tier"),
+        deferred_maintenance=bool(stored.get("deferred_maintenance", False)),
     )

@@ -7,6 +7,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from engine.modules.analysis_years import aggregate_analysis_years
 from engine.modules.capex import compute_capex
+from engine.modules.capital_plan import (
+    FUNDING_EQUITY_AT_CLOSE as IMMEDIATE_CAPEX_EQUITY_AT_CLOSE,
+    METRIC_BASIS as CAPITAL_PLAN_METRIC_BASIS,
+    compute_below_noi_charge,
+    immediate_capex as capital_plan_immediate_capex,
+)
 from engine.modules.cashflow import compute_cashflow
 from engine.modules.debt import compute_debt, compute_preferred_equity, size_refi_loan
 from engine.modules.fund_waterfall import compute_fund_waterfall
@@ -51,6 +57,36 @@ def _equity_funded_purchase_assumptions(
         out["total_unlevered_basis"] = float(price + dec(out.get("closing_costs") or 0) + funded)
     if out.get("total_equity_basis") is None:
         out["total_equity_basis"] = float(dec(out.get("equity_contribution") or 0) + funded)
+    return out
+
+
+def _immediate_capex_purchase_assumptions(
+    purchase_assumptions: Optional[Dict[str, Any]],
+    to_add: Decimal,
+    *,
+    equity_funded: bool,
+) -> Optional[Dict[str, Any]]:
+    """Day-0 bases plus the immediate-capex bucket (ADR 0003 §3).
+
+    Unlike the renovation budget, a stated basis is NOT assumed to include it:
+    ``to_add`` is the amount not yet in the stated bases (the bucket's
+    ``amount`` less its ``amount_in_stated_basis``, which backsolve's priced case
+    sets). Equity-funded, it is added to the total equity basis (default:
+    ``equity_contribution``) and the unlevered basis (default: price + closing
+    costs); a lender holdback only to the unlevered basis.
+    """
+    if not purchase_assumptions or to_add == 0:
+        return purchase_assumptions
+    out = dict(purchase_assumptions)
+    unlevered = out.get("total_unlevered_basis")
+    if unlevered is None:
+        unlevered = dec(out.get("purchase_price") or 0) + dec(out.get("closing_costs") or 0)
+    out["total_unlevered_basis"] = float(dec(unlevered) + to_add)
+    if equity_funded:
+        equity = out.get("total_equity_basis")
+        if equity is None:
+            equity = out.get("equity_contribution") or 0
+        out["total_equity_basis"] = float(dec(equity) + to_add)
     return out
 
 
@@ -737,24 +773,11 @@ def run_underwriting(
                 for m in period_months:
                     m["total_capex"] = round2(dec(m["total_capex"]) * keep_ratio)
 
-    # Replacement Reserves — spread annual amounts evenly across months
-    reserves_by_month: List[Dict[str, Any]] = []
-    reserve_segments = inputs.get("replacement_reserves", [])
-    if reserve_segments:
-        reserve_lookup: Dict[str, Decimal] = {}
-        for seg in reserve_segments:
-            seg_start = month_id(seg["start_period"])
-            seg_end = month_id(seg["end_period"])
-            annual = dec(seg["annual_amount"])
-            monthly = annual / Decimal("12")
-            for m in time_grid.month_ids:
-                if seg_start <= m <= seg_end:
-                    reserve_lookup[m] = reserve_lookup.get(m, Decimal("0")) + monthly
-        for m in time_grid.month_ids:
-            reserves_by_month.append({
-                "month": m,
-                "replacement_reserves": round2(reserve_lookup.get(m, Decimal("0"))),
-            })
+    # Below-NOI capital charge (ADR 0003 §3): max(recurring capex by vintage,
+    # lender replacement reserve) per month, carried in the cash flow's
+    # replacement_reserves line. Without recurring capex it is the reserve,
+    # spread evenly across each segment's months, as before.
+    reserves_by_month, capital_charge = compute_below_noi_charge(time_grid, inputs)
 
     # Snapshot raw CapEx before debt-draw offset for unlevered CF correction.
     raw_capex_lookup = {m["month"]: float(m["total_capex"]) for m in capex_by_month}
@@ -1031,26 +1054,53 @@ def run_underwriting(
             if dfc > 0:
                 cf_m["debt_funded_capex"] = dfc
 
+    # Below-NOI capital charge disclosure: both buckets beside the charge.
+    if capital_charge is not None:
+        charge_lookup = {row["month"]: row for row in reserves_by_month}
+        for cf_m in cashflow_result["by_month"]:
+            row = charge_lookup.get(cf_m["month"])
+            if row is not None:
+                cf_m["recurring_capex_by_vintage"] = row["recurring_capex_by_vintage"]
+                cf_m["replacement_reserve_floor"] = row["replacement_reserve_floor"]
+        for cf_y in cashflow_result["by_year"]:
+            months = [m for m in cashflow_result["by_month"] if m["month"].startswith(cf_y["year"])]
+            for field in ("recurring_capex_by_vintage", "replacement_reserve_floor"):
+                cf_y[field] = round2(sum((dec(m.get(field, 0)) for m in months), Decimal("0")))
+
     # Equity-funded renovation budget: shown on its months, never in the cash
     # flow; the Day-0 bases include it (stated by the caller, else defaulted).
+    # The immediate-capex bucket is capital at close too: equity-funded, it is
+    # in both bases; a lender holdback only in the unlevered basis.
+    immediate_amount, immediate_funding, immediate_in_basis = capital_plan_immediate_capex(inputs)
     capex_funding_result = None
+    funded_total = Decimal("0")
     if renovation_funding == RENOVATION_FUNDING_EQUITY_AT_CLOSE:
         funded_total = sum((dec(v) for v in equity_funded_capex.values()), Decimal("0"))
         for cf_m in cashflow_result["by_month"]:
             efc = equity_funded_capex.get(cf_m["month"], 0.0)
             if efc > 0:
                 cf_m["equity_funded_capex"] = efc
+        capex_funding_result = {
+            "renovation_capex_funding": RENOVATION_FUNDING_EQUITY_AT_CLOSE,
+            "equity_funded_renovation_budget": float(round2(funded_total)),
+            "excluded_from_operating_cash_flow": True,
+            "by_month": [{"month": m, "amount": v} for m, v in sorted(equity_funded_capex.items())],
+        }
+    if funded_total > 0:
         inputs = {
             **inputs,
             "purchase_assumptions": _equity_funded_purchase_assumptions(
                 inputs.get("purchase_assumptions"), funded_total
             ),
         }
-        capex_funding_result = {
-            "renovation_capex_funding": RENOVATION_FUNDING_EQUITY_AT_CLOSE,
-            "equity_funded_renovation_budget": float(round2(funded_total)),
-            "excluded_from_operating_cash_flow": True,
-            "by_month": [{"month": m, "amount": v} for m, v in sorted(equity_funded_capex.items())],
+    immediate_added = immediate_amount - immediate_in_basis
+    if immediate_added != 0:
+        inputs = {
+            **inputs,
+            "purchase_assumptions": _immediate_capex_purchase_assumptions(
+                inputs.get("purchase_assumptions"), immediate_added,
+                equity_funded=immediate_funding == IMMEDIATE_CAPEX_EQUITY_AT_CLOSE,
+            ),
         }
 
     # Inject exit proceeds into cashflow (before metrics and fund waterfall)
@@ -1200,6 +1250,11 @@ def run_underwriting(
         result["renovations"] = renovation_result
     if capex_funding_result is not None:
         result["capex_funding"] = capex_funding_result
+    if inputs.get("capital_plan") or capital_charge is not None:
+        result["capital_plan"] = _capital_plan_result(
+            capital_charge, renovation_result, renovation_funding,
+            immediate_amount, immediate_funding, immediate_in_basis,
+        )
 
     # Pass renovation_detail sidecar through untouched
     if inputs.get("renovation_detail"):
@@ -1300,6 +1355,37 @@ def run_underwriting(
         )
 
     return result
+
+
+def _capital_plan_result(
+    capital_charge: Optional[Dict[str, Any]],
+    renovation_result: Optional[Dict[str, Any]],
+    renovation_funding: str,
+    immediate_amount: Decimal,
+    immediate_funding: str,
+    immediate_in_basis: Decimal,
+) -> Dict[str, Any]:
+    """The three capex buckets as run (ADR 0003 §3), next to the renovation budget."""
+    equity_funded = immediate_funding == IMMEDIATE_CAPEX_EQUITY_AT_CLOSE
+    renovation_budget = (
+        float(renovation_result["summary"]["total_renovation_cost"]) if renovation_result else 0.0
+    )
+    return {
+        "immediate_capex": {
+            "amount": float(round2(immediate_amount)),
+            "funding": immediate_funding,
+            # Funded at close, never in the monthly cash flows. The engine adds
+            # what the caller's stated bases do not already carry.
+            "in_total_equity_basis": bool(immediate_amount > 0 and equity_funded),
+            "in_total_unlevered_basis": bool(immediate_amount > 0),
+            "amount_in_stated_basis": float(round2(immediate_in_basis)),
+            "added_by_engine": float(round2(immediate_amount - immediate_in_basis)),
+        },
+        # The value-add renovation budget is its own budget, never part of bucket 1.
+        "renovation_budget": {"amount": renovation_budget, "funding": renovation_funding},
+        "below_noi_capex_charge": capital_charge,
+        "metric_basis": dict(CAPITAL_PLAN_METRIC_BASIS),
+    }
 
 
 def run_from_files(inputs_path: Path, outputs_path: Path, validation_path: Path) -> None:

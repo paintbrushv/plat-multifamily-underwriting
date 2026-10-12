@@ -281,6 +281,12 @@ def build_deal_from_documents(
     star_tier: str | None = None,
     assumption_overrides: Mapping[str, Any] | None = None,
     market: Any = DEFAULT_MARKET,
+    # Capital plan: the three capex buckets (ADR 0003 §3)
+    deferred_maintenance: bool = False,
+    pca: Mapping[str, Any] | None = None,
+    immediate_capex: float | None = None,
+    immediate_capex_funding: str | None = None,
+    recurring_capex_per_unit: float | None = None,
     # Property tax (engine/property_tax.py)
     property_tax_millage: float | None = None,
     property_tax_assessment_ratio: float | None = None,
@@ -689,7 +695,15 @@ def build_deal_from_documents(
         submarket=submarket,
         metro_slug=metro_slug,
         year_built=resolved_year_built,
+        deferred_maintenance=deferred_maintenance,
     )
+    overrides.update(apply_capital_plan_inputs(
+        deal,
+        pca=pca,
+        immediate_capex=immediate_capex,
+        immediate_capex_funding=immediate_capex_funding,
+        recurring_capex_per_unit=recurring_capex_per_unit,
+    ))
     if asset_class is not None or star_tier is not None:
         profile = replace(profile, asset_class=asset_class, star_tier=star_tier)
     if market is DEFAULT_MARKET:
@@ -705,6 +719,85 @@ def build_deal_from_documents(
     return sync_ingest_gate_assumptions(deal)
 
 
+PCA_FIELDS = ("immediate_capex", "recurring_capex_per_unit", "as_of", "reference")
+
+
+def clean_pca(pca: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """PCA evidence (``capital_plan.pca``) with only its known fields, or None."""
+    if pca is None:
+        return None
+    if not isinstance(pca, Mapping):
+        raise ValueError("PCA evidence must be an object")
+    unknown = sorted(set(pca) - set(PCA_FIELDS))
+    if unknown:
+        raise ValueError(f"PCA evidence has unknown fields {unknown}; known fields: {list(PCA_FIELDS)}")
+    out: dict[str, Any] = {}
+    for name in ("immediate_capex", "recurring_capex_per_unit"):
+        if pca.get(name) is not None:
+            value = float(pca[name])
+            if value < 0:
+                raise ValueError(f"PCA {name} must be >= 0")
+            out[name] = value
+    for name in ("as_of", "reference"):
+        if pca.get(name) not in (None, ""):
+            out[name] = str(pca[name])
+    return out or None
+
+
+def apply_capital_plan_inputs(
+    deal: dict[str, Any],
+    *,
+    pca: Mapping[str, Any] | None = None,
+    immediate_capex: float | None = None,
+    immediate_capex_funding: str | None = None,
+    recurring_capex_per_unit: float | None = None,
+    note_prefix: str = "ingest input",
+) -> dict[str, Any]:
+    """Put capital-plan inputs on ``deal`` before resolution; return the overrides they imply.
+
+    PCA evidence goes to ``capital_plan.pca`` (deal evidence, ``deal:pca``).
+    The precedence is PCA > analyst > house: an analyst figure for a bucket
+    the PCA also covers is written into the canonical, where the resolver
+    keeps the PCA value and records the analyst figure as a candidate; an
+    analyst figure for a bucket the PCA does not cover becomes an analyst
+    override. ``immediate_capex_funding`` (equity_at_close / lender_holdback)
+    is a canonical field, not an assumption. Mutates ``deal``.
+    """
+    from engine.underwriting_policy import IMMEDIATE_CAPEX_FUNDING_MODES
+
+    overrides: dict[str, Any] = {}
+    evidence = clean_pca(pca)
+    if immediate_capex_funding is not None and immediate_capex_funding not in IMMEDIATE_CAPEX_FUNDING_MODES:
+        raise ValueError(f"immediate capex funding must be one of {IMMEDIATE_CAPEX_FUNDING_MODES}")
+    if evidence is None and immediate_capex is None and recurring_capex_per_unit is None \
+            and immediate_capex_funding is None:
+        return overrides
+    plan = deal.setdefault("capital_plan", {})
+    if evidence is not None:
+        plan["pca"] = evidence
+    if immediate_capex_funding is not None:
+        plan.setdefault("immediate_capex", {})["funding"] = immediate_capex_funding
+        plan["immediate_capex"].setdefault("amount", None)
+    for key, value, block, field in (
+        ("immediate_capex", immediate_capex, "immediate_capex", "amount"),
+        ("recurring_capex_per_unit", recurring_capex_per_unit, "recurring_capex", "per_unit_annual"),
+    ):
+        if value is None:
+            continue
+        if float(value) < 0:
+            raise ValueError(f"{key} must be >= 0")
+        pca_field = "immediate_capex" if key == "immediate_capex" else "recurring_capex_per_unit"
+        if evidence is not None and evidence.get(pca_field) is not None:
+            # Superseded by the PCA. On a first resolution the resolver records the
+            # analyst figure as a candidate; a resolved canonical would read a
+            # written value as an analyst edit, so it is left out there.
+            if not isinstance(deal.get("assumptions"), Mapping):
+                plan.setdefault(block, {})[field] = float(value)
+        else:
+            overrides[key] = {"value": float(value), "note": f"{note_prefix} {key}"}
+    return overrides
+
+
 # Legacy ``metadata.ingest_gate.assumed_defaults`` view of the resolver
 # entries: the two policy inputs ingest has always disclosed this way.
 _LEGACY_ASSUMED_DEFAULT_FIELDS = (
@@ -712,6 +805,8 @@ _LEGACY_ASSUMED_DEFAULT_FIELDS = (
     ("collection_loss", "collection_loss_curve.loss_rate"),
 )
 _ASSUMED_DEFAULT_FLAG_PREFIX = "assumed_default_"
+# Intake review flag: built before 2000 with no property condition assessment.
+CAPEX_PCA_MISSING_FLAG = "capex_pca_missing_pre_2000_review"
 
 
 def _legacy_source(source: str) -> str:
@@ -753,11 +848,16 @@ def sync_ingest_gate_assumptions(deal: dict[str, Any]) -> dict[str, Any]:
     flags = [
         flag
         for flag in metadata.get("intake_sanity_flags") or []
-        if not flag.startswith(_ASSUMED_DEFAULT_FLAG_PREFIX)
+        if not flag.startswith(_ASSUMED_DEFAULT_FLAG_PREFIX) and flag != CAPEX_PCA_MISSING_FLAG
     ]
     flags.extend(
         f"{_ASSUMED_DEFAULT_FLAG_PREFIX}{item['field'].rsplit('.', 1)[-1]}" for item in assumed
     )
+    # ADR 0003 §3: a pre-2000 vintage without PCA evidence is a capex review
+    # prompt (never a blocker); the validator warns CAPEX_PCA_MISSING too.
+    recurring = entries.get("recurring_capex_per_unit") or {}
+    if (recurring.get("detail") or {}).get("pca_review_required"):
+        flags.append(CAPEX_PCA_MISSING_FLAG)
     if flags:
         metadata["intake_sanity_flags"] = flags
     else:

@@ -287,14 +287,17 @@ def test_pricing_floors_only_raise_and_keep_the_analyst_curves():
     # Every raise is disclosed with its original and applied value, and recorded as enforced.
     raised = [(o["assumption"], o["original"], o["applied"]) for o in summary["policy_overrides"]
               if o.get("guardrail") == "house_floor"]
+    # A hold with no recurring capex gets the vintage floor (1980s, stabilized: the low end).
     assert sorted(raised) == [("collection_loss", 0.001, 0.0075), ("concessions", 0.004, 0.0075),
-                              ("loss_to_lease", 0.005, 0.01)]
+                              ("loss_to_lease", 0.005, 0.01), ("recurring_capex_per_unit", 0.0, 1000.0)]
     findings = summary["guardrails"]["findings"]
     assert sorted((f["key"], f["action"], f["floor_source"]) for f in findings) == [
         ("collection_loss", "enforced", "house:vintage_1980s"),
         ("concessions", "enforced", "house:vintage_1980s"),
         ("loss_to_lease", "enforced", "house:vintage_1980s"),
+        ("recurring_capex_per_unit", "enforced", "house:recurring_capex_vintage"),
     ]
+    assert prepared["capital_plan"]["recurring_capex"] == {"per_unit_annual": 1000.0, "growth_rate": 0.03}
     assert not [o for o in summary["policy_overrides"] if "normalization" in o]
 
     # Pricing the priced canonical again raises nothing and changes nothing.

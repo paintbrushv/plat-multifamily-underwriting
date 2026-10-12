@@ -187,7 +187,9 @@
       "insurance_per_unit": "deal:t12",
       "r_and_m_per_unit": "deal:t12",
       "replacement_reserve_per_unit": "house:replacement_reserve",
-      "economic_capex_per_unit": "house:vintage_1970s",
+      "immediate_capex": "house:deferred_capex",
+      "recurring_capex_per_unit": "house:recurring_capex_vintage",
+      "recurring_capex_growth": "house:opex_growth_table",
       "purchase_closing_cost_pct": "house:backsolve_policy",
       "renovation_premium": "analyst",
       "turn_cost_per_unit": "house:vintage_1970s",
@@ -255,6 +257,14 @@
       "replacement_reserve_per_unit": [
         250,
         250
+      ],
+      "recurring_capex_per_unit": [
+        2125,
+        2125
+      ],
+      "immediate_capex": [
+        0,
+        0
       ]
     },
     "opex_growth": {
@@ -309,11 +319,11 @@
     },
     "results": {
       "unlevered_irr": [
-        0.05,
+        0.03,
         0.12
       ],
       "levered_irr": [
-        0.04,
+        0.01,
         0.2
       ],
       "minimum_dscr": [
@@ -328,6 +338,7 @@
     "guardrail_warnings": [
       "physical_vacancy",
       "concessions"
-    ]
+    ],
+    "guardrail_waivers": []
   }
 }

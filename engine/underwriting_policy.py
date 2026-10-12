@@ -130,8 +130,8 @@ def default_opex_growth_rate(
 
 # Institutional vintage framework supplied by the user on 2026-05-08.
 # Ranges are in 2026 dollars: annual/unit R&M (on R_AND_M_FLOOR_BASIS),
-# economic CapEx (sustaining capital, not the replacement reserve) and a rough
-# turn-cost band, for use when a deal lacks better property-specific data.
+# economic CapEx (the recurring capex band below NOI; the replacement reserve
+# is its floor) and a rough turn-cost band, for use when a deal lacks better property-specific data.
 VINTAGE_FRAMEWORK_2026 = {
     "1960s": {
         "year_min": 1960,
@@ -407,19 +407,40 @@ def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
     return None
 
 
-# ── Replacement reserve vs economic CapEx (ADR 0003 §3, §5) ──────────────
-# HOUSE POLICY, NOT MARKET DATA. The replacement reserve is the lender-style
-# annual reserve carried below NOI. It is the same for every vintage and
-# strategy: $250/unit/year is the desk practice. The resolver writes it when
-# the canonical carries no reserve, and backsolve's pricing floor for reserves
-# is this constant.
+# ── Capital: the three capex buckets (ADR 0003 §3, §5) ───────────────────
+# HOUSE POLICY, NOT MARKET DATA. Every deal (stabilized and value-add) budgets
+# capital in three buckets, and older vintages need more of it:
 #
-# The vintage framework's economic CapEx band (``economic_capex_low`` /
-# ``economic_capex_high``) is sustaining capital (roofs, HVAC, paving, unit
-# interiors), not a reserve. It is disclosed as its own assumption
-# (``economic_capex_per_unit``) and does not reach the cash flows unless the
-# analyst opts in (a capex budget, or an override of that key).
+# 1. Immediate / deferred capex at close: one-time capital for deferred
+#    maintenance and PCA immediate needs, funded with equity at close (or a
+#    lender holdback). It is separate from the value-add renovation budget.
+#    Without PCA evidence or an analyst figure nothing is budgeted
+#    (``HOUSE_IMMEDIATE_CAPEX_DEFAULT``, flagged for review).
+# 2. Recurring capex by vintage: annual $/unit below NOI (not opex), grown
+#    every analysis year at ``HOUSE_RECURRING_CAPEX_GROWTH``. The house
+#    default is the vintage framework's economic CapEx band
+#    (``economic_capex_low`` / ``economic_capex_high``): the low end for a
+#    stabilized deal, the midpoint for value-add, the high end for a deal
+#    flagged with deferred maintenance (``default_recurring_capex_per_unit``).
+#    A PCA (deal evidence) or an analyst figure replaces it; in pricing the
+#    band is a floor.
+# 3. Lender replacement reserve: $250/unit/year below NOI, the same for every
+#    vintage and strategy (desk practice). It is a FLOOR, not an addition:
+#    the below-NOI capital charge each month is max(recurring capex, reserve),
+#    never both. It is also backsolve's pricing floor for reserves.
 HOUSE_REPLACEMENT_RESERVE_PER_UNIT = Decimal("250")
+HOUSE_IMMEDIATE_CAPEX_DEFAULT = Decimal("0")
+# Recurring capex is labor and materials for building systems (roofs, HVAC,
+# paving, unit interiors), so it grows with repairs & maintenance.
+HOUSE_RECURRING_CAPEX_GROWTH_CONSTANT = "OPEX_GROWTH_REPAIRS_MAINTENANCE"
+HOUSE_RECURRING_CAPEX_GROWTH = OPEX_GROWTH_REPAIRS_MAINTENANCE
+# A vintage built before this year without PCA evidence is flagged for a
+# capex review (validator CAPEX_PCA_MISSING, review_required on the entry).
+CAPEX_PCA_REVIEW_BEFORE_YEAR = 2000
+# Where an immediate-capex budget is funded.
+IMMEDIATE_CAPEX_EQUITY_AT_CLOSE = "equity_at_close"
+IMMEDIATE_CAPEX_LENDER_HOLDBACK = "lender_holdback"
+IMMEDIATE_CAPEX_FUNDING_MODES = (IMMEDIATE_CAPEX_EQUITY_AT_CLOSE, IMMEDIATE_CAPEX_LENDER_HOLDBACK)
 
 
 def default_replacement_reserve_per_unit(
@@ -432,10 +453,49 @@ def default_replacement_reserve_per_unit(
 
     Always ``HOUSE_REPLACEMENT_RESERVE_PER_UNIT``: the reserve does not vary by
     vintage, strategy or deferred maintenance. The arguments are accepted so
-    callers that pass the deal profile keep working. Economic CapEx is
-    ``default_economic_capex_per_unit``.
+    callers that pass the deal profile keep working. Recurring capex by
+    vintage is ``default_recurring_capex_per_unit``; the charge below NOI is
+    the larger of the two.
     """
     return HOUSE_REPLACEMENT_RESERVE_PER_UNIT
+
+
+def recurring_capex_band_pick(*, strategy: str = "cashflow", deferred: bool = False) -> str:
+    """Which point of the vintage band the house uses: ``low``, ``midpoint`` or ``high``."""
+    if deferred:
+        return "high"
+    if strategy == "value_add":
+        return "midpoint"
+    return "low"
+
+
+def default_recurring_capex_per_unit(
+    year_built: Optional[int],
+    *,
+    strategy: str = "cashflow",
+    deferred: bool = False,
+) -> Optional[Decimal]:
+    """Annual/unit recurring capex (year 1) from the vintage economic CapEx band.
+
+    - stabilized (cashflow) deals: the low end of the band;
+    - value-add deals: the midpoint;
+    - a deal flagged with deferred maintenance: the high end.
+
+    ``None`` when the year built is unknown (the resolver then falls back to
+    the $250 replacement reserve and flags the entry for review).
+    """
+    bucket = vintage_bucket(year_built)
+    if bucket is None:
+        return None
+    row = VINTAGE_FRAMEWORK_2026[bucket]
+    low = row["economic_capex_low"]
+    high = row["economic_capex_high"]
+    pick = recurring_capex_band_pick(strategy=strategy, deferred=deferred)
+    if pick == "high":
+        return high
+    if pick == "midpoint":
+        return (low + high) / Decimal("2")
+    return low
 
 
 def default_economic_capex_per_unit(
@@ -444,24 +504,17 @@ def default_economic_capex_per_unit(
     strategy: str = "cashflow",
     deferred: bool = False,
 ) -> Optional[Decimal]:
-    """Annual/unit economic CapEx (sustaining capital) from the vintage band.
+    """Deprecated name of ``default_recurring_capex_per_unit`` (same values)."""
+    return default_recurring_capex_per_unit(year_built, strategy=strategy, deferred=deferred)
 
-    This is not the replacement reserve. Default policy:
-    - cashflow / stabilized deals start at the low end of the sustainable band
-    - value-add / deferred deals use the midpoint of the sustainable band
-    - explicitly deferred assets can be pushed to the high end
-    """
+
+def recurring_capex_band(year_built: Optional[int]) -> Optional[tuple[Decimal, Decimal]]:
+    """The vintage economic CapEx band ``(low, high)`` per unit, or None when unknown."""
     bucket = vintage_bucket(year_built)
     if bucket is None:
         return None
     row = VINTAGE_FRAMEWORK_2026[bucket]
-    low = row["economic_capex_low"]
-    high = row["economic_capex_high"]
-    if deferred:
-        return high
-    if strategy == "value_add":
-        return (low + high) / Decimal("2")
-    return low
+    return row["economic_capex_low"], row["economic_capex_high"]
 
 
 def default_r_and_m_per_unit(
@@ -835,7 +888,7 @@ def default_vintage_operating_profile(
     when they need a conservative first-pass assumption set.
     """
     bucket = vintage_bucket(year_built)
-    economic_capex = default_economic_capex_per_unit(year_built, strategy=strategy, deferred=deferred)
+    recurring_capex = default_recurring_capex_per_unit(year_built, strategy=strategy, deferred=deferred)
     return {
         "vintage_bucket": bucket,
         "strategy": strategy,
@@ -851,10 +904,13 @@ def default_vintage_operating_profile(
             else None
         ),
         "replacement_reserve_per_unit": float(default_replacement_reserve_per_unit()),
-        # Sustaining capital, disclosed separately from the reserve. The older
-        # key name is kept for callers that read it.
-        "economic_capex_per_unit": float(economic_capex) if economic_capex is not None else None,
-        "economic_capex_reserve_per_unit": float(economic_capex) if economic_capex is not None else None,
+        # Recurring capex by vintage (year 1, grown at HOUSE_RECURRING_CAPEX_GROWTH);
+        # the charge below NOI is max(recurring capex, replacement reserve). The
+        # older key names are kept for callers that read them.
+        "recurring_capex_per_unit": float(recurring_capex) if recurring_capex is not None else None,
+        "recurring_capex_growth": float(HOUSE_RECURRING_CAPEX_GROWTH),
+        "economic_capex_per_unit": float(recurring_capex) if recurring_capex is not None else None,
+        "economic_capex_reserve_per_unit": float(recurring_capex) if recurring_capex is not None else None,
         "year1_insurance_per_unit": float(
             default_year1_insurance_per_unit(observed_insurance_per_unit)
         ),

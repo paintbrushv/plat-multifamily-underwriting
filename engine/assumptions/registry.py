@@ -16,6 +16,8 @@ SOURCE_DEAL_RENT_ROLL = "deal:rent_roll"
 SOURCE_DEAL_T12 = "deal:t12"
 SOURCE_DEAL_OM = "deal:om"
 SOURCE_DEAL_COMPS = "deal:comps"
+# A property condition assessment (capital_plan.pca): immediate needs and recurring capex.
+SOURCE_DEAL_PCA = "deal:pca"
 SOURCE_ENGINE_FALLBACK = "engine_fallback"
 DEAL_PREFIX = "deal:"
 MARKET_PREFIX = "market:"
@@ -28,6 +30,11 @@ HOUSE_YEAR1_INSURANCE_FLOOR = "house:year1_insurance_floor"
 HOUSE_EXIT_CAP_SPREAD = "house:exit_cap_spread"
 # HOUSE_REPLACEMENT_RESERVE_PER_UNIT: the lender-style reserve below NOI.
 HOUSE_REPLACEMENT_RESERVE = "house:replacement_reserve"
+# default_recurring_capex_per_unit: the vintage economic CapEx band (low /
+# midpoint / high by deal type and deferred maintenance), recurring capex below NOI.
+HOUSE_RECURRING_CAPEX = "house:recurring_capex_vintage"
+# HOUSE_IMMEDIATE_CAPEX_DEFAULT: nothing budgeted at close without PCA or analyst evidence.
+HOUSE_DEFERRED_CAPEX = "house:deferred_capex"
 
 
 def house_vintage_source(bucket: str) -> str:

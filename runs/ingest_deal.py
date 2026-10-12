@@ -71,6 +71,20 @@ Assumption layer (ADR 0003):
     <output stem>.assumptions.json and the assumption register page
     <output stem>.assumptions.html next to the output JSON.
 
+    Capital plan, the three capex buckets (ADR 0003 §3):
+    python runs/ingest_deal.py ... --year-built 1978 --deferred-maintenance \
+      --pca data/pca.json --immediate-capex 400000 \
+      --immediate-capex-funding equity_at_close --recurring-capex-per-unit 1500
+
+    --pca takes a JSON object {"immediate_capex": dollars,
+    "recurring_capex_per_unit": dollars per unit per year, "as_of": "YYYY-MM-DD",
+    "reference": "..."} (deal evidence, source deal:pca). The precedence is
+    PCA > analyst > house vintage band: --immediate-capex and
+    --recurring-capex-per-unit are analyst figures, used for a bucket the PCA
+    does not cover. --deferred-maintenance sets deal_profile.deferred_maintenance
+    (recurring capex defaults to the high end of the vintage band). The charge
+    below NOI is max(recurring capex, the $250/unit replacement reserve).
+
     Market data (rent-growth forecast, stabilized vacancy, concession rate,
     market cap rate) comes from engine.market_data.default_registry(); pass
     --no-market-data to resolve from deal evidence and house policy only.
@@ -113,9 +127,12 @@ from engine.ingest.broker_om_snapshot import stable_property_tax_source_locator
 from engine.ingest.ingestion_pipeline import (
     analyst_property_tax_policy,
     apply_analyst_property_tax_policy,
+    apply_capital_plan_inputs,
     build_deal_from_documents,
+    clean_pca,
     sync_ingest_gate_assumptions,
 )
+from engine.underwriting_policy import IMMEDIATE_CAPEX_FUNDING_MODES
 from engine.validator import PROPERTY_TAX_MILLAGE_MISSING
 
 PARTIAL_JSON_OVERRIDE_NOTE = "supplied by --partial-json"
@@ -183,7 +200,10 @@ def apply_partial_and_reresolve(base_deal: dict, partial: dict, *, market: objec
     return sync_ingest_gate_assumptions(resolved)
 
 
-_PROFILE_FLAGS = ("deal_type", "msa", "submarket", "metro_slug", "year_built", "asset_class", "star_tier")
+_PROFILE_FLAGS = (
+    "deal_type", "msa", "submarket", "metro_slug", "year_built", "asset_class", "star_tier", "deferred_maintenance",
+)
+_CAPITAL_PLAN_FLAGS = ("pca", "immediate_capex", "immediate_capex_funding", "recurring_capex_per_unit")
 MILLAGE_SOURCE_LOCATOR = "cli:--millage"
 MILLAGE_AND_RATIO_SOURCE_LOCATOR = "cli:--millage,--assessment-ratio"
 
@@ -209,7 +229,43 @@ def _profile_from_args(
         year_built=args.year_built if args.year_built is not None else base.get("year_built"),
         asset_class=args.asset_class or base.get("asset_class"),
         star_tier=args.star_tier or base.get("star_tier"),
+        deferred_maintenance=(
+            args.deferred_maintenance if args.deferred_maintenance is not None
+            else bool(base.get("deferred_maintenance", False))
+        ),
     )
+
+
+def _capital_plan_flags_given(args: argparse.Namespace) -> bool:
+    return any(getattr(args, name) is not None for name in _CAPITAL_PLAN_FLAGS)
+
+
+def _load_pca(args: argparse.Namespace) -> dict | None:
+    """The --pca evidence (validated), or None. Raises ValueError / OSError."""
+    if args.pca is None:
+        return None
+    return clean_pca(_load_json(args.pca))
+
+
+def _capital_plan_kwargs(args: argparse.Namespace, pca: dict | None) -> dict:
+    return {
+        "pca": pca,
+        "immediate_capex": args.immediate_capex,
+        "immediate_capex_funding": args.immediate_capex_funding,
+        "recurring_capex_per_unit": args.recurring_capex_per_unit,
+    }
+
+
+def _superseded_notes(args: argparse.Namespace, pca: dict | None) -> list[str]:
+    notes = []
+    for flag, value, field in (
+        ("--immediate-capex", args.immediate_capex, "immediate_capex"),
+        ("--recurring-capex-per-unit", args.recurring_capex_per_unit, "recurring_capex_per_unit"),
+    ):
+        if value is not None and (pca or {}).get(field) is not None:
+            notes.append(f"{flag} {value:,.0f} is superseded by the PCA {field} {pca[field]:,.0f} "
+                         "(precedence: PCA > analyst > house)")
+    return notes
 
 
 def _profile_flags_given(args: argparse.Namespace) -> bool:
@@ -227,6 +283,31 @@ def _property_tax_policy_from_args(args: argparse.Namespace) -> dict | None:
         return None
     locator = MILLAGE_SOURCE_LOCATOR if args.assessment_ratio is None else MILLAGE_AND_RATIO_SOURCE_LOCATOR
     return analyst_property_tax_policy(args.millage, args.assessment_ratio, source_locator=locator)
+
+
+def _capital_plan_lines(entries: dict) -> list[str]:
+    """The three capex buckets as resolved, one line each."""
+    if not any(key in entries for key in ("immediate_capex", "recurring_capex_per_unit")):
+        return []
+
+    def show(key: str, unit: str) -> str:
+        entry = entries.get(key) or {}
+        value = entry.get("value")
+        text = "n/a" if not isinstance(value, (int, float)) else f"${value:,.0f}{unit}"
+        flag = " REVIEW" if entry.get("review_required") else ""
+        return f"{text} ({entry.get('source', 'n/a')}){flag}"
+
+    recurring = (entries.get("recurring_capex_per_unit") or {}).get("value")
+    reserve = (entries.get("replacement_reserve_per_unit") or {}).get("value")
+    binds = ""
+    if isinstance(recurring, (int, float)) and isinstance(reserve, (int, float)):
+        binds = " -> recurring capex binds" if recurring > reserve else " -> replacement reserve binds"
+    return [
+        "  Capital plan (charge below NOI = max(recurring capex, reserve)):",
+        f"    1. Immediate capex at close: {show('immediate_capex', '')}",
+        f"    2. Recurring capex (year 1): {show('recurring_capex_per_unit', '/unit/yr')}",
+        f"    3. Replacement reserve:      {show('replacement_reserve_per_unit', '/unit/yr')}{binds}",
+    ]
 
 
 def _rent_roll_reconciliation_lines(recon: object) -> list[str]:
@@ -365,6 +446,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="CoStar-style star tier (deal_profile.star_tier); part of the market-data geography")
     p.add_argument("--asset-class", default=None, choices=list(ASSET_CLASSES),
                    help="Asset class (deal_profile.asset_class)")
+    # Capital plan: the three capex buckets (ADR 0003 §3)
+    p.add_argument("--deferred-maintenance", action="store_true", default=None,
+                   help="The asset has known deferred maintenance (deal_profile.deferred_maintenance): "
+                        "recurring capex defaults to the high end of the vintage band.")
+    p.add_argument("--pca", type=Path, default=None, metavar="PATH",
+                   help='Property condition assessment evidence: a JSON object {"immediate_capex": $, '
+                        '"recurring_capex_per_unit": $/unit/yr, "as_of", "reference"} (source deal:pca).')
+    p.add_argument("--immediate-capex", type=float, default=None, metavar="DOLLARS",
+                   help="Bucket 1: immediate / deferred capex at close, total dollars (analyst figure; "
+                        "the PCA immediate needs win when given).")
+    p.add_argument("--immediate-capex-funding", default=None, choices=list(IMMEDIATE_CAPEX_FUNDING_MODES),
+                   help="How bucket 1 is funded: equity_at_close (default) or lender_holdback.")
+    p.add_argument("--recurring-capex-per-unit", type=float, default=None, metavar="DOLLARS",
+                   help="Bucket 2: recurring capex per unit per year, year 1 (analyst figure; the PCA "
+                        "figure wins when given). The charge below NOI is max(this, the replacement reserve).")
     p.add_argument("--no-market-data", action="store_true",
                    help="Resolve assumptions without market data. By default the market-data "
                         "registry (engine.market_data.default_registry) is used; missing feeder "
@@ -415,6 +511,12 @@ def main() -> int:
             print(f"Error: failed to load assumption overrides: {exc}", file=sys.stderr)
             return 1
 
+    try:
+        pca_evidence = _load_pca(args)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Error: failed to load --pca: {exc}", file=sys.stderr)
+        return 1 if isinstance(exc, OSError) else 2
+
     if args.canonical_json:
         forbidden = [
             args.rent_roll,
@@ -456,8 +558,9 @@ def main() -> int:
         om_source_locator = None
         if analyst_tax_policy is not None:
             apply_analyst_property_tax_policy(result, analyst_tax_policy)
-        if assumption_overrides is not None or _profile_flags_given(args):
+        if assumption_overrides is not None or _profile_flags_given(args) or _capital_plan_flags_given(args):
             try:
+                capital_overrides = apply_capital_plan_inputs(result, **_capital_plan_kwargs(args, pca_evidence))
                 result = resolve_assumptions(
                     result,
                     deal_profile=(
@@ -466,7 +569,9 @@ def main() -> int:
                         else None
                     ),
                     # Overrides left as recorded keep their edit metadata (edited_by / edited_at).
-                    overrides=stamp_overrides(assumption_overrides, result),
+                    overrides=stamp_overrides(
+                        {**capital_overrides, **(assumption_overrides or {})} or None, result
+                    ),
                     market=market,
                 )
             except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
@@ -532,6 +637,7 @@ def main() -> int:
         try:
             _profile_from_args(args)
             normalize_overrides(assumption_overrides)
+            apply_capital_plan_inputs({}, **_capital_plan_kwargs(args, pca_evidence))  # validate only
         except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
@@ -572,6 +678,8 @@ def main() -> int:
             star_tier=args.star_tier,
             assumption_overrides=assumption_overrides,
             market=market,
+            deferred_maintenance=bool(args.deferred_maintenance),
+            **_capital_plan_kwargs(args, pca_evidence),
             property_tax_millage=args.millage,
             property_tax_assessment_ratio=args.assessment_ratio,
             property_tax_source_locator=(
@@ -675,6 +783,10 @@ def main() -> int:
     review = [key for key, entry in entries.items() if entry.get("review_required")]
     if entries:
         print(f"  Assumptions: {len(entries)} resolved, {len(review)} flagged for review")
+    for line in _capital_plan_lines(entries):
+        print(line)
+    for note in _superseded_notes(args, pca_evidence):
+        print(f"    NOTE {note}")
 
     if not args.canonical_json and om_path_resolved:
         confidence = result["metadata"].get("om_extraction_confidence", "unknown")

@@ -634,7 +634,7 @@
     "value": 250.0,
     "unit": "usd_per_unit_year",
     "source": "house:replacement_reserve",
-    "basis": "House lender-style replacement reserve $250.00/unit/year below NOI (HOUSE_REPLACEMENT_RESERVE_PER_UNIT, the same for every vintage). Economic CapEx is disclosed separately as economic_capex_per_unit. Written as replacement_reserves = reserve per unit x units over the analysis window when the canonical carries none.",
+    "basis": "House lender-style replacement reserve $250.00/unit/year below NOI (HOUSE_REPLACEMENT_RESERVE_PER_UNIT, the same for every vintage). It is a floor, not an addition: the charge below NOI is max(recurring capex by vintage, this reserve). Written as replacement_reserves = reserve per unit x units over the analysis window when the canonical carries none.",
     "as_of": null,
     "confidence": "medium",
     "review_required": true,
@@ -647,15 +647,67 @@
     "extra": null
   },
   {
-    "key": "economic_capex_per_unit",
+    "key": "immediate_capex",
+    "value": 0.0,
+    "unit": "usd",
+    "source": "house:deferred_capex",
+    "basis": "No PCA immediate needs and no analyst figure: nothing is budgeted at close. One-time capital at close for deferred maintenance / PCA immediate needs, funded with equity at close (or a lender holdback): it adds to the total equity basis and never enters NOI. It is separate from the renovation budget.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "bucket": "1: immediate / deferred capex at close"
+      }
+    }
+  },
+  {
+    "key": "recurring_capex_per_unit",
     "value": 2125.0,
     "unit": "usd_per_unit_year",
-    "source": "house:vintage_1970s",
-    "basis": "Year built 1974 (analyst input) maps to the 1970s vintage bucket; house economic CapEx per unit $2,125.00 (VINTAGE_FRAMEWORK_2026, value_add strategy). Informational: sustaining capital, not the replacement reserve. It does not reach the cash flows unless the analyst opts in (an override of this key writes an annual capex_schedule line; a capex budget or renovation program can carry it instead). Review it against the PCA / capex plan.",
+    "source": "house:recurring_capex_vintage",
+    "basis": "Year built 1974 (analyst input) maps to the 1970s vintage; house recurring capex is the midpoint of its economic CapEx band $1,250.00-$3,000.00/unit/year (value-add deal; VINTAGE_FRAMEWORK_2026). Recurring capex sits below NOI (not opex) and grows every analysis year; the charge below NOI each month is max(recurring capex, replacement reserve), never both. Built 1974, before 2000, with no PCA: review the recurring capex against a property condition assessment.",
     "as_of": null,
     "confidence": "medium",
     "review_required": true,
     "default_value": 2125.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "bucket": "2: recurring capex by vintage (below NOI)",
+        "vintage_bucket": "1970s",
+        "band_low": 1250.0,
+        "band_high": 3000.0,
+        "band_pick": "midpoint",
+        "deal_type": "value_add",
+        "deferred_maintenance": false,
+        "pca_evidence": false,
+        "pca_review_required": true,
+        "replacement_reserve_floor_per_unit": 250.0,
+        "charge_rule": "max(recurring capex, replacement reserve) per month below NOI"
+      }
+    }
+  },
+  {
+    "key": "recurring_capex_growth",
+    "value": 0.03,
+    "unit": "decimal_yoy",
+    "source": "house:opex_growth_table",
+    "basis": "Recurring capex grows like repairs & maintenance (OPEX_GROWTH_REPAIRS_MAINTENANCE 3.00% a year), applied from analysis year 2.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.03,
     "delta": 0.0,
     "override_value": null,
     "override_note": null,
