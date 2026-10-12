@@ -821,11 +821,22 @@ HOUSE_EXIT_CAP_GOING_IN_MAX = Decimal("0.25")
 # The "screaming steal" exception, which is rare: only when a market or
 # submarket cap rate is available AND the going-in cap at the modeled price is
 # more than HOUSE_STEAL_THRESHOLD above it may the exit compress toward market
-# + spread, and never by more than HOUSE_MAX_EXIT_COMPRESSION below going-in +
-# spread. Without market data there is never compression; a going-in cap at or
+# + spread. Without market data there is never compression; a going-in cap at or
 # below market (paying up) still exits at entry + spread.
+#
+# The compression scales with how big the discount is. With excess = going-in
+# cap - market cap rate:
+#   compression = min(1, (excess - HOUSE_STEAL_THRESHOLD)
+#                        / (HOUSE_STEAL_FULL_COMPRESSION_EXCESS - HOUSE_STEAL_THRESHOLD))
+#                 x HOUSE_MAX_EXIT_COMPRESSION
+# 0 at or below the threshold (continuous there), growing linearly to the full
+# HOUSE_MAX_EXIT_COMPRESSION at HOUSE_STEAL_FULL_COMPRESSION_EXCESS (threshold +
+# 200 bps) and capped beyond it. A going-in cap just over the threshold no
+# longer jumps to the full 100 bps. The exit is never below market + spread (so
+# never below the market cap rate).
 HOUSE_STEAL_THRESHOLD = Decimal("0.0150")
 HOUSE_MAX_EXIT_COMPRESSION = Decimal("0.0100")
+HOUSE_STEAL_FULL_COMPRESSION_EXCESS = HOUSE_STEAL_THRESHOLD + Decimal("0.0200")
 
 
 def house_exit_cap_rate(
@@ -836,23 +847,33 @@ def house_exit_cap_rate(
     """The house exit cap for a going-in cap rate measured at the modeled price.
 
     Returns ``exit_cap_rate`` and how it was reached: ``anchored`` (going-in +
-    spread), ``market_cap_rate``, ``steal`` and ``compression`` (anchored minus
-    the exit cap; 0 unless it is a steal). The caller guards the going-in cap
-    with ``HOUSE_EXIT_CAP_GOING_IN_MAX``.
+    spread), ``market_cap_rate``, ``excess_over_market`` (going-in - market,
+    None without market data), ``steal``, ``steal_scale`` (the fraction of
+    ``HOUSE_MAX_EXIT_COMPRESSION`` applied, 0 to 1) and ``compression``
+    (anchored minus the exit cap; 0 unless it is a steal). The caller guards
+    the going-in cap with ``HOUSE_EXIT_CAP_GOING_IN_MAX``.
     """
     going_in = Decimal(str(going_in_cap_rate))
     market = Decimal(str(market_cap_rate)) if market_cap_rate is not None else None
     anchored = going_in + HOUSE_EXIT_CAP_SPREAD
     value = anchored
-    steal = market is not None and going_in - market > HOUSE_STEAL_THRESHOLD
+    excess = going_in - market if market is not None else None
+    steal = excess is not None and excess > HOUSE_STEAL_THRESHOLD
+    scale = Decimal("0")
     if steal:
-        value = max(market + HOUSE_EXIT_CAP_SPREAD, anchored - HOUSE_MAX_EXIT_COMPRESSION)
+        scale = min(
+            Decimal("1"),
+            (excess - HOUSE_STEAL_THRESHOLD) / (HOUSE_STEAL_FULL_COMPRESSION_EXCESS - HOUSE_STEAL_THRESHOLD),
+        )
+        value = max(market + HOUSE_EXIT_CAP_SPREAD, anchored - scale * HOUSE_MAX_EXIT_COMPRESSION)
     return {
         "going_in_cap_rate": going_in,
         "spread": HOUSE_EXIT_CAP_SPREAD,
         "anchored": anchored,
         "market_cap_rate": market,
+        "excess_over_market": excess,
         "steal": steal,
+        "steal_scale": scale,
         "compression": anchored - value,
         "exit_cap_rate": value,
     }

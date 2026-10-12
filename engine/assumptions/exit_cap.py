@@ -171,7 +171,12 @@ def anchored_exit_cap(
         "spread": float(decision["spread"]),
         "anchored_exit_cap_rate": round(float(decision["anchored"]), _PLACES),
         "market_cap_rate": float(market_cap_rate) if market_cap_rate is not None else None,
+        "excess_over_market": (
+            round(float(decision["excess_over_market"]), _PLACES)
+            if decision["excess_over_market"] is not None else None
+        ),
         "steal": bool(decision["steal"]),
+        "steal_scale": round(float(decision["steal_scale"]), _PLACES),
         "compression": round(float(decision["compression"]), _PLACES),
         "exit_cap_rate": round(float(decision["exit_cap_rate"]), _PLACES),
     }
@@ -188,13 +193,18 @@ def describe(record: Mapping[str, Any], *, noi_basis: str = "year-1 NOI") -> str
     market = record.get("market_cap_rate")
     if record.get("steal"):
         gap = (going_in - market) * 10_000
+        threshold = float(house.HOUSE_STEAL_THRESHOLD) * 10_000
+        full = float(house.HOUSE_STEAL_FULL_COMPRESSION_EXCESS) * 10_000
+        cap = float(house.HOUSE_MAX_EXIT_COMPRESSION) * 10_000
+        compression = float(record.get("compression") or 0) * 10_000
         return (
             f"{text} = {record['anchored_exit_cap_rate']:.2%}. Steal: going-in {going_in:.2%} vs market "
-            f"{market:.2%} ({gap:.0f} bps above it, over the "
-            f"{float(house.HOUSE_STEAL_THRESHOLD) * 10_000:g} bps HOUSE_STEAL_THRESHOLD), so the exit "
-            f"compresses toward market + spread ({market + spread:.2%}), at most "
-            f"{float(house.HOUSE_MAX_EXIT_COMPRESSION) * 10_000:g} bps (HOUSE_MAX_EXIT_COMPRESSION) below "
-            f"going-in + spread: {record['exit_cap_rate']:.2%}. Review the steal before relying on it."
+            f"{market:.2%} ({gap:.0f} bps above it, over the {threshold:g} bps HOUSE_STEAL_THRESHOLD), so the "
+            f"exit compresses toward market + spread ({market + spread:.2%}) in proportion to the discount: "
+            f"compression = min(1, (excess - {threshold:g} bps) / ({full:g} bps - {threshold:g} bps)) x "
+            f"{cap:g} bps (HOUSE_STEAL_FULL_COMPRESSION_EXCESS, HOUSE_MAX_EXIT_COMPRESSION) = compression "
+            f"{compression:.0f} bps below going-in + spread, never below market + spread: "
+            f"{record['exit_cap_rate']:.2%}. Review the steal before relying on it."
         )
     text += f" = {record['exit_cap_rate']:.2%}."
     if market is None:
