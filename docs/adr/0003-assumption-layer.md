@@ -472,6 +472,65 @@ As implemented (slice 7, `engine/assumptions/sheet.py`):
 - `runs/assumptions_sheet.py export|apply` exports the sheet (JSON and/or
   Excel) and re-resolves a canonical with an edited sheet as overrides.
 
+As implemented (the assumption register, UPL-48): one view of every
+assumption, rendered on every analyst surface.
+
+- `engine/assumptions/register.py` `build_register(canonical)` returns a
+  deterministic, JSON-serializable document
+  (`plat.assumptions.register/1`): the deal profile, summary counts (total,
+  from deal evidence, from market, house defaults, engine fallbacks, edited by
+  the user, needing review, guardrail warned / enforced / waived / exempt,
+  missing rationales) and one row per entry with key, label, group, value and
+  unit (plus a compact display of vectors and curves), the default value and
+  its source (for an overridden entry, the default provenance kept on its
+  `analyst` candidate), why (the entry basis and the policy rationale for the
+  default's source), the candidates, the user edit (override value, note,
+  `edited_by`, `edited_at`, whether it differs from the default and the
+  delta: numeric, element-wise, or per field for curve objects), a value a
+  pricing rule pinned (not a user edit), guardrail status, review flag,
+  confidence, as-of and any other entry fields. It is generic: a key it does
+  not know is grouped by prefix or token (else "Profile/Other") and labeled
+  from the key. Rows are ordered by group, then the sheet key order.
+- `engine/assumptions/rationale.py` maps each source (exact, or by the
+  `house:vintage_` and `market:` prefixes) to a 1-3 sentence rationale. A
+  source with none renders "No policy rationale recorded for this source yet"
+  and is flagged; `tests/test_assumption_register.py` greps
+  `engine/assumptions/*.py` and `engine/backsolve.py` for every source string
+  and fails on one without a rationale.
+- Edit metadata: an override may carry `edited_by` (a name) and `edited_at`
+  (an ISO date). The resolver accepts and validates them
+  (`registry.override_metadata`), keeps them on the override, and carries them
+  through re-resolution; values and idempotence are unchanged.
+  `sheet.stamp_overrides` gives new or changed overrides the caller's editor
+  and date and lets an override left as recorded keep its own;
+  `runs/assumptions_sheet.py apply --editor NAME [--edit-date D | --stamp-date]`
+  uses it. Only `--stamp-date` reads the clock, in the CLI; resolution never
+  does.
+- `engine/assumptions/register_html.py` renders `assumptions.html`: one
+  self-contained page (inline CSS and a few lines of vanilla JavaScript, no
+  external assets) with the profile and counts, filter chips (All / Edited by
+  user / Needs review / House defaults / Deal evidence / Market / Guardrail
+  flags), and a table grouped by group with the columns Assumption | Value |
+  Default (source) | Why this default | User edit | Flags, edited rows
+  highlighted and the candidates expandable. All text is escaped. It supports
+  light and dark (`prefers-color-scheme`), print and narrow screens, and has
+  no timestamp beyond the dates in the data.
+- The Excel "Assumptions" tab is the register in a workbook: it adds Group,
+  Default Source, Why This Default, Edited By / At and Flags (read-only)
+  columns, sorts rows by group, freezes the header, highlights edited rows and
+  marks review flags. `tbl_assumptions`, the editable Override / Note / Value
+  cells and `read_assumption_overrides_xlsx` are unchanged: the reader maps
+  columns by header and returns rows in the sheet key order.
+- Every run writes the page: `runs/ingest_deal.py` and
+  `runs/assumptions_sheet.py apply` write `<output stem>.assumptions.html`,
+  `runs/run_deal.py` writes `assumptions.html` into its output folder, and
+  `engine.engine.run_from_files` writes `<outputs stem>.assumptions.html`,
+  each next to the JSON sheet; `runs/assumptions_sheet.py html <canonical>
+  [-o out.html]` writes it on demand. `engine.api.handle_assumption_register`
+  returns the register JSON (optionally filtered, without candidates, or with
+  the HTML), and the MCP tool `assumption_register` returns it without
+  candidates by default to keep the response bounded.
+
 ### 9. Validation
 
 - A synthetic deal library covers at least two stabilized and two value-add
