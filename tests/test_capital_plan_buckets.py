@@ -351,6 +351,30 @@ def test_the_buckets_round_trip_through_the_sheet(tmp_path):
     assert cleared["capital_plan"]["immediate_capex"]["amount"] == 0.0
 
 
+def test_the_register_shows_the_three_buckets_with_their_rationale():
+    canonical = json.loads(_library("d_value_add_1980s_msa_only"))  # synthetic PCA
+    register = build_register(canonical)
+    plan = register["capital_plan"]
+    assert [(b["bucket"], b["key"], b["source"]) for b in plan["buckets"]] == [
+        (1, "immediate_capex", "deal:pca"),
+        (2, "recurring_capex_per_unit", "deal:pca"),
+        (3, "replacement_reserve_per_unit", "house:replacement_reserve"),
+    ]
+    assert plan["binding_year_1"] == "recurring_capex_per_unit" and plan["charge_year_1_per_unit"] == 1_500.0
+    rows = {row["key"]: row for row in register["rows"]}
+    for key in ("immediate_capex", "recurring_capex_per_unit", "recurring_capex_growth",
+                "replacement_reserve_per_unit"):
+        assert rows[key]["group"] == "Capital/Capex"
+        assert rows[key]["why"]["rationale_known"], key
+    assert rows["recurring_capex_per_unit"]["guardrail"]["state"] == "waived"
+    for source in ("deal:pca", "house:recurring_capex_vintage", "house:deferred_capex", "house:replacement_reserve"):
+        assert rationale_for(source)["known"], source
+    html = render_register_html(canonical)
+    assert "Capital plan: three capex buckets" in html
+    assert "Capex bucket 2: recurring capex per unit (year 1)" in html
+    assert "binds in year 1" in html and "max(recurring capex, replacement reserve)" in html
+
+
 def test_the_workbook_shows_the_buckets_and_the_charge(tmp_path, minimal_deal_inputs):
     from openpyxl import load_workbook
 

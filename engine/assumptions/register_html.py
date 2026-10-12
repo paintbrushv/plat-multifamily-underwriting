@@ -87,6 +87,12 @@ code, .key { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospa
 .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .stat .n { font-size: 20px; font-weight: 700; display: block; }
 .stat .l { color: var(--muted); font-size: 12px; }
+.capital { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  margin: 0 0 16px; }
+.capital h2 { margin: 0 0 6px; }
+.capital ol { margin: 0; padding-left: 20px; }
+.capital li { margin: 2px 0; }
+.capital .binds { font-weight: 600; color: var(--accent); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
 .chips[hidden] { display: none; }
 .chip {
@@ -465,6 +471,7 @@ def render_html(register: Mapping[str, Any]) -> str:
             f'<span class="l">{_e(label)}</span></div>'
         )
     out.append("</div>")
+    out.extend(_capital_plan_html(register.get("capital_plan")))
     out.append("</header>")
 
     counts = _chip_counts(rows)
@@ -510,6 +517,30 @@ def render_html(register: Mapping[str, Any]) -> str:
     out.append("</body>")
     out.append("</html>")
     return "\n".join(out) + "\n"
+
+
+def _capital_plan_html(plan: Any) -> list[str]:
+    """The three capex buckets side by side, with the one that binds in year 1."""
+    if not isinstance(plan, Mapping):
+        return []
+    out = ['<section class="capital" aria-label="Capital plan">', "<h2>Capital plan: three capex buckets</h2>", "<ol>"]
+    for bucket in plan.get("buckets") or []:
+        binds = bucket.get("key") == plan.get("binding_year_1")
+        flags = []
+        if binds:
+            flags.append('<span class="binds">binds in year 1</span>')
+        if bucket.get("review_required"):
+            flags.append('<span class="badge flag-review">Needs review</span>')
+        source = f' <span class="src">{_e(bucket["source"])}</span>' if bucket.get("source") else ""
+        out.append(
+            f'<li><a href="#a-{_e(bucket.get("key"))}">{_e(bucket.get("label"))}</a>: '
+            f'<strong>{_e(bucket.get("value_display"))}</strong> {" ".join(flags)}'
+            f'<span class="meta">{_e(bucket.get("note"))}</span>{source}</li>'
+        )
+    out.append("</ol>")
+    out.append(f'<p class="meta">{_e(plan.get("rule"))}</p>')
+    out.append("</section>")
+    return out
 
 
 def render_register_html(canonical: Mapping[str, Any]) -> str:
