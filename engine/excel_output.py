@@ -195,6 +195,9 @@ def _write_summary_sheet(
         ws[f"B{row}"].number_format = CURRENCY_FORMAT
         ws[f"A{row}"].font = Font(bold=True)
         ws[f"B{row}"].font = Font(bold=True)
+        row += 2
+
+    row = _write_capital_plan_summary(ws, results.get("capital_plan"), row)
 
     # Adjust column widths
     ws.column_dimensions["A"].width = 18
@@ -202,6 +205,42 @@ def _write_summary_sheet(
     ws.column_dimensions["C"].width = 12
     ws.column_dimensions["D"].width = 18
     ws.column_dimensions["E"].width = 15
+
+
+def _write_capital_plan_summary(ws: Any, plan: Any, row: int) -> int:
+    """The three capex buckets (ADR 0003 §3) on the Summary sheet; returns the next row."""
+    if not isinstance(plan, dict):
+        return row
+    ws[f"A{row}"] = "CAPITAL PLAN (3 CAPEX BUCKETS)"
+    ws[f"A{row}"].font = SECTION_FONT
+    row += 1
+    immediate = plan.get("immediate_capex") or {}
+    charge = plan.get("below_noi_capex_charge") or {}
+    years = charge.get("by_analysis_year") or []
+    year1 = years[0] if years else {}
+    lines = [
+        ("1. Immediate capex at close:", immediate.get("amount", 0), CURRENCY_FORMAT,
+         f"({immediate.get('funding', 'equity_at_close')}; not in NOI)"),
+        ("   Renovation budget:", (plan.get("renovation_budget") or {}).get("amount", 0), CURRENCY_FORMAT,
+         "(separate budget)"),
+        ("2. Recurring capex, $/unit yr 1:", (charge.get("recurring_capex") or {}).get("per_unit_annual_year_1"),
+         CURRENCY_FORMAT, f"(grows {(charge.get('recurring_capex') or {}).get('growth_rate', 0):.1%}/yr)"),
+        ("   Recurring capex, year 1:", year1.get("recurring_capex_by_vintage"), CURRENCY_FORMAT, ""),
+        ("3. Replacement reserve, year 1:", year1.get("replacement_reserve_floor"), CURRENCY_FORMAT, "(floor)"),
+        ("Below-NOI charge, year 1:", year1.get("below_noi_capex_charge"), CURRENCY_FORMAT,
+         f"(binds: {year1.get('binding', 'n/a')})"),
+    ]
+    for label, value, fmt, note in lines:
+        if value is None:
+            continue
+        ws[f"A{row}"] = label
+        ws[f"B{row}"] = value
+        ws[f"B{row}"].number_format = fmt
+        if note:
+            ws[f"C{row}"] = note
+        row += 1
+    ws[f"A{row}"] = charge.get("rule") or "Below-NOI charge = max(recurring capex, replacement reserve)"
+    return row + 1
 
 
 def _write_annual_proforma_sheet(wb: Workbook, results: Dict[str, Any]) -> None:
@@ -240,6 +279,13 @@ def _write_annual_proforma_sheet(wb: Workbook, results: Dict[str, Any]) -> None:
         ("Effective Gross Income", "effective_gross_income", CURRENCY_FORMAT),
         ("Total OpEx", "total_opex", CURRENCY_FORMAT),
         ("Net Operating Income", "net_operating_income", CURRENCY_FORMAT),
+        # Below NOI: max(recurring capex by vintage, replacement reserve), never both.
+        ("Below-NOI CapEx Charge", "replacement_reserves", CURRENCY_FORMAT),
+        *(
+            [("  Recurring CapEx (vintage)", "recurring_capex_by_vintage", CURRENCY_FORMAT),
+             ("  Replacement Reserve (floor)", "replacement_reserve_floor", CURRENCY_FORMAT)]
+            if any("recurring_capex_by_vintage" in year for year in by_year) else []
+        ),
         ("Total CapEx", "total_capex", CURRENCY_FORMAT),
         ("Unleveraged Cash Flow", "unleveraged_cash_flow", CURRENCY_FORMAT),
         ("Debt Service", "debt_service", CURRENCY_FORMAT),
