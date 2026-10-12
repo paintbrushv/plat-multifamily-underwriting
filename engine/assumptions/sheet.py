@@ -397,6 +397,58 @@ def load_assumption_overrides(path: Path | str) -> dict[str, Any]:
     return read_assumption_overrides(path)
 
 
+def stamp_overrides(
+    overrides: Optional[Mapping[str, Any]],
+    canonical: Mapping[str, Any],
+    *,
+    edited_by: Optional[str] = None,
+    edited_at: Optional[str] = None,
+) -> dict[str, Any]:
+    """Attach optional edit metadata (``edited_by`` / ``edited_at``) to overrides.
+
+    ``overrides`` are about to be applied to ``canonical`` (an edited sheet,
+    a plain overrides file):
+
+    - an override equal to the one the canonical already records (same value,
+      note and cohorts; for example an untouched row of a re-applied sheet)
+      keeps that override's recorded metadata;
+    - any other override (a new or changed edit) gets ``edited_by`` /
+      ``edited_at`` when given, unless it carries its own;
+    - a clear (``None``) is passed through.
+
+    Nothing is added when there is no metadata to add, so overrides without
+    metadata reach the resolver exactly as before. This never reads the clock:
+    a caller that wants today's date passes it.
+    """
+    from engine.assumptions.registry import OVERRIDE_METADATA_FIELDS
+
+    entries = _entries(canonical)
+    given = {name: value for name, value in (("edited_by", edited_by), ("edited_at", edited_at)) if value}
+    out: dict[str, Any] = {}
+    for key, raw in (overrides or {}).items():
+        if raw is None or (isinstance(raw, Mapping) and raw.get("value") is None):
+            out[key] = raw
+            continue
+        override = dict(raw) if isinstance(raw, Mapping) else {"value": raw}
+        entry = entries.get(key) if isinstance(entries.get(key), Mapping) else {}
+        prior = entry.get("override") if isinstance(entry.get("override"), Mapping) else None
+        unchanged = (
+            prior is not None
+            and _same(override.get("value"), prior.get("value"))
+            and (override.get("note") is None or override.get("note") == prior.get("note"))
+            and _same(override.get("cohort_overrides") or None, prior.get("cohort_overrides") or None)
+        )
+        metadata = (
+            {name: prior[name] for name in OVERRIDE_METADATA_FIELDS if prior.get(name)}
+            if unchanged
+            else given
+        )
+        for name, value in metadata.items():
+            override.setdefault(name, value)
+        out[key] = override if (metadata or isinstance(raw, Mapping)) else raw
+    return out
+
+
 # ── Excel ────────────────────────────────────────────────────────────────
 
 
@@ -440,19 +492,77 @@ def _number_format(unit: Any) -> Optional[str]:
     return None
 
 
+# Register columns the Excel tab adds for reading (ADR 0003 §8, the
+# assumption register). They are display-only: the reader maps headers to
+# sheet fields and ignores these, so editing them changes nothing.
+REGISTER_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("group", "Group"),
+    ("default_source", "Default Source"),
+    ("why", "Why This Default"),
+    ("edited_by_at", "Edited By / At"),
+    ("flags", "Flags"),
+)
+# The tab's column order: sheet fields (``SHEET_COLUMNS``) and register
+# columns, arranged for reading left to right. Key stays in column A, and
+# Note directly follows Override.
+EXCEL_COLUMN_ORDER: tuple[str, ...] = (
+    "key", "group", "value", "unit", "default_value", "default_source", "delta",
+    "override_value", "override_note", "edited_by_at", "flags", "why",
+    "source", "basis", "as_of", "confidence", "review_required",
+    "override_cohorts", "guardrail_status", "extra", EXPORTED_OVERRIDE_FIELD,
+)
+_EXCEL_HEADERS = {**dict(SHEET_COLUMNS), **dict(REGISTER_COLUMNS)}
+assert sorted(EXCEL_COLUMN_ORDER) == sorted(_EXCEL_HEADERS), "every sheet and register column is laid out once"
+
+_HEX_EDITED_ROW = "FFF2CC"
+_HEX_FLAG_REVIEW = "FBE3E0"
+_HEX_FLAG_REVIEW_FONT = "9C2A1C"
+
+
+def _register_cells(register_row: Mapping[str, Any]) -> dict[str, Any]:
+    from engine.assumptions.register import flag_labels, guardrail_detail
+
+    edit = register_row.get("user_edit") or {}
+    who = " · ".join(str(part) for part in (edit.get("edited_by"), edit.get("edited_at")) if part)
+    flags = "; ".join(flag_labels(register_row))
+    detail = guardrail_detail(register_row)
+    if detail:
+        flags = f"{flags} ({detail})" if flags else detail
+    return {
+        "group": register_row.get("group"),
+        "default_source": (register_row.get("default") or {}).get("source"),
+        "why": (register_row.get("why") or {}).get("rationale"),
+        "edited_by_at": who or None,
+        "flags": flags or None,
+    }
+
+
 def add_assumptions_sheet(wb: Any, canonical: Mapping[str, Any], *, title: str = SHEET_TITLE) -> Any:
-    """Add an "Assumptions" tab (Excel table ``tbl_assumptions``) to an openpyxl workbook."""
+    """Add an "Assumptions" tab (Excel table ``tbl_assumptions``) to an openpyxl workbook.
+
+    The tab is the assumption register in a workbook: rows sorted by group,
+    then key order (``register.ordered_keys``), the sheet columns plus Group,
+    Default Source, Why This Default, Edited By / At and Flags, the header
+    frozen, rows the user edited highlighted and review flags marked. Override
+    and Note (and Value) stay the editable cells; the reader
+    (``read_assumption_overrides_xlsx``) is unchanged by the extra columns and
+    the row order.
+    """
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.table import Table, TableStyleInfo
 
+    from engine.assumptions.register import build_register
     from engine.brand import HEX_DARK_900, HEX_GOLD_LIGHT
     from engine.xlsx_helpers import set_col_widths, write_data_row, write_header_row
 
     if title in wb.sheetnames:
         del wb[title]
     ws = wb.create_sheet(title)
-    rows = document_rows(canonical)
+    register = build_register(canonical, include_candidates=False)
+    by_key = {row["key"]: row for row in document_rows(canonical)}
+    rows = [(by_key[reg["key"]], reg) for reg in register["rows"] if reg["key"] in by_key]
+    column = {name: index + 1 for index, name in enumerate(EXCEL_COLUMN_ORDER)}
 
     ws["A1"] = "ASSUMPTIONS"
     ws["A1"].font = Font(name="Calibri", size=14, bold=True, color=HEX_DARK_900)
@@ -463,24 +573,45 @@ def add_assumptions_sheet(wb: Any, canonical: Mapping[str, Any], *, title: str =
         "Do not edit Exported Override. Vectors and objects are JSON text."
     )
     ws["A2"].font = Font(name="Calibri", size=10, italic=True, color=HEX_DARK_900)
+    ws["A3"] = (
+        "Rows are grouped by assumption group. Highlighted rows carry a user edit; a red Flags cell needs "
+        "review. Group, Default Source, Why This Default, Edited By / At and Flags are for reading only."
+    )
+    ws["A3"].font = Font(name="Calibri", size=10, italic=True, color=HEX_DARK_900)
 
     header_row = 4
-    write_header_row(ws, header_row, [header for _, header in SHEET_COLUMNS])
+    write_header_row(ws, header_row, [_EXCEL_HEADERS[name] for name in EXCEL_COLUMN_ORDER])
     editable_fill = PatternFill(start_color=HEX_GOLD_LIGHT, end_color=HEX_GOLD_LIGHT, fill_type="solid")
-    editable_cols = [SHEET_FIELDS.index(field) + 1 for field in _EDITABLE_FIELDS]
+    edited_fill = PatternFill(start_color=_HEX_EDITED_ROW, end_color=_HEX_EDITED_ROW, fill_type="solid")
+    review_fill = PatternFill(start_color=_HEX_FLAG_REVIEW, end_color=_HEX_FLAG_REVIEW, fill_type="solid")
+    editable_cols = [column[field] for field in _EDITABLE_FIELDS]
     wrap = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    for offset, row in enumerate(rows, start=1):
+    for offset, (row, reg) in enumerate(rows, start=1):
         excel_row = header_row + offset
-        write_data_row(ws, excel_row, [_to_cell(row[field]) for field in SHEET_FIELDS], zebra=offset % 2 == 0)
+        cells = {**{field: _to_cell(row[field]) for field in SHEET_FIELDS}, **_register_cells(reg)}
+        write_data_row(ws, excel_row, [cells[name] for name in EXCEL_COLUMN_ORDER], zebra=offset % 2 == 0)
         fmt = _number_format(row.get("unit"))
         for field in _NUMBER_FORMAT_FIELDS:
-            cell = ws.cell(row=excel_row, column=SHEET_FIELDS.index(field) + 1)
+            cell = ws.cell(row=excel_row, column=column[field])
             if fmt and _number(cell.value) is not None:
                 cell.number_format = fmt
+        if reg.get("user_edit") is not None:
+            for col in range(1, len(EXCEL_COLUMN_ORDER) + 1):
+                ws.cell(row=excel_row, column=col).fill = edited_fill
+            ws.cell(row=excel_row, column=column["key"]).font = Font(
+                name="Calibri", size=10, bold=True, color=HEX_DARK_900
+            )
         for col in editable_cols:
             ws.cell(row=excel_row, column=col).fill = editable_fill
-        ws.cell(row=excel_row, column=SHEET_FIELDS.index("basis") + 1).alignment = wrap
+        flagged = reg.get("review_required") or (reg.get("guardrail") or {}).get("state") in ("warned", "enforced")
+        if flagged:
+            for name in ("flags", "review_required"):
+                cell = ws.cell(row=excel_row, column=column[name])
+                cell.fill = review_fill
+                cell.font = Font(name="Calibri", size=10, bold=True, color=_HEX_FLAG_REVIEW_FONT)
+        for name in ("basis", "why", "flags"):
+            ws.cell(row=excel_row, column=column[name]).alignment = wrap
     for col in editable_cols:
         ws.cell(row=header_row, column=col).font = Font(
             name="Calibri", size=10, bold=True, color=HEX_DARK_900
@@ -489,18 +620,18 @@ def add_assumptions_sheet(wb: Any, canonical: Mapping[str, Any], *, title: str =
 
     # An Excel table needs at least one data row; an empty sheet keeps a blank one.
     last_row = header_row + max(len(rows), 1)
-    ref = f"A{header_row}:{get_column_letter(len(SHEET_COLUMNS))}{last_row}"
+    ref = f"A{header_row}:{get_column_letter(len(EXCEL_COLUMN_ORDER))}{last_row}"
     table = Table(displayName=TABLE_NAME, ref=ref)
     table.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=False)
     ws.add_table(table)
 
     widths = {
-        "key": 30, "value": 16, "unit": 26, "source": 24, "basis": 70, "as_of": 12,
-        "confidence": 12, "review_required": 10, "default_value": 16, "delta": 14,
-        "override_value": 16, "override_note": 32, "override_cohorts": 22,
-        "guardrail_status": 14, "extra": 30, EXPORTED_OVERRIDE_FIELD: 18,
+        "key": 30, "group": 16, "value": 16, "unit": 26, "default_value": 16, "default_source": 24,
+        "delta": 14, "override_value": 16, "override_note": 32, "edited_by_at": 22, "flags": 30,
+        "why": 60, "source": 24, "basis": 70, "as_of": 12, "confidence": 12, "review_required": 10,
+        "override_cohorts": 22, "guardrail_status": 14, "extra": 30, EXPORTED_OVERRIDE_FIELD: 18,
     }
-    set_col_widths(ws, {SHEET_FIELDS.index(field) + 1: width for field, width in widths.items()})
+    set_col_widths(ws, {column[name]: width for name, width in widths.items()})
     ws.freeze_panes = ws.cell(row=header_row + 1, column=2)
     return ws
 
@@ -539,7 +670,10 @@ def _rows_from_table(headers: list[Any], cells: Iterable[list[Any]]) -> list[dic
             if field in row:
                 row[field] = _from_cell(row[field], field=field, key=key)
         rows.append(row)
-    return rows
+    # The tab may show rows in any order (grouped by the register); rows read
+    # back follow the sheet's key order, like ``document_rows``.
+    order = {key: index for index, key in enumerate(sorted_keys({str(row["key"]) for row in rows}))}
+    return sorted(rows, key=lambda row: order[str(row["key"])])
 
 
 def read_assumption_rows_xlsx(path: Path | str) -> list[dict[str, Any]]:
