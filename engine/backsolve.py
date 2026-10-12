@@ -21,7 +21,7 @@ from engine.engine import (
     run_underwriting,
 )
 from engine.modules.analysis_years import aggregate_analysis_years
-from engine.modules.debt import compute_agency_loan_terms
+from engine.modules.debt import LOAN_ROUNDING_STEP, compute_agency_loan_terms
 from engine.modules.metrics import compute_cash_on_cash_for_year, stabilized_analysis_year
 from engine.modules.renovations import compute_renovations
 from engine.modules.time_grid import TimeGrid
@@ -1917,6 +1917,21 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _monotone_tolerance(coc: Decimal, equity_basis: Decimal) -> Decimal:
+    """Largest CoC rise with price the search treats as noise, not a reversal.
+
+    The sized loan is rounded to LOAN_ROUNDING_STEP, so as price rises the loan
+    can step up and equity step down by that amount, lifting CoC by about
+    |CoC| x step / equity (less the debt service on the step). Twice that bound,
+    floored at 1e-6 for quantized cashflows, is tolerated; a larger reversal
+    still refuses.
+    """
+    floor = Decimal("0.000001")
+    if equity_basis <= 0:
+        return floor
+    return max(floor, 2 * abs(coc) * LOAN_ROUNDING_STEP / equity_basis)
+
+
 def backsolve_price(
     canonical: dict[str, Any], *, target_coc, policy, benchmark,
     min_price="1000000.00", max_price="100000000.00", max_iterations=40,
@@ -1925,7 +1940,9 @@ def backsolve_price(
     """Find the highest feasible cent within explicit bounds and assumptions.
 
     Rates are fractions (0.07 is 7%). The search assumes CoC decreases with
-    price; observed violations refuse. An exhausted search returns a feasible
+    price; observed violations beyond the loan-rounding blip refuse, so the
+    solved price is the highest feasible cent the bisection finds, within one
+    loan rounding step of the true boundary. An exhausted search returns a feasible
     candidate with iteration_limit status, never a claim of convergence.
     This API performs no artifact writes and reads no neighboring data files.
     """
@@ -2015,9 +2032,10 @@ def backsolve_price(
     while not search_ceiling_reached and hi - lo > _PRICE_CENT and iterations_run < max_iterations:
         mid = ((lo + hi) / Decimal("2")).quantize(_PRICE_CENT, rounding=ROUND_HALF_UP)
         case, results, coc = evaluate(mid)
-        # Quantized engine cashflows can differ slightly at adjacent cents;
-        # the feasibility predicate remains authoritative at every candidate.
-        if coc > lo_coc + Decimal("0.000001") or coc < hi_coc - Decimal("0.000001"):
+        # Quantized cashflows and the loan rounding step can lift CoC slightly
+        # at a higher price; the feasibility predicate remains authoritative.
+        tolerance = _monotone_tolerance(coc, dec(case["purchase_assumptions"]["total_equity_basis"]))
+        if coc > lo_coc + tolerance or coc < hi_coc - tolerance:
             raise BacksolveInputError("cash-on-cash is not decreasing inside the price bracket")
         iterations_run += 1
         if coc >= target:
