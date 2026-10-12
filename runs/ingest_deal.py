@@ -68,7 +68,8 @@ Assumption layer (ADR 0003):
     are re-resolved after the merge.
 
     Every run that resolves assumptions also writes the assumptions sheet
-    <output stem>.assumptions.json next to the output JSON.
+    <output stem>.assumptions.json and the assumption register page
+    <output stem>.assumptions.html next to the output JSON.
 
     Market data (rent-growth forecast, stabilized vacancy, concession rate,
     market cap rate) comes from engine.market_data.default_registry(); pass
@@ -100,10 +101,12 @@ from engine.assumptions import (
     resolve_assumptions,
 )
 from engine.assumptions.profile import ASSET_CLASSES, STAR_TIERS
+from engine.assumptions.register_html import register_html_path_for, write_register_html
 from engine.assumptions.sheet import (
     has_assumptions,
     load_assumption_overrides,
     sheet_path_for,
+    stamp_overrides,
     write_assumptions_json,
 )
 from engine.ingest.broker_om_snapshot import stable_property_tax_source_locator
@@ -462,7 +465,8 @@ def main() -> int:
                         if _profile_flags_given(args)
                         else None
                     ),
-                    overrides=assumption_overrides,
+                    # Overrides left as recorded keep their edit metadata (edited_by / edited_at).
+                    overrides=stamp_overrides(assumption_overrides, result),
                     market=market,
                 )
             except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
@@ -594,9 +598,10 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         json.dump(result, f, indent=2)
-    sheet_path = None
+    sheet_path = register_path = None
     if has_assumptions(result):
         sheet_path = write_assumptions_json(result, sheet_path_for(out))
+        register_path = write_register_html(result, register_html_path_for(out))
 
     # Summary
     print(f"\nIngestion complete:")
@@ -678,6 +683,8 @@ def main() -> int:
     print(f"\nOutput: {out}")
     if sheet_path is not None:
         print(f"Assumptions sheet: {sheet_path}")
+    if register_path is not None:
+        print(f"Assumption register: {register_path}")
 
     # Optional validation
     if args.validate:

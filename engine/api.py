@@ -312,6 +312,81 @@ def handle_run_deal(request: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+def handle_assumption_register(request: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the assumption register of a resolved canonical (ADR 0003 §8).
+
+    The register lists every assumption with its value, the resolver default
+    and its source, why that source is the default (the entry basis and the
+    house policy rationale), the candidates considered, the user's edit
+    (override, note, optional edited_by / edited_at, delta from the default),
+    guardrail status and review flags, plus summary counts and the deal
+    profile. It reads the canonical only: no engine run, nothing persisted.
+
+    Request format:
+        {
+            "inputs": {...},                  # canonical with an assumptions section
+            "options": {
+                "include_candidates": true,   # each row's candidates (default true)
+                "filter": "all",              # all | edited | review | house | deal | market | guardrail
+                "include_html": false,        # also return the assumptions.html page
+            }
+        }
+
+    Returns:
+        {"status": "success", "deal_id": ..., "register": {...}, "html": "..." (optional),
+         "elapsed_seconds": ...}
+        or {"status": "error", "error": "...", "elapsed_seconds": ...}
+    """
+    start = time.time()
+    options = request.get("options") or {}
+    try:
+        from engine.assumptions.register import FILTERS, build_register
+        from engine.assumptions.sheet import has_assumptions
+
+        inputs = request.get("inputs")
+        if not isinstance(inputs, dict):
+            return {
+                "status": "error",
+                "error": "'inputs' (a canonical deal object) is required",
+                "elapsed_seconds": round(time.time() - start, 3),
+            }
+        if not has_assumptions(inputs):
+            return {
+                "status": "error",
+                "error": "inputs carry no assumptions section; resolve or ingest the deal first",
+                "elapsed_seconds": round(time.time() - start, 3),
+            }
+        view = options.get("filter", "all")
+        if view not in FILTERS:
+            return {
+                "status": "error",
+                "error": f"options.filter must be one of {list(FILTERS)}",
+                "elapsed_seconds": round(time.time() - start, 3),
+            }
+        register = build_register(
+            inputs,
+            include_candidates=bool(options.get("include_candidates", True)),
+            filter=view,
+        )
+        response: Dict[str, Any] = {
+            "status": "success",
+            "deal_id": register.get("deal_id"),
+            "register": register,
+        }
+        if options.get("include_html"):
+            from engine.assumptions.register_html import render_html
+
+            response["html"] = render_html(register)
+        response["elapsed_seconds"] = round(time.time() - start, 3)
+        return response
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": f"{type(e).__name__}: {e}",
+            "elapsed_seconds": round(time.time() - start, 3),
+        }
+
+
 def handle_portfolio_summary(request: Dict[str, Any]) -> Dict[str, Any]:
     """Get portfolio summary metrics.
 
