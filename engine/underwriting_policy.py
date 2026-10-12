@@ -415,7 +415,11 @@ def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
 #    maintenance and PCA immediate needs, funded with equity at close (or a
 #    lender holdback). It is separate from the value-add renovation budget.
 #    Without PCA evidence or an analyst figure nothing is budgeted
-#    (``HOUSE_IMMEDIATE_CAPEX_DEFAULT``, flagged for review).
+#    (``HOUSE_IMMEDIATE_CAPEX_DEFAULT``, flagged for review), unless the deal
+#    is flagged with deferred maintenance: then a placeholder of
+#    ``HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS`` year(s) of the vintage band high
+#    end per unit is budgeted (``default_deferred_capex_placeholder_per_unit``),
+#    flagged for review with a recommendation to commission a PCA.
 # 2. Recurring capex by vintage: annual $/unit below NOI (not opex), grown
 #    every analysis year at ``HOUSE_RECURRING_CAPEX_GROWTH``. The house
 #    default is the vintage framework's economic CapEx band
@@ -430,6 +434,16 @@ def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
 #    never both. It is also backsolve's pricing floor for reserves.
 HOUSE_REPLACEMENT_RESERVE_PER_UNIT = Decimal("250")
 HOUSE_IMMEDIATE_CAPEX_DEFAULT = Decimal("0")
+# Deferred maintenance flagged with no PCA and no analyst figure: budget this
+# many years of the vintage economic CapEx band high end per unit at close.
+# One year of the top of the band is a placeholder, not an estimate: it keeps
+# a known capital need from being priced at $0 until a PCA sizes it.
+HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS = Decimal("1")
+# Agency lenders escrow PCA immediate repairs at 125% of the engineer's
+# estimate (Fannie Mae Multifamily Guide 405.02 completion/repair escrow
+# guidance; Freddie Mac SBL priority repair escrow guidance, 2024). Disclosed
+# with the placeholder so the analyst knows what a lender will hold back.
+LENDER_PCA_REPAIR_ESCROW_FACTOR = Decimal("1.25")
 # Recurring capex is labor and materials for building systems (roofs, HVAC,
 # paving, unit interiors), so it grows with repairs & maintenance.
 HOUSE_RECURRING_CAPEX_GROWTH_CONSTANT = "OPEX_GROWTH_REPAIRS_MAINTENANCE"
@@ -515,6 +529,19 @@ def recurring_capex_band(year_built: Optional[int]) -> Optional[tuple[Decimal, D
         return None
     row = VINTAGE_FRAMEWORK_2026[bucket]
     return row["economic_capex_low"], row["economic_capex_high"]
+
+
+def default_deferred_capex_placeholder_per_unit(year_built: Optional[int]) -> Optional[Decimal]:
+    """Immediate capex per unit when deferred maintenance is flagged without a PCA or analyst figure.
+
+    ``HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS`` x the vintage economic CapEx band
+    high end (e.g. $2,500/unit for the 1980s). ``None`` when the year built is
+    unknown (nothing is budgeted; the entry stays flagged).
+    """
+    band = recurring_capex_band(year_built)
+    if band is None:
+        return None
+    return band[1] * HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS
 
 
 def default_r_and_m_per_unit(

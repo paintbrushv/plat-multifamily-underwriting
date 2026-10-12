@@ -66,6 +66,7 @@ from engine.assumptions.registry import (
     DEAL_PREFIX,
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_DEFERRED_CAPEX,
+    HOUSE_DEFERRED_CAPEX_PLACEHOLDER,
     HOUSE_PREFIX,
     HOUSE_RECURRING_CAPEX,
     HOUSE_REPLACEMENT_RESERVE,
@@ -1015,11 +1016,32 @@ def _immediate_capex_candidates(ctx: _Context) -> list[dict[str, Any]]:
             f"Property condition assessment{_pca_label(pca)}: immediate needs {_fmt(pca_value, 'usd')}.",
             as_of=pca.get("as_of"),
         ))
+    placeholder = _deferred_capex_placeholder(ctx)
+    if placeholder:
+        out.append(placeholder)
     out.append(_candidate(
         HOUSE_DEFERRED_CAPEX, float(house.HOUSE_IMMEDIATE_CAPEX_DEFAULT),
         "No PCA immediate needs and no analyst figure: nothing is budgeted at close.",
     ))
     return out
+
+
+def _deferred_capex_placeholder(ctx: _Context) -> Optional[dict[str, Any]]:
+    """Deferred maintenance flagged: one year of the vintage band high end per unit at close."""
+    if not ctx.profile.deferred_maintenance or not ctx.units:
+        return None
+    per_unit = house.default_deferred_capex_placeholder_per_unit(ctx.year_built)
+    if per_unit is None:
+        return None
+    escrow = house.LENDER_PCA_REPAIR_ESCROW_FACTOR
+    return _candidate(
+        HOUSE_DEFERRED_CAPEX_PLACEHOLDER,
+        float(per_unit * Decimal(ctx.units)),
+        f"Deferred maintenance is flagged with no PCA and no analyst figure: placeholder of "
+        f"{house.HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS:g} year of the {ctx.bucket} economic CapEx band high end "
+        f"({_fmt(per_unit, 'usd')}/unit x {ctx.units} units). Commission a PCA and replace it: lenders escrow "
+        f"PCA immediate repairs at {float(escrow):.0%} of the estimate.",
+    )
 
 
 def _immediate_capex_default(ctx: _Context, state: str) -> _Choice:
@@ -1030,10 +1052,18 @@ def _immediate_capex_default(ctx: _Context, state: str) -> _Choice:
         "separate from the renovation budget."
     )
     choice = _choice_from(candidates[0], ctx, candidates[0]["basis"] + note)
-    if ctx.profile.deferred_maintenance and candidates[0]["source"] != SOURCE_DEAL_PCA:
+    if ctx.profile.deferred_maintenance and candidates[0]["source"] == HOUSE_DEFERRED_CAPEX:
         choice.basis += " Deferred maintenance is flagged: budget the immediate needs (PCA or analyst)."
         choice.review_always = True
+    elif candidates[0]["source"] == HOUSE_DEFERRED_CAPEX_PLACEHOLDER:
+        choice.review_always = True
     choice.detail = {"bucket": "1: immediate / deferred capex at close"}
+    if candidates[0]["source"] == HOUSE_DEFERRED_CAPEX_PLACEHOLDER:
+        choice.detail.update(
+            placeholder_per_unit=float(house.default_deferred_capex_placeholder_per_unit(ctx.year_built)),
+            placeholder_years=float(house.HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS),
+            lender_pca_repair_escrow_factor=float(house.LENDER_PCA_REPAIR_ESCROW_FACTOR),
+        )
     return choice
 
 

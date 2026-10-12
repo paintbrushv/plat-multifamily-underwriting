@@ -12,7 +12,7 @@ from jsonschema.exceptions import ValidationError
 from jsonschema.validators import extend
 
 from engine.assumptions.profile import SUPPORTED_DEAL_TYPES, unsupported_deal_type_message
-from engine.assumptions.registry import requires_review
+from engine.assumptions.registry import HOUSE_DEFERRED_CAPEX_PLACEHOLDER, requires_review
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, month_id, parse_month
 from engine.property_tax import (
@@ -21,7 +21,11 @@ from engine.property_tax import (
     require_property_tax_policy,
     validate_property_tax_policy,
 )
-from engine.underwriting_policy import CAP_RATE_SANITY_BAND, CAPEX_PCA_REVIEW_BEFORE_YEAR
+from engine.underwriting_policy import (
+    CAP_RATE_SANITY_BAND,
+    CAPEX_PCA_REVIEW_BEFORE_YEAR,
+    LENDER_PCA_REPAIR_ESCROW_FACTOR,
+)
 from engine.version import SCHEMA_VERSION
 
 
@@ -768,6 +772,9 @@ def _check_capex_budget(inputs: Dict[str, Any]) -> List[ValidationIssue]:
       the deal needs a property condition assessment.
     - ``DEFERRED_CAPEX_UNBUDGETED``: deferred maintenance is flagged but
       nothing is budgeted at close (immediate capex is zero or absent).
+    - ``DEFERRED_CAPEX_PLACEHOLDER``: the immediate capex at close is the house
+      deferred-maintenance placeholder (``house:deferred_capex_placeholder``),
+      not a PCA or analyst figure.
     """
     issues: List[ValidationIssue] = []
     year = _canonical_year_built(inputs)
@@ -795,6 +802,19 @@ def _check_capex_budget(inputs: Dict[str, Any]) -> List[ValidationIssue]:
                 ),
                 path="/capital_plan/immediate_capex",
             ))
+    entry = ((inputs.get("assumptions") or {}).get("entries") or {}).get("immediate_capex")
+    if isinstance(entry, Mapping) and entry.get("source") == HOUSE_DEFERRED_CAPEX_PLACEHOLDER:
+        issues.append(ValidationIssue(
+            severity="WARNING",
+            code="DEFERRED_CAPEX_PLACEHOLDER",
+            message=(
+                f"Immediate capex at close is a house placeholder (${float(entry.get('value') or 0):,.0f}: one year "
+                "of the vintage capex band high end) because deferred maintenance is flagged with no PCA or analyst "
+                "budget. Commission a property condition assessment: lenders escrow PCA immediate repairs at "
+                f"{float(LENDER_PCA_REPAIR_ESCROW_FACTOR):.0%} of the estimate."
+            ),
+            path="/capital_plan/immediate_capex",
+        ))
     return issues
 
 
