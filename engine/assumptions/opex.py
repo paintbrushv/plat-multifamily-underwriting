@@ -231,6 +231,11 @@ def t12_opex_line_evidence(
         rows = (provenance or {}).get(name)
         rows = rows if isinstance(rows, list) else row.get("source_rows")
         facts["source_rows"] = [str(r) for r in rows] if isinstance(rows, list) else []
+        lines = ((provenance or {}).get("_line_amounts") or {}).get(name)
+        if isinstance(lines, list) and lines:
+            # Each statement line with its annual amount (the R&M payroll review
+            # reads the labeled maintenance payroll from these).
+            facts["source_lines"] = [dict(line) for line in lines]
         out[name] = facts
     return out
 

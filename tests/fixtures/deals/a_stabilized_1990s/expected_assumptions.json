@@ -168,6 +168,48 @@
     "extra": null
   },
   {
+    "key": "r_and_m_payroll_credit",
+    "value": 0.0,
+    "unit": "usd_per_unit_year",
+    "source": "house:r_and_m_payroll_review",
+    "basis": "Payroll is payroll: it earns no credit toward the R&M floor unless the T12 labels maintenance labor in payroll and payroll per unit is above the house benchmark (HOUSE_PAYROLL_BENCHMARK_PER_UNIT); the credit is the lesser of the two. Payroll review: payroll $1,500/unit vs the house benchmark $2,000/unit ($0 above); maintenance payroll labeled in the T12 $120,000 (Payroll - Maintenance); credit toward the R&M floor $0 (house review); R&M top-up after the credit $0.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": false,
+    "default_value": 0.0,
+    "delta": 0.0,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": {
+      "detail": {
+        "payroll_annual": 300000.0,
+        "payroll_per_unit": 1500.0,
+        "benchmark_per_unit": 2000.0,
+        "payroll_above_benchmark_annual": 0.0,
+        "maintenance_payroll_annual": 120000.0,
+        "maintenance_payroll_lines": [
+          {
+            "label": "Payroll - Maintenance",
+            "annual": 120000.0
+          }
+        ],
+        "unseparated_payroll_sections": [],
+        "house_credit_annual": 0.0,
+        "credit_annual": 0.0,
+        "credit_per_unit": 0.0,
+        "credit_source": "house:r_and_m_payroll_review",
+        "r_and_m_basis_annual": 204000.0,
+        "floor_per_unit": 700.0,
+        "floor_annual": 140000.0,
+        "shortfall_before_credit_annual": 0.0,
+        "top_up_annual": 0.0,
+        "review_required": false
+      }
+    }
+  },
+  {
     "key": "replacement_reserve_per_unit",
     "value": 250.0,
     "unit": "usd_per_unit_year",

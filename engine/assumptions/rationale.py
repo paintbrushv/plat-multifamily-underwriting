@@ -156,6 +156,13 @@ SOURCE_RATIONALES: dict[str, str] = {
         "equity at close, and flags it. It is a placeholder, not an estimate: commission a PCA (lenders escrow "
         "its immediate repairs at 125% of the estimate) and replace it."
     ),
+    "house:r_and_m_payroll_review": (
+        "Payroll is payroll: site staff wages are not repairs and maintenance, even when the whole team's time "
+        "is booked to payroll, so by default payroll earns no credit toward the R&M floor. Only when the T12 "
+        "labels payroll lines as maintenance labor and total payroll per unit is above a normal-staffing "
+        "benchmark does the excess count, up to the labeled maintenance payroll. The review is always shown, "
+        "and flagged when R&M is short and payroll is high, so the analyst can confirm or override the credit."
+    ),
     "house:deferred_capex": (
         "Without a property condition assessment or an analyst budget there is no evidence of what must "
         "be fixed at closing, so nothing is budgeted at close and the entry is flagged. Inspect the asset "

@@ -38,6 +38,12 @@ HOUSE_DEFERRED_CAPEX = "house:deferred_capex"
 # default_deferred_capex_placeholder_per_unit: deferred maintenance flagged with no
 # PCA and no analyst figure, one year of the vintage band high end at close.
 HOUSE_DEFERRED_CAPEX_PLACEHOLDER = "house:deferred_capex_placeholder"
+# The R&M floor's payroll review (r_and_m_payroll_credit): payroll earns a credit
+# toward the R&M floor only with labeled maintenance payroll above the benchmark.
+HOUSE_R_AND_M_PAYROLL_REVIEW = "house:r_and_m_payroll_review"
+# House sources that disclose a review rather than set a default to confirm:
+# they are flagged only when the resolver finds the case ambiguous.
+REVIEW_ON_FINDING_SOURCES = frozenset({HOUSE_R_AND_M_PAYROLL_REVIEW})
 
 
 def house_vintage_source(bucket: str) -> str:
@@ -106,7 +112,13 @@ def is_valid_source(source: str) -> bool:
 
 
 def requires_review(source: str) -> bool:
-    """House defaults and engine fallbacks are review prompts (ADR 0003 §5)."""
+    """House defaults and engine fallbacks are review prompts (ADR 0003 §5).
+
+    A ``REVIEW_ON_FINDING_SOURCES`` source is a disclosure: its entry is
+    flagged only when the resolver finds the case ambiguous.
+    """
+    if source in REVIEW_ON_FINDING_SOURCES:
+        return False
     return source == SOURCE_ENGINE_FALLBACK or source.startswith(HOUSE_PREFIX)
 
 

@@ -68,6 +68,7 @@ from engine.assumptions.registry import (
     HOUSE_DEFERRED_CAPEX,
     HOUSE_DEFERRED_CAPEX_PLACEHOLDER,
     HOUSE_PREFIX,
+    HOUSE_R_AND_M_PAYROLL_REVIEW,
     HOUSE_RECURRING_CAPEX,
     HOUSE_REPLACEMENT_RESERVE,
     HOUSE_YEAR1_INSURANCE_FLOOR,
@@ -879,6 +880,50 @@ def _r_and_m_candidates(ctx: _Context) -> list[dict[str, Any]]:
     return out
 
 
+def _r_and_m_floor_per_unit(ctx: _Context) -> Optional[Decimal]:
+    from engine.assumptions.guardrails import GuardrailProfile
+
+    return GuardrailProfile(
+        strategy=ctx.strategy, year_built=ctx.year_built,
+        deferred_maintenance=ctx.profile.deferred_maintenance,
+    ).r_and_m_per_unit()
+
+
+def _payroll_review(ctx: _Context, credit_override_per_unit: Any = None) -> dict[str, Any]:
+    from engine.assumptions import guardrails
+
+    override = Decimal(str(credit_override_per_unit)) if credit_override_per_unit is not None else None
+    return guardrails.r_and_m_payroll_review(
+        ctx.canonical, _r_and_m_floor_per_unit(ctx), credit_override_per_unit=override)
+
+
+def _payroll_credit_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    from engine.assumptions import guardrails
+
+    review = _payroll_review(ctx)
+    return [_candidate(HOUSE_R_AND_M_PAYROLL_REVIEW, review["credit_per_unit"] or 0.0,
+                       guardrails.payroll_review_text(review))]
+
+
+def _payroll_credit_default(ctx: _Context, state: str) -> _Choice:
+    """The R&M floor's payroll credit per unit a year (ADR 0003 §5): $0 unless the review finds one."""
+    from engine.assumptions import guardrails
+
+    review = _payroll_review(ctx)
+    return _Choice(
+        source=HOUSE_R_AND_M_PAYROLL_REVIEW,
+        value=review["credit_per_unit"] or 0.0,
+        basis=(
+            "Payroll is payroll: it earns no credit toward the R&M floor unless the T12 labels maintenance labor "
+            "in payroll and payroll per unit is above the house benchmark (HOUSE_PAYROLL_BENCHMARK_PER_UNIT); the "
+            "credit is the lesser of the two. " + guardrails.payroll_review_text(review)
+        ),
+        confidence="medium",
+        review=True if review["review_required"] else None,
+        detail=review,
+    )
+
+
 def _reserve_candidates(ctx: _Context) -> list[dict[str, Any]]:
     reserve = house.default_replacement_reserve_per_unit()
     return [
@@ -1540,6 +1585,16 @@ def _base_specs() -> tuple[_Spec, ...]:
             patch_paths=(("opex_table",),),
         ),
         _Spec(
+            # The R&M floor's payroll review: disclosed, never written to an opex
+            # line; the guardrail reads it (an analyst value replaces the credit).
+            key="r_and_m_payroll_credit",
+            unit="usd_per_unit_year",
+            read=_read_no_field,
+            write=_write_nothing,
+            default=_payroll_credit_default,
+            gather=_payroll_credit_candidates,
+        ),
+        _Spec(
             key="replacement_reserve_per_unit",
             unit="usd_per_unit_year",
             read=_read_reserves,
@@ -2044,6 +2099,10 @@ def _apply_guardrail_mode(
     # vintage floor is waived and disclosed; a PCA one is warned, or raised in
     # pricing) from these entries.
     context["assumption_entries"] = entries
+    credit = entries.get("r_and_m_payroll_credit")
+    if isinstance(credit, dict) and credit.get("source") == SOURCE_ANALYST:
+        # The review the analyst's credit replaces: disclosed with that credit.
+        credit["detail"] = _jsonable(_payroll_review(ctx, credit.get("value")))
     if ctx.mode == guardrails.MODE_PRICING and enforced is not None:
         findings = list(enforced)
     else:
