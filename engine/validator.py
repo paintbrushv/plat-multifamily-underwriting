@@ -17,6 +17,7 @@ from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, month_id, parse_month
 from engine.property_tax import (
     PropertyTaxPolicyError,
+    calculate_property_tax,
     require_property_tax_policy,
     validate_property_tax_policy,
 )
@@ -79,6 +80,56 @@ def validate_schema(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     return issues
 
 
+# ADR 0003 §5: a missing or invalid property-tax millage is a data-integrity
+# blocker. The engine prices real estate tax from the purchase price
+# (engine.property_tax.apply_property_tax_policy) on every run.
+PROPERTY_TAX_MILLAGE_MISSING = "PROPERTY_TAX_MILLAGE_MISSING"
+PROPERTY_TAX_MILLAGE_INVALID = "PROPERTY_TAX_MILLAGE_INVALID"
+PROPERTY_TAX_BASIS_INVALID = "PROPERTY_TAX_BASIS_INVALID"
+_PROPERTY_TAX_POLICY_PATH = "/metadata/property_summary/property_tax_policy"
+
+
+def property_tax_required(inputs: Mapping[str, Any]) -> bool:
+    """True when the engine needs the property-tax millage for this canonical.
+
+    Mirrors ``engine.property_tax.apply_property_tax_policy``, which
+    ``run_underwriting`` calls on every run: it requires the policy and taxes
+    ``purchase_assumptions.purchase_price`` (price x assessment ratio x
+    mills / 1000). A priced canonical therefore needs the millage. An
+    unpriced ingest draft cannot run until a price is added, so it validates
+    as a partial deal; ``run_underwriting`` still refuses it with the same
+    codes (``property_tax_preflight_issues``).
+    """
+    purchase = inputs.get("purchase_assumptions")
+    return isinstance(purchase, Mapping) and purchase.get("purchase_price") is not None
+
+
+def _property_tax_issue(exc: PropertyTaxPolicyError) -> ValidationIssue:
+    field = exc.field.replace(".", "/")
+    if field.startswith("metadata/"):
+        path = f"/{field}"
+    elif field == "property_tax_policy":
+        path = _PROPERTY_TAX_POLICY_PATH
+    elif field == "purchase_price":
+        path = "/purchase_assumptions/purchase_price"
+    else:
+        path = f"{_PROPERTY_TAX_POLICY_PATH}/{field}"
+    if exc.code == "missing_property_tax_millage":
+        code = PROPERTY_TAX_MILLAGE_MISSING
+        message = (
+            f"{exc}. The engine taxes the purchase price at the combined millage, so it "
+            "refuses to run without it: add metadata.property_summary.property_tax_policy "
+            "(runs/ingest_deal.py --millage MILLS [--assessment-ratio R])."
+        )
+    elif field == "purchase_price":
+        code = PROPERTY_TAX_BASIS_INVALID
+        message = f"{exc}. The property-tax basis is the purchase price."
+    else:
+        code = PROPERTY_TAX_MILLAGE_INVALID
+        message = str(exc)
+    return ValidationIssue(severity="ERROR", code=code, message=message, path=path)
+
+
 def _check_property_tax_policy(
     inputs: Dict[str, Any],
     *,
@@ -86,37 +137,80 @@ def _check_property_tax_policy(
 ) -> List[ValidationIssue]:
     metadata = inputs.get("metadata")
     if not isinstance(metadata, Mapping):
-        return []
+        metadata = {}
     property_summary = metadata.get("property_summary") or {}
     if not isinstance(property_summary, Mapping):
-        return []
+        property_summary = {}
     policy = property_summary.get("property_tax_policy")
     if policy is None and not required:
         return []
     try:
-        if required:
-            require_property_tax_policy(inputs)
-        elif isinstance(policy, Mapping):
+        if isinstance(policy, Mapping):
             validate_property_tax_policy(policy)
         else:
             require_property_tax_policy(inputs)
     except PropertyTaxPolicyError as exc:
-        field = exc.field.replace(".", "/")
-        if field.startswith("metadata/"):
-            path = f"/{field}"
-        elif field == "property_tax_policy":
-            path = "/metadata/property_summary/property_tax_policy"
-        else:
-            path = f"/metadata/property_summary/property_tax_policy/{field}"
-        return [
-            ValidationIssue(
-                severity="ERROR",
-                code=exc.code,
-                message=str(exc),
-                path=path,
-            )
-        ]
+        return [_property_tax_issue(exc)]
     return []
+
+
+def property_tax_preflight_issues(inputs: Mapping[str, Any]) -> List[ValidationIssue]:
+    """The property-tax ERRORs ``apply_property_tax_policy`` would raise for ``inputs``.
+
+    ``run_underwriting`` checks these before pricing the tax, so a canonical
+    without a usable millage (or purchase price) is refused with a validation
+    error instead of failing inside the tax calculation.
+    """
+    issues = _check_property_tax_policy(dict(inputs), required=True)
+    if issues:
+        return issues
+    policy = inputs["metadata"]["property_summary"]["property_tax_policy"]
+    price = (inputs.get("purchase_assumptions") or {}).get("purchase_price")
+    try:
+        calculate_property_tax(purchase_price=price, policy=policy)
+    except PropertyTaxPolicyError as exc:
+        return [_property_tax_issue(exc)]
+    return []
+
+
+# A null exit_cap_rate is the placeholder ingest writes for the resolver to
+# fill (ADR 0003 §3 fallback chain). Validation accepts it with a WARNING;
+# the engine entry (validate_or_raise) refuses to run on it.
+EXIT_CAP_RATE_PLACEHOLDER = "EXIT_CAP_RATE_PLACEHOLDER"
+EXIT_CAP_RATE_UNRESOLVED = "EXIT_CAP_RATE_UNRESOLVED"
+_EXIT_CAP_PATH = "/exit_assumptions/exit_cap_rate"
+
+
+def has_exit_cap_placeholder(inputs: Mapping[str, Any]) -> bool:
+    """True when ``exit_assumptions.exit_cap_rate`` is present and null."""
+    exit_assumptions = inputs.get("exit_assumptions")
+    return (
+        isinstance(exit_assumptions, Mapping)
+        and "exit_cap_rate" in exit_assumptions
+        and exit_assumptions["exit_cap_rate"] is None
+    )
+
+
+def _accept_exit_cap_placeholder(
+    inputs: Mapping[str, Any], issues: List[ValidationIssue]
+) -> List[ValidationIssue]:
+    if not has_exit_cap_placeholder(inputs):
+        return issues
+    kept = [i for i in issues if not (i.code == "SCHEMA" and i.path == _EXIT_CAP_PATH)]
+    kept.append(
+        ValidationIssue(
+            severity="WARNING",
+            code=EXIT_CAP_RATE_PLACEHOLDER,
+            message=(
+                "exit_cap_rate is a placeholder the assumption resolver fills "
+                "(analyst > market exit-year cap rate > house fallback). Re-resolve "
+                "(runs/assumptions_sheet.py apply) or set an exit_cap_rate override "
+                "before running the engine."
+            ),
+            path=_EXIT_CAP_PATH,
+        )
+    )
+    return kept
 
 
 def _check_non_overlapping_segments(
@@ -1464,8 +1558,8 @@ def validate_deal(
             for section in _optional_sections
         )
 
-    issues = validate_schema(inputs)
-    issues.extend(_check_property_tax_policy(inputs, required=False))
+    issues = _accept_exit_cap_placeholder(inputs, validate_schema(inputs))
+    issues.extend(_check_property_tax_policy(inputs, required=property_tax_required(inputs)))
 
     if not strict:
         # Downgrade missing-optional-section errors to warnings
@@ -1656,6 +1750,18 @@ def validate_or_raise(inputs: Dict[str, Any]) -> ValidationReport:
         for issue in _check_property_tax_policy(inputs, required=True)
         if (issue.code, issue.path) not in existing
     )
+    if has_exit_cap_placeholder(inputs):
+        issues.append(
+            ValidationIssue(
+                severity="ERROR",
+                code=EXIT_CAP_RATE_UNRESOLVED,
+                message=(
+                    "exit_cap_rate is still the unresolved placeholder; the engine needs a cap "
+                    "rate to value the exit. Re-resolve the assumptions or override exit_cap_rate."
+                ),
+                path=_EXIT_CAP_PATH,
+            )
+        )
     report = ValidationReport(
         status=(
             "FAIL"

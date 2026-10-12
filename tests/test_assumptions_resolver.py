@@ -750,10 +750,15 @@ def test_exit_cap_falls_back_to_going_in_plus_the_house_spread():
     assert validate_schema(deal) == []
     assert resolve_assumptions(deal) == deal
 
-    # The analyst still wins, and no exit means no exit cap.
+    # The analyst still wins.
     analyst = _ingest(purchase_price=25_000_000, exit_cap_rate=0.06, market=None)
     assert _entries(analyst)["exit_cap_rate"]["source"] == "analyst"
-    assert "exit_assumptions" not in _ingest(purchase_price=25_000_000, market=None)
+    # A priced deal with no exit inputs gets an exit at analysis end (ingest),
+    # and its cap resolves through the same going-in + spread fallback.
+    no_exit_inputs = _ingest(purchase_price=25_000_000, market=None)
+    assert no_exit_inputs["exit_assumptions"]["exit_month"] == "2031-07"
+    assert _entries(no_exit_inputs)["exit_cap_rate"]["source"] == "house:exit_cap_spread"
+    assert no_exit_inputs["exit_assumptions"]["exit_cap_rate"] == pytest.approx(going_in + 0.005)
 
 
 _PROGRAM = {

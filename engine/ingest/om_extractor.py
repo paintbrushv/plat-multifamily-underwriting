@@ -45,7 +45,7 @@ def _build_prompt(om_text: str) -> str:
 
     V1.3: removed the 12k truncation slice. Claude Haiku 4.5 supports a
     1M-token context (`claude-haiku-4-5-20251001`), so the full OM text
-    is now sent in one call. Long broker OMs (a 12MB\+ production OM, a long production OM
+    is now sent in one call. Long broker OMs (a 12MB\\+ production OM, a long production OM
     Building, a production deal) previously had their financial summary,
     debt assumability, and rent comp tables silently dropped at the 12k
     cap. Callers that need chunking can call `extract_om_data` directly
