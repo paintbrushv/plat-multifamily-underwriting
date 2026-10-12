@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from engine.modules import loan_sizing
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, month_id, round2
 
@@ -417,14 +418,30 @@ def size_refi_loan(
     cashflow_by_month: List[Dict[str, Any]],
     debt_by_month: List[Dict[str, Any]],
     exit_assumptions: Optional[Dict[str, Any]] = None,
+    *,
+    noi_basis: Optional[str] = None,
+    charge_by_month: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Size a permanent loan from stabilized NOI and compute refi proceeds.
 
+    DSCR sizing uses the ``loan_sizing_noi_basis`` (ADR 0003 §3; ``None`` is
+    the house default, underwritten NCF after the below-NOI capex charge): the
+    trailing stabilized NOI less the forward year's below-NOI deduction for
+    the basis (the 12 months from the trigger month, annualized when fewer
+    remain), as a lender underwrites trailing NOI less underwritten reserves.
+    LTV sizing values the property on NOI (NOI / cap rate, like the exit
+    value), so it takes no deduction.
+
     Args:
         refi_event: The refi_event object from deal inputs
-        cashflow_by_month: Monthly cashflow (needs NOI for sizing)
+        cashflow_by_month: Monthly cashflow (needs NOI for sizing; the
+            below-NOI charge from ``replacement_reserves``)
         debt_by_month: Monthly debt (needs bridge balance for payoff)
         exit_assumptions: Exit assumptions (for LTV cap rate fallback)
+        noi_basis: The loan sizing NOI basis (``engine/modules/loan_sizing.py``).
+        charge_by_month: Optional below-NOI charge rows (``month``,
+            ``replacement_reserves``, ``replacement_reserve_floor``) that
+            override the cash flow's, for the lender-reserve basis.
 
     Returns:
         Dict with:
@@ -434,6 +451,8 @@ def size_refi_loan(
           - refi_costs: Dollar closing costs
           - sized_commitment: The computed loan amount
           - stabilized_noi: The NOI used for sizing
+          - noi_used, below_noi_deduction, sizing_cash_flow (what DSCR sizing
+            used), sizing_noi_basis and deduction_window
     """
     trigger_month = refi_event["trigger_month"][:7]  # Normalize to YYYY-MM
     sizing_method = refi_event["sizing_method"]
@@ -466,6 +485,20 @@ def size_refi_loan(
     else:
         stabilized_noi = trailing_noi
 
+    # The forward year's below-NOI deduction for the loan sizing basis.
+    basis = loan_sizing.resolve_basis(noi_basis)
+    charges = {str(row["month"])[:7]: row for row in charge_by_month or []}
+    forward = cashflow_by_month[trigger_idx:trigger_idx + 12]
+    deduction = Decimal("0")
+    if sizing_method == "dscr" and forward:
+        forward_total = sum(
+            (loan_sizing.below_noi_deduction({**row, **charges.get(str(row["month"])[:7], {})}, basis)
+             for row in forward),
+            Decimal("0"),
+        )
+        deduction = forward_total * Decimal("12") / Decimal(len(forward))
+    sizing_cash_flow = stabilized_noi - deduction
+
     # Size the loan
     perm_rate = dec(perm_terms.get("rate", Decimal("0.055")))
     perm_amort = int(perm_terms.get("amort_years", 30))
@@ -473,9 +506,9 @@ def size_refi_loan(
     if sizing_method == "dscr":
         target_dscr = dec(refi_event["target_dscr"])
         debt_constant = _annual_debt_constant(perm_rate, perm_amort)
-        # Max loan = NOI / (DSCR × annual debt constant)
-        if debt_constant > 0 and target_dscr > 0:
-            sized_commitment = stabilized_noi / (target_dscr * debt_constant)
+        # Max loan = sizing cash flow (NOI less the deduction) / (DSCR × annual debt constant)
+        if debt_constant > 0 and target_dscr > 0 and sizing_cash_flow > 0:
+            sized_commitment = sizing_cash_flow / (target_dscr * debt_constant)
         else:
             sized_commitment = Decimal("0")
     elif sizing_method == "ltv":
@@ -537,6 +570,15 @@ def size_refi_loan(
         "refi_costs": round2(refi_costs),
         "sized_commitment": round2(sized_commitment),
         "stabilized_noi": round2(stabilized_noi),
+        "noi_used": round2(stabilized_noi),
+        "below_noi_deduction": round2(deduction),
+        "sizing_cash_flow": round2(sizing_cash_flow),
+        # LTV sizing values the property on NOI: no deduction applies.
+        "sizing_noi_basis": basis if sizing_method == "dscr" else loan_sizing.NOI_BEFORE_CAPEX,
+        "deduction_window": (
+            [str(forward[0]["month"])[:7], str(forward[-1]["month"])[:7]]
+            if sizing_method == "dscr" and forward else None
+        ),
         "sizing_method": sizing_method,
         "trigger_month": trigger_month,
     }

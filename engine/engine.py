@@ -987,6 +987,9 @@ def run_underwriting(
             cashflow_by_month=cashflow_result["by_month"],
             debt_by_month=debt_by_month,
             exit_assumptions=inputs.get("exit_assumptions"),
+            # Sized on the loan sizing NOI basis (ADR 0003 §3), like the agency loan.
+            noi_basis=dscr_basis,
+            charge_by_month=reserves_by_month or None,
         )
 
         # Set bridge loan to terminate at refi month
