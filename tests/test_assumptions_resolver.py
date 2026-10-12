@@ -44,6 +44,7 @@ STABILIZED_KEYS = {
     "insurance_per_unit",
     "r_and_m_per_unit",
     "replacement_reserve_per_unit",
+    "economic_capex_per_unit",
     "exit_cap_rate",
     "sale_cost_percent",
     "acquisition_fee_pct",
@@ -135,8 +136,11 @@ def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
         ("insurance_per_unit", "deal:t12", 25_200.0,
          ["deal:t12", "house:year1_insurance_floor", "engine_fallback"]),
         ("r_and_m_per_unit", "deal:t12", 19_500.0, ["deal:t12", "house:vintage_1980s", "engine_fallback"]),
-        # The house vintage reserve is written when the canonical carries none.
-        ("replacement_reserve_per_unit", "house:vintage_1980s", 1_000.0, ["house:vintage_1980s", "engine_fallback"]),
+        # The house lender-style reserve is written when the canonical carries none.
+        ("replacement_reserve_per_unit", "house:replacement_reserve", 250.0,
+         ["house:replacement_reserve", "engine_fallback"]),
+        # Economic CapEx is disclosed from the vintage band and never written.
+        ("economic_capex_per_unit", "house:vintage_1980s", 1_000.0, ["house:vintage_1980s"]),
         ("exit_cap_rate", "analyst", 0.055, ["analyst", "house:exit_cap_spread", "engine_fallback"]),
         ("sale_cost_percent", "house:backsolve_policy", 0.02, ["house:backsolve_policy", "engine_fallback"]),
         ("acquisition_fee_pct", "house:backsolve_policy", 0.01, ["house:backsolve_policy", "engine_fallback"]),
@@ -306,7 +310,7 @@ def test_override_round_trip_keeps_default_value():
     assert {row["vacancy_rate"] for row in resolved["physical_vacancy_curve"]} == {0.07}
 
     reserves = entries["replacement_reserve_per_unit"]
-    assert reserves["default_value"] == 0.0
+    assert reserves["default_value"] == 250.0  # the house reserve needs no vintage
     assert resolved["replacement_reserves"] == [
         {"start_period": "2026-08", "end_period": "2031-07", "annual_amount": 3_000.0}
     ]
@@ -490,12 +494,11 @@ def test_ingest_numbers(kwargs, growth, loss, vacancy, ltl, concessions):
     assert [row["calculation_type"] for row in deal["opex_table"]] == ["fixed_annual"] * 9 + ["percent_egr"]
     for absent in ("exit_assumptions", "fund_assumptions", "purchase_assumptions", "debt_terms"):
         assert absent not in deal, absent
-    if "year_built" in kwargs:  # the house vintage reserve ($1,000/unit for the 1980s, cashflow)
-        assert deal["replacement_reserves"] == [
-            {"start_period": "2026-08", "end_period": "2031-07", "annual_amount": 10_000.0}
-        ]
-    else:  # no vintage, no house reserve
-        assert "replacement_reserves" not in deal
+    # The house lender-style reserve ($250/unit, any vintage) over the hold.
+    assert deal["replacement_reserves"] == [
+        {"start_period": "2026-08", "end_period": "2031-07", "annual_amount": 2_500.0}
+    ]
+    assert "capex_schedule" not in deal  # economic CapEx is informational
 
 
 def test_ingest_economics_are_unchanged(full_deal):
@@ -691,10 +694,10 @@ def test_cli_rejects_reserved_deal_type(tmp_path, monkeypatch, capsys):
 def test_house_reserve_is_written_when_the_canonical_has_none():
     deal = _ingest(year_built=1984, deal_type="value_add")
     entry = _entries(deal)["replacement_reserve_per_unit"]
-    per_unit = float(house.default_replacement_reserve_per_unit(1984, strategy="value_add"))
+    per_unit = float(house.HOUSE_REPLACEMENT_RESERVE_PER_UNIT)
 
-    assert per_unit == 1_750.0  # value-add: midpoint of the 1980s economic CapEx band
-    assert (entry["source"], entry["value"], entry["review_required"]) == ("house:vintage_1980s", per_unit, True)
+    assert per_unit == 250.0  # lender-style, not the 1980s economic CapEx band
+    assert (entry["source"], entry["value"], entry["review_required"]) == ("house:replacement_reserve", per_unit, True)
     assert deal["replacement_reserves"] == [
         {"start_period": "2026-08", "end_period": "2031-07", "annual_amount": per_unit * 10}
     ]
@@ -702,6 +705,68 @@ def test_house_reserve_is_written_when_the_canonical_has_none():
     assert resolve_assumptions(deal) == deal
     # No guardrail warning: the house reserve is the floor.
     assert "guardrail" not in entry
+
+
+def test_economic_capex_is_disclosed_but_stays_out_of_the_cash_flows():
+    deal = _ingest(year_built=1984, deal_type="value_add")
+    entry = _entries(deal)["economic_capex_per_unit"]
+    midpoint = float(house.default_economic_capex_per_unit(1984, strategy="value_add"))
+
+    assert midpoint == 1_750.0  # value-add: midpoint of the 1980s economic CapEx band
+    assert (entry["source"], entry["value"], entry["review_required"]) == ("house:vintage_1980s", midpoint, True)
+    assert entry["override"] is None
+    assert "Informational" in entry["basis"] and "PCA" in entry["basis"]
+    assert "capex_schedule" not in deal
+    stabilized = _entries(_ingest(year_built=1984))["economic_capex_per_unit"]
+    assert stabilized["value"] == 1_000.0  # cashflow: the low end of the band
+    assert resolve_assumptions(deal) == deal
+
+
+def test_an_economic_capex_override_opts_it_into_the_cash_flows():
+    deal = _ingest(year_built=1984)
+    opted = resolve_assumptions(deal, overrides={"economic_capex_per_unit": {"value": 1_200, "note": "PCA"}})
+    entry = _entries(opted)["economic_capex_per_unit"]
+
+    assert (entry["source"], entry["value"], entry["default_value"]) == ("analyst", 1_200.0, 1_000.0)
+    assert opted["capex_schedule"] == [{
+        "category": "Economic CapEx (analyst opt-in)", "capex_type": "reserve",
+        "amount_per_unit": 1_200.0, "timing": "annual",
+    }]
+    assert validate_schema(opted) == []
+    assert resolve_assumptions(opted) == opted  # idempotent
+    # Clearing the override takes it back out of the cash flows.
+    cleared = resolve_assumptions(opted, overrides={"economic_capex_per_unit": None})
+    assert "capex_schedule" not in cleared
+    assert _entries(cleared)["economic_capex_per_unit"]["source"] == "house:vintage_1980s"
+    assert resolve_assumptions(cleared) == cleared
+
+
+def _capex_warnings(deal):
+    return [i for i in validate_deal(deal).issues if i.code == "CAPEX_BUDGET_MISSING"]
+
+
+def test_pre_2000_vintage_without_a_capex_budget_is_flagged_for_capex_review(minimal_deal_inputs):
+    deal = copy.deepcopy(minimal_deal_inputs)
+    assert _capex_warnings(deal) == []  # no year built: nothing to say
+    deal["metadata"]["year_built"] = 1984
+    warnings = _capex_warnings(deal)
+    assert [(w.severity, w.path) for w in warnings] == [("WARNING", "/capex_schedule")]
+    assert "PCA" in warnings[0].message and "economic_capex_per_unit" in warnings[0].message
+    assert validate_deal(deal).status == "PASS"
+
+    budgeted = copy.deepcopy(deal)
+    budgeted["capex_schedule"] = [{"category": "Roofs", "capex_type": "one_time", "month": "2027-03",
+                                   "amount": 250_000}]
+    assert _capex_warnings(budgeted) == []
+    upfront = copy.deepcopy(deal)
+    upfront["capex_upfront_funded"] = [{"start_period": "2026-07", "end_period": "2026-07", "amount": 100_000}]
+    assert _capex_warnings(upfront) == []
+    # An analyst opt-in of the vintage economic CapEx is a capex line too.
+    opted = resolve_assumptions(deal, overrides={"economic_capex_per_unit": 1_000})
+    assert _capex_warnings(opted) == []
+    newer = copy.deepcopy(deal)
+    newer["metadata"]["year_built"] = 2004
+    assert _capex_warnings(newer) == []
 
 
 def test_analyst_reserve_and_closing_costs_win(minimal_deal_inputs):

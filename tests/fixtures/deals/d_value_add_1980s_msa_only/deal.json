@@ -131,7 +131,8 @@
       "exit_cap_rate": "market:synthetic",
       "insurance_per_unit": "deal:t12",
       "r_and_m_per_unit": "deal:t12",
-      "replacement_reserve_per_unit": "house:vintage_1980s",
+      "replacement_reserve_per_unit": "house:replacement_reserve",
+      "economic_capex_per_unit": "house:vintage_1980s",
       "purchase_closing_cost_pct": "house:backsolve_policy",
       "renovation_premium": "engine_fallback",
       "turn_cost_per_unit": "house:vintage_1980s",
@@ -197,8 +198,8 @@
         1500
       ],
       "replacement_reserve_per_unit": [
-        1750,
-        1750
+        250,
+        250
       ]
     },
     "opex_growth": {

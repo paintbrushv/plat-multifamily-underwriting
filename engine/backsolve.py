@@ -1221,7 +1221,7 @@ def _prepare_house_assumptions(
         guardrail_findings.append(waiver)
         policy_overrides.append(guardrails.policy_override(waiver))
 
-    # Reserves: max(analyst, vintage reserve) per segment (shared guardrail).
+    # Reserves: max(analyst, house reserve) per segment (shared guardrail).
     # A higher analyst reserve is kept; a hold with no reserves gets the floor.
     reserve_per_unit = guardrail_profile.replacement_reserve_per_unit()
     guardrail_findings += guardrails.enforce_floors(
@@ -1358,7 +1358,7 @@ def _prepare_house_assumptions(
             float(observed_insurance_per_unit) if observed_insurance_per_unit is not None else None
         ),
         # The reserve priced (first segment, per unit; the curve is in
-        # replacement_reserves_applied) and the vintage floor it was held to.
+        # replacement_reserves_applied) and the house reserve floor it was held to.
         "replacement_reserve_per_unit": _reserve_per_unit(prepared, units),
         "replacement_reserves_applied": deepcopy(prepared.get("replacement_reserves") or []),
         "replacement_reserve_floor_per_unit": (

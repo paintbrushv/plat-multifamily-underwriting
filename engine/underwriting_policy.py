@@ -129,8 +129,9 @@ def default_opex_growth_rate(
     return "OPEX_GROWTH_DEFAULT", OPEX_GROWTH_DEFAULT
 
 # Institutional vintage framework supplied by the user on 2026-05-08.
-# Ranges are in 2026 dollars and represent annual/unit reserve floors plus a
-# rough turn-cost band for use when a deal lacks better property-specific data.
+# Ranges are in 2026 dollars: annual/unit R&M, economic CapEx (sustaining
+# capital, not the replacement reserve) and a rough turn-cost band, for use
+# when a deal lacks better property-specific data.
 VINTAGE_FRAMEWORK_2026 = {
     "1960s": {
         "year_min": 1960,
@@ -392,15 +393,46 @@ def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
     return None
 
 
+# ── Replacement reserve vs economic CapEx (ADR 0003 §3, §5) ──────────────
+# HOUSE POLICY, NOT MARKET DATA. The replacement reserve is the lender-style
+# annual reserve carried below NOI. It is the same for every vintage and
+# strategy: $250/unit/year is the desk practice. The resolver writes it when
+# the canonical carries no reserve, and backsolve's pricing floor for reserves
+# is this constant.
+#
+# The vintage framework's economic CapEx band (``economic_capex_low`` /
+# ``economic_capex_high``) is sustaining capital (roofs, HVAC, paving, unit
+# interiors), not a reserve. It is disclosed as its own assumption
+# (``economic_capex_per_unit``) and does not reach the cash flows unless the
+# analyst opts in (a capex budget, or an override of that key).
+HOUSE_REPLACEMENT_RESERVE_PER_UNIT = Decimal("250")
+
+
 def default_replacement_reserve_per_unit(
+    year_built: Optional[int] = None,
+    *,
+    strategy: str = "cashflow",
+    deferred: bool = False,
+) -> Decimal:
+    """House lender-style annual replacement reserve per unit (below NOI).
+
+    Always ``HOUSE_REPLACEMENT_RESERVE_PER_UNIT``: the reserve does not vary by
+    vintage, strategy or deferred maintenance. The arguments are accepted so
+    callers that pass the deal profile keep working. Economic CapEx is
+    ``default_economic_capex_per_unit``.
+    """
+    return HOUSE_REPLACEMENT_RESERVE_PER_UNIT
+
+
+def default_economic_capex_per_unit(
     year_built: Optional[int],
     *,
     strategy: str = "cashflow",
     deferred: bool = False,
 ) -> Optional[Decimal]:
-    """Return a conservative annual/unit economic CapEx reserve.
+    """Annual/unit economic CapEx (sustaining capital) from the vintage band.
 
-    Default policy:
+    This is not the replacement reserve. Default policy:
     - cashflow / stabilized deals start at the low end of the sustainable band
     - value-add / deferred deals use the midpoint of the sustainable band
     - explicitly deferred assets can be pushed to the high end
@@ -742,6 +774,7 @@ def default_vintage_operating_profile(
     when they need a conservative first-pass assumption set.
     """
     bucket = vintage_bucket(year_built)
+    economic_capex = default_economic_capex_per_unit(year_built, strategy=strategy, deferred=deferred)
     return {
         "vintage_bucket": bucket,
         "strategy": strategy,
@@ -756,11 +789,11 @@ def default_vintage_operating_profile(
             if default_turn_capex_per_unit(year_built, strategy=strategy) is not None
             else None
         ),
-        "economic_capex_reserve_per_unit": (
-            float(default_replacement_reserve_per_unit(year_built, strategy=strategy, deferred=deferred))
-            if default_replacement_reserve_per_unit(year_built, strategy=strategy, deferred=deferred) is not None
-            else None
-        ),
+        "replacement_reserve_per_unit": float(default_replacement_reserve_per_unit()),
+        # Sustaining capital, disclosed separately from the reserve. The older
+        # key name is kept for callers that read it.
+        "economic_capex_per_unit": float(economic_capex) if economic_capex is not None else None,
+        "economic_capex_reserve_per_unit": float(economic_capex) if economic_capex is not None else None,
         "year1_insurance_per_unit": float(
             default_year1_insurance_per_unit(observed_insurance_per_unit)
         ),

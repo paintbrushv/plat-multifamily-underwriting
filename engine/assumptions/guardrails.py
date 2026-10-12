@@ -3,10 +3,11 @@
 One place defines the house floors for a (deal_type -> strategy, year_built)
 profile: physical vacancy (the property-level vacancy anchor), loss to lease,
 collection loss, year-1 concessions, insurance per unit, R&M per unit (floor
-and top-up) and replacement reserves per unit. The vintage values come from
-``engine/underwriting_policy.py``; deal evidence passed in ``context`` (broker
-notes, trailing actuals) can raise a floor, exactly as backsolve has always
-done.
+and top-up) and replacement reserves per unit (the house lender-style reserve,
+``HOUSE_REPLACEMENT_RESERVE_PER_UNIT``, the same for every vintage). The
+vintage values come from ``engine/underwriting_policy.py``; deal evidence
+passed in ``context`` (broker notes, trailing actuals) can raise a floor,
+exactly as backsolve has always done.
 
 Two modes:
 
@@ -49,6 +50,7 @@ from engine.assumptions.registry import (
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_PREFIX,
     HOUSE_PRICING_NORMALIZATION,
+    HOUSE_REPLACEMENT_RESERVE,
     HOUSE_YEAR1_INSURANCE_FLOOR,
     MODES,
     SOURCE_ANALYST,
@@ -246,10 +248,11 @@ class GuardrailProfile:
     def r_and_m_per_unit(self) -> Optional[Decimal]:
         return house.default_r_and_m_per_unit(self.year_built, strategy=self.strategy, deferred=self.deferred)
 
-    def replacement_reserve_per_unit(self) -> Optional[Decimal]:
-        return house.default_replacement_reserve_per_unit(
-            self.year_built, strategy=self.strategy, deferred=self.deferred
-        )
+    def replacement_reserve_per_unit(self) -> Decimal:
+        # The lender-style house reserve: the same for every vintage, so this
+        # floor applies even when the year built is unknown. Economic CapEx is
+        # not a reserve floor (``economic_capex_per_unit`` is disclosed only).
+        return house.default_replacement_reserve_per_unit()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -510,8 +513,9 @@ def house_floors(
             "House vintage R&M per unit; a shortfall is topped up with one line.",
         ),
         "replacement_reserve_per_unit": Floor(
-            "replacement_reserve_per_unit", gp.replacement_reserve_per_unit(), gp.vintage_source,
-            "House vintage economic CapEx reserve per unit.",
+            "replacement_reserve_per_unit", gp.replacement_reserve_per_unit(), HOUSE_REPLACEMENT_RESERVE,
+            "House lender-style replacement reserve per unit below NOI (HOUSE_REPLACEMENT_RESERVE_PER_UNIT); "
+            "economic CapEx is disclosed separately (economic_capex_per_unit) and is not a reserve floor.",
         ),
     }
     return floors, vacancy_summary

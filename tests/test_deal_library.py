@@ -239,7 +239,7 @@ def test_resolved_assumptions_fall_in_the_expected_bands(slug):
     assert canonical["exit_assumptions"]["exit_cap_rate"] == entries["exit_cap_rate"]["value"]
     _in(bands["insurance_per_unit"], entries["insurance_per_unit"]["value"], "insurance per unit")
     _in(bands["r_and_m_per_unit"], entries["r_and_m_per_unit"]["value"], "R&M per unit")
-    # The house vintage reserve is written when the documents carry none.
+    # The house lender-style reserve is written when the documents carry none.
     reserve = entries["replacement_reserve_per_unit"]["value"]
     _in(bands["replacement_reserve_per_unit"], reserve, "reserve per unit")
     assert canonical["replacement_reserves"][0]["annual_amount"] == pytest.approx(reserve * sum_units(canonical))
@@ -341,7 +341,7 @@ def _below_floor_keys(canonical, deal):
             year, strategy=strategy):
         below.add("r_and_m_per_unit")
     reserves = [d(r["annual_amount"]) for r in canonical.get("replacement_reserves") or []] or [Decimal(0)]
-    if min(reserves) / units < house.default_replacement_reserve_per_unit(year, strategy=strategy):
+    if min(reserves) / units < house.HOUSE_REPLACEMENT_RESERVE_PER_UNIT:
         below.add("replacement_reserve_per_unit")
     return below
 
@@ -384,7 +384,7 @@ def test_backsolve_enforces_floors_and_its_case_is_stable_on_re_resolve(slug):
     # Every floor the solve enforced is recorded on its entry and in policy_overrides.
     enforced = {k for k, e in entries.items() if (e.get("guardrail") or {}).get("action") == "enforced"}
     summary = result["summary"]["policy_summary"]
-    # The underwrite already carries the house vintage reserve, so pricing has none to enforce.
+    # The underwrite already carries the house reserve, so pricing has none to enforce.
     assert "replacement_reserve_per_unit" not in enforced
     assert all(_entries(canonical)[k]["guardrail"]["action"] == "warned" for k in enforced)
     assert {f["key"] for f in summary["guardrails"]["findings"]} == enforced

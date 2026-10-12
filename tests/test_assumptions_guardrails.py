@@ -29,7 +29,9 @@ from engine.assumptions.guardrails import GuardrailProfile, enforce_floors, hous
 from engine.modules.util import dec
 from engine.validator import validate_deal, validate_schema
 
-YEAR = 1984  # 1980s bucket: vacancy 5%, LTL 1%, collection 0.75%, concessions 0.75%, R&M $900, reserve $1,000
+YEAR = 1984  # 1980s bucket: vacancy 5%, LTL 1%, collection 0.75%, concessions 0.75%, R&M $900
+# The reserve floor is the house lender-style $250/unit for every vintage; the
+# conftest deal reserves exactly that, so it is not below the floor.
 PROFILE = DealProfile("stabilized", year_built=YEAR)
 
 
@@ -66,18 +68,19 @@ def test_floors_reuse_the_underwriting_policy_functions():
     assert gp.collection_loss() == house.default_collection_loss_rate(YEAR, strategy="value_add")
     assert gp.year1_concessions() == house.default_year1_concessions_rate(YEAR, strategy="value_add")
     assert gp.r_and_m_per_unit() == house.default_r_and_m_per_unit(YEAR, strategy="value_add")
-    assert gp.replacement_reserve_per_unit() == house.default_replacement_reserve_per_unit(
-        YEAR, strategy="value_add")
+    assert gp.replacement_reserve_per_unit() == house.HOUSE_REPLACEMENT_RESERVE_PER_UNIT
     assert gp.insurance_per_unit() == house.DEFAULT_YEAR1_INSURANCE_PER_UNIT
     assert GuardrailProfile.coerce(DealProfile("value_add", year_built=YEAR)) == gp
     assert GuardrailProfile.coerce({"deal_type": "value_add", "year_built": YEAR}) == gp
 
 
-def test_unknown_vintage_leaves_only_the_insurance_floor(minimal_deal_inputs):
+def test_unknown_vintage_leaves_only_the_insurance_and_reserve_floors(minimal_deal_inputs):
     floors, _ = house_floors(minimal_deal_inputs, {"deal_type": "stabilized"})
     assert floors["insurance_per_unit"].value == Decimal("600")
-    for key in ("loss_to_lease", "collection_loss", "concessions", "r_and_m_per_unit",
-                "replacement_reserve_per_unit"):
+    # The lender-style reserve does not depend on the vintage.
+    assert floors["replacement_reserve_per_unit"].value == Decimal("250")
+    assert floors["replacement_reserve_per_unit"].source == "house:replacement_reserve"
+    for key in ("loss_to_lease", "collection_loss", "concessions", "r_and_m_per_unit"):
         assert floors[key].value is None, key
     assert floors["physical_vacancy"].value == Decimal("0")
 
@@ -108,7 +111,7 @@ def test_underwrite_warns_without_changing_anything(minimal_deal_inputs):
     assert resolved == before  # input untouched
     assert _strip_guardrail(out) == _strip_guardrail(resolved)  # nothing but the findings differs
     assert {f["key"] for f in findings} == {
-        "physical_vacancy", "collection_loss", "concessions", "r_and_m_per_unit", "replacement_reserve_per_unit",
+        "physical_vacancy", "collection_loss", "concessions", "r_and_m_per_unit",
     }
     assert {f["action"] for f in findings} == {"warned"}
     assert all("applied" not in f for f in findings)
@@ -130,7 +133,7 @@ def test_resolver_underwrite_mode_records_findings_and_keeps_values(minimal_deal
     entries = resolved["assumptions"]["entries"]
     assert entries["r_and_m_per_unit"]["guardrail"]["original"] == 750.0
     assert entries["r_and_m_per_unit"]["guardrail"]["floor"] == 900.0
-    assert entries["replacement_reserve_per_unit"]["guardrail"]["original"] == 250.0
+    assert "guardrail" not in entries["replacement_reserve_per_unit"]  # $250/unit: at the floor
     for entry in entries.values():
         assert AssumptionEntry.from_dict(entry).to_dict() == entry
     assert resolve_assumptions(resolved) == resolved  # idempotent
@@ -145,8 +148,7 @@ def test_validator_warns_guardrail_below_floor_and_adds_no_errors(minimal_deal_i
     warnings = [i for i in report.issues if i.code == "GUARDRAIL_BELOW_FLOOR"]
     assert {w.path for w in warnings} == {
         f"/assumptions/entries/{key}/guardrail"
-        for key in ("physical_vacancy", "collection_loss", "concessions", "r_and_m_per_unit",
-                    "replacement_reserve_per_unit")
+        for key in ("physical_vacancy", "collection_loss", "concessions", "r_and_m_per_unit")
     }
     assert {w.severity for w in warnings} == {"WARNING"}
     assert report.status == baseline.status == "PASS"
@@ -214,8 +216,8 @@ def test_pricing_leaves_values_at_or_above_floor_untouched(minimal_deal_inputs):
          lambda d: next(r for r in d["opex_table"] if r["category_name"] == guardrails.R_AND_M_TOP_UP_CATEGORY)[
              "base_value"] == 15_000.0),
         ("replacement_reserve_per_unit",
-         lambda d: None,
-         lambda d: [r["annual_amount"] for r in d["replacement_reserves"]] == [100_000.0]),
+         lambda d: d.update(replacement_reserves=[dict(r, annual_amount=15_000) for r in d["replacement_reserves"]]),
+         lambda d: [r["annual_amount"] for r in d["replacement_reserves"]] == [25_000.0]),
     ],
 )
 def test_each_floor_type(minimal_deal_inputs, key, mutate, check):
@@ -343,7 +345,7 @@ def test_resolver_pricing_mode_updates_entries_to_the_priced_values(minimal_deal
     assert r_and_m["guardrail"]["original"] == 750.0 and r_and_m["guardrail"]["applied"] == 900.0
     assert r_and_m["override"] == {"value": 900.0, "note": guardrails.GUARDRAIL_OVERRIDE_NOTE}
     reserves = entries["replacement_reserve_per_unit"]
-    assert reserves["value"] == 1000.0 and priced["replacement_reserves"][0]["annual_amount"] == 100_000.0
+    assert reserves["value"] == 250.0 and priced["replacement_reserves"][0]["annual_amount"] == 25_000.0
     assert validate_schema(priced) == []
     assert not [i for i in validate_deal(priced).issues if i.code == "GUARDRAIL_BELOW_FLOOR"]
     # The priced values stick: re-resolving in either mode keeps them.
@@ -418,8 +420,7 @@ def test_backsolve_solved_canonical_carries_pricing_assumptions(pricing_deal):
     assert entries["concessions"]["value"] == case["concession_schedule"][0]["amount"] == 0.0075
     # The enforced floors are shown.
     enforced = {k for k, e in entries.items() if (e.get("guardrail") or {}).get("action") == "enforced"}
-    assert enforced == {"physical_vacancy", "collection_loss", "concessions", "r_and_m_per_unit",
-                        "replacement_reserve_per_unit"}
+    assert enforced == {"physical_vacancy", "collection_loss", "concessions", "r_and_m_per_unit"}
     assert entries["r_and_m_per_unit"]["guardrail"]["original"] == 750.0
     assert entries["physical_vacancy"]["guardrail"]["segments"] == [
         {"cohort_id": "1BR", "start_period": "2027-07", "end_period": "2031-06", "original": 0.03, "applied": 0.05},
@@ -445,7 +446,7 @@ def test_backsolve_reads_the_vintage_from_the_deal_profile(pricing_deal):
     summary = result["summary"]["policy_summary"]
     assert summary["year_built"] == YEAR
     assert summary["guardrails"]["profile"]["year_built"] == YEAR
-    assert result["case"]["replacement_reserves"][0]["annual_amount"] == 100_000.0  # 1980s reserve x 100 units
+    assert result["case"]["replacement_reserves"][0]["annual_amount"] == 25_000.0  # house reserve x 100 units
     assert result["case"] == _solve(pricing_deal)["case"]
 
 
@@ -615,9 +616,9 @@ def test_backsolve_labels_what_its_pricing_policy_and_floors_set(pricing_deal):
     assert top_up["override"]["note"] == guardrails.PRICING_FLOOR_LINE_NOTE
 
 
-def test_reserves_above_the_vintage_reserve_are_never_lowered(minimal_deal_inputs):
-    """UPL-62: reserves are max(analyst, vintage reserve). The analyst's $1,500/unit
-    is priced as entered (the legacy pricing forced it down to $1,000)."""
+def test_reserves_above_the_house_reserve_are_never_lowered(minimal_deal_inputs):
+    """UPL-62: reserves are max(analyst, house reserve). The analyst's $1,500/unit
+    is priced as entered (the legacy pricing forced it down to the floor)."""
     deal = _below_floor_deal(minimal_deal_inputs)
     deal["opex_table"] = [r for r in deal["opex_table"] if r["calculation_type"] != "percent_egr"]
     deal["replacement_reserves"] = [dict(r, annual_amount=150_000) for r in deal["replacement_reserves"]]
@@ -634,7 +635,7 @@ def test_reserves_above_the_vintage_reserve_are_never_lowered(minimal_deal_input
     # The summary reports the reserve priced, and the floor separately.
     summary = result["summary"]["policy_summary"]
     assert summary["replacement_reserve_per_unit"] == 1500.0
-    assert summary["replacement_reserve_floor_per_unit"] == 1000.0
+    assert summary["replacement_reserve_floor_per_unit"] == 250.0
     assert summary["replacement_reserves_applied"] == result["case"]["replacement_reserves"]
 
 

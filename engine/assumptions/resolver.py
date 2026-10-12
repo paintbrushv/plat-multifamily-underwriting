@@ -18,9 +18,10 @@ Semantics (v1):
   fills it with the resolved default and flags house or fallback values
   ``review_required``. That covers rent growth (a ``growth_assumptions``
   section is created when there is none), opex growth rates, the
-  replacement reserve (house vintage reserve x units over the analysis
-  window), purchase closing costs (house percent of price), the exit cap rate
-  of a modeled exit (market, else going-in cap + house spread) and a
+  replacement reserve (the house lender-style reserve x units over the
+  analysis window; economic CapEx is a separate, informational key that is
+  written only when the analyst opts in), purchase closing costs (house
+  percent of price), the exit cap rate of a modeled exit (market, else going-in cap + house spread) and a
   renovation program's missing rent premium.
 - Overrides: ``{key: value | {"value", "note"[, "cohort_overrides"]}}``. A
   ``null`` value (``{key: None}`` or ``{key: {"value": None}}``) clears the
@@ -63,6 +64,7 @@ from engine.assumptions.registry import (
     DEAL_PREFIX,
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_PREFIX,
+    HOUSE_REPLACEMENT_RESERVE,
     HOUSE_YEAR1_INSURANCE_FLOOR,
     MARKET_PREFIX,
     MODES,
@@ -165,6 +167,8 @@ class _Spec:
     adr_rank: Optional[Callable[[str], Optional[int]]] = None
     cohort: bool = False
     value_add_only: bool = False
+    # Disclosed, never written: only an analyst value reaches the canonical.
+    informational: bool = False
 
 
 # ── small helpers ────────────────────────────────────────────────────────
@@ -479,17 +483,11 @@ def _prior_entry(ctx: _Context, key: str) -> Optional[Mapping[str, Any]]:
     return entry if isinstance(entry, Mapping) else None
 
 
-def _house_reserve(ctx: _Context) -> Optional[Decimal]:
-    if ctx.bucket is None:
-        return None
-    return house.default_replacement_reserve_per_unit(ctx.year_built, strategy=ctx.strategy)
-
-
 def _read_reserves(ctx: _Context) -> _Current:
     rows = [row for row in ctx.canonical.get("replacement_reserves") or [] if isinstance(row, Mapping)]
     if not rows:
-        # No reserves: the resolver fills the house vintage reserve when it has one.
-        fillable = _house_reserve(ctx) is not None and ctx.units and len(ctx.start) == 7 and len(ctx.end) == 7
+        # No reserves: the resolver fills the house lender-style reserve.
+        fillable = ctx.units and len(ctx.start) == 7 and len(ctx.end) == 7
         return _Current(PLACEHOLDER if fillable else ABSENT)
     first = sorted(rows, key=lambda r: str(r.get("start_period", "")))[0]
     if first.get("annual_amount") is None:
@@ -507,6 +505,45 @@ def _write_reserves(ctx: _Context, value: Any, _cohorts: Optional[dict[str, floa
             "annual_amount": float(Decimal(str(value)) * Decimal(str(ctx.units))),
         }
     ]
+    return True
+
+
+# The capex_schedule row an analyst's economic CapEx opt-in writes (ADR 0003 §3).
+ECONOMIC_CAPEX_CATEGORY = "Economic CapEx (analyst opt-in)"
+
+
+def _economic_capex_rows(ctx: _Context) -> list[dict[str, Any]]:
+    return [
+        row for row in ctx.canonical.get("capex_schedule") or []
+        if isinstance(row, dict) and row.get("category") == ECONOMIC_CAPEX_CATEGORY
+    ]
+
+
+def _read_economic_capex(ctx: _Context) -> _Current:
+    """The analyst's opt-in row, else ABSENT: the house value is never written."""
+    rows = _economic_capex_rows(ctx)
+    if not rows:
+        return _Current(ABSENT)
+    return _Current(PRESENT, _num(rows[0].get("amount_per_unit")))
+
+
+def _write_economic_capex(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    """Write the opt-in row (an annual reserve-type capex line), or remove it for ``None``."""
+    schedule = [
+        row for row in ctx.canonical.get("capex_schedule") or []
+        if not (isinstance(row, dict) and row.get("category") == ECONOMIC_CAPEX_CATEGORY)
+    ]
+    if _num(value) is not None:
+        schedule.append({
+            "category": ECONOMIC_CAPEX_CATEGORY,
+            "capex_type": "reserve",
+            "amount_per_unit": float(value),
+            "timing": "annual",
+        })
+    if schedule:
+        ctx.canonical["capex_schedule"] = schedule
+    else:
+        ctx.canonical.pop("capex_schedule", None)
     return True
 
 
@@ -738,26 +775,52 @@ def _r_and_m_candidates(ctx: _Context) -> list[dict[str, Any]]:
 
 
 def _reserve_candidates(ctx: _Context) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    house_candidate = _house_vintage(
-        ctx, house.default_replacement_reserve_per_unit, "economic CapEx reserve per unit", "usd_per_unit_year"
-    )
-    if house_candidate:
-        out.append(house_candidate)
-    out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No replacement_reserves: the engine reserves nothing."))
-    return out
+    reserve = house.default_replacement_reserve_per_unit()
+    return [
+        _candidate(
+            HOUSE_REPLACEMENT_RESERVE,
+            float(reserve),
+            f"House lender-style replacement reserve {_fmt(reserve, 'usd')}/unit/year below NOI "
+            "(HOUSE_REPLACEMENT_RESERVE_PER_UNIT, the same for every vintage). Economic CapEx is "
+            "disclosed separately as economic_capex_per_unit.",
+        ),
+        _candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No replacement_reserves: the engine reserves nothing."),
+    ]
 
 
 def _reserve_default(ctx: _Context, state: str) -> _Choice:
-    candidate = next((c for c in _reserve_candidates(ctx) if c["source"].startswith(HOUSE_PREFIX)), None)
-    if candidate is not None:
-        return _choice_from(
-            candidate,
-            ctx,
-            candidate["basis"] + " Written as replacement_reserves = reserve per unit x units over the "
-            "analysis window when the canonical carries none.",
-        )
-    return _fallback(0.0, "Year built unknown, so no house vintage reserve is available: the engine reserves nothing.")
+    candidate = _reserve_candidates(ctx)[0]
+    return _choice_from(
+        candidate,
+        ctx,
+        candidate["basis"] + " Written as replacement_reserves = reserve per unit x units over the "
+        "analysis window when the canonical carries none.",
+    )
+
+
+_ECONOMIC_CAPEX_NOTE = (
+    " Informational: sustaining capital, not the replacement reserve. It does not reach the cash flows "
+    "unless the analyst opts in (an override of this key writes an annual capex_schedule line; a capex "
+    "budget or renovation program can carry it instead). Review it against the PCA / capex plan."
+)
+
+
+def _economic_capex_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    house_candidate = _house_vintage(
+        ctx, house.default_economic_capex_per_unit, "economic CapEx per unit", "usd_per_unit_year"
+    )
+    return [house_candidate] if house_candidate else []
+
+
+def _economic_capex_default(ctx: _Context, state: str) -> _Choice:
+    candidates = _economic_capex_candidates(ctx)
+    if candidates:
+        choice = _choice_from(candidates[0], ctx, candidates[0]["basis"] + _ECONOMIC_CAPEX_NOTE)
+        choice.review = True
+        return choice
+    return _fallback(
+        None, "Year built unknown, so no house vintage economic CapEx is available." + _ECONOMIC_CAPEX_NOTE
+    )
 
 
 def _turn_candidates(ctx: _Context) -> list[dict[str, Any]]:
@@ -1182,6 +1245,16 @@ def _base_specs() -> tuple[_Spec, ...]:
             patch_paths=(("replacement_reserves",),),
         ),
         _Spec(
+            key="economic_capex_per_unit",
+            unit="usd_per_unit_year",
+            read=_read_economic_capex,
+            write=_write_economic_capex,
+            default=_economic_capex_default,
+            gather=_economic_capex_candidates,
+            patch_paths=(("capex_schedule",),),
+            informational=True,
+        ),
+        _Spec(
             key="turn_cost_per_unit",
             unit="usd_per_turn",
             read=_read_no_field,
@@ -1516,7 +1589,11 @@ def _resolve_key(
         elif prior.get("override"):
             override = deepcopy(dict(prior["override"]))
     elif current.state == PRESENT:
-        is_default = ctx.ingested and _same(current.value, default.value) and not current.cohort_overrides
+        # An informational key's default is never written, so a value present is the analyst's.
+        is_default = (
+            ctx.ingested and not spec.informational
+            and _same(current.value, default.value) and not current.cohort_overrides
+        )
         if not is_default:
             override = {"value": current.value, "note": _NOTE_PRESENT}
             if current.cohort_overrides:
@@ -1552,7 +1629,14 @@ def _resolve_key(
             )
 
     write_needed = False
-    if current.state == PLACEHOLDER:
+    if spec.informational:
+        # Only an analyst value is written. Without one, an opt-in left in the
+        # canonical (a cleared override) is removed.
+        if override is not None:
+            write_needed = current.state != PRESENT or not _same(current.value, value)
+        elif current.state == PRESENT and not spec.write(ctx, None, None):
+            notes.append("Not written: the canonical has no field the engine reads for this value.")
+    elif current.state == PLACEHOLDER:
         write_needed = True
     elif current.state == NO_FIELD:
         write_needed = False
