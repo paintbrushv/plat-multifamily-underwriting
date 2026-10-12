@@ -437,6 +437,70 @@ def _dscr_block(cashflow_by_year: List[Dict[str, Any]], basis: str) -> Dict[str,
     }
 
 
+def return_series(
+    cashflow_by_month: List[Dict[str, Any]],
+    cashflow_by_year: List[Dict[str, Any]],
+    exit_month_idx: int,
+    total_unlevered_basis: Decimal | float,
+    total_equity_basis: Decimal | float,
+) -> Dict[str, List[float]]:
+    """The cash flow series IRR and the equity multiple are measured on.
+
+    ``unlevered_monthly`` / ``levered_monthly``: the Day-0 outlay (negative)
+    then each month up to the exit (debt-funded CapEx restored in the
+    unlevered view). ``unlevered_annual`` / ``levered_annual``: the Day-0
+    outlay then each cash flow year (for the RedIQ equity multiple).
+    """
+    unlevered = [-float(total_unlevered_basis)]
+    levered = [-float(total_equity_basis)]
+    for idx, cf_month in enumerate(cashflow_by_month):
+        if idx > exit_month_idx:
+            break
+        # Restore debt-funded CapEx for unlevered view (zeroed in engine for LCF)
+        unlevered.append(float(cf_month.get("unleveraged_cash_flow", 0)) - float(cf_month.get("debt_funded_capex", 0)))
+        levered.append(float(cf_month.get("leveraged_cash_flow", 0)))
+
+    # Equity Multiple, RedIQ formula: EM = sum(positive annual CFs) / sum(|negative
+    # annual CFs|) over the Day-0 outflow and the annual CFs (which include exit
+    # proceeds). For unlevered EM, subtract debt-funded CapEx (the IRR correction).
+    dfc_by_year: Dict[str, float] = {}
+    for cf_m in cashflow_by_month[:exit_month_idx + 1]:
+        dfc = float(cf_m.get("debt_funded_capex", 0))
+        if dfc > 0:
+            yr = cf_m["month"][:4]
+            dfc_by_year[yr] = dfc_by_year.get(yr, 0.0) + dfc
+    unlevered_annual = [-float(total_unlevered_basis)] + [
+        float(y.get("unleveraged_cash_flow", 0)) - dfc_by_year.get(y["year"], 0.0)
+        for y in cashflow_by_year
+    ]
+    levered_annual = [-float(total_equity_basis)] + [float(y.get("leveraged_cash_flow", 0)) for y in cashflow_by_year]
+    return {
+        "unlevered_monthly": unlevered,
+        "levered_monthly": levered,
+        "unlevered_annual": unlevered_annual,
+        "levered_annual": levered_annual,
+    }
+
+
+def _em_rediq(all_cfs: List[float]) -> Optional[float]:
+    pos = sum(cf for cf in all_cfs if cf > 0)
+    neg = sum(abs(cf) for cf in all_cfs if cf < 0)
+    return round(pos / neg, 2) if neg > 0 else None
+
+
+def returns_from_series(series: Dict[str, List[float]]) -> Dict[str, Optional[float]]:
+    """Annualized IRR (from the monthly IRR) and the RedIQ equity multiple, unrounded IRR."""
+    monthly_unlev = _calculate_irr(series["unlevered_monthly"])
+    monthly_lev = _calculate_irr(series["levered_monthly"])
+    return {
+        # Annualize monthly IRR: (1 + monthly)^12 - 1
+        "unlevered_irr": ((1 + monthly_unlev) ** 12 - 1) if monthly_unlev is not None else None,
+        "levered_irr": ((1 + monthly_lev) ** 12 - 1) if monthly_lev is not None else None,
+        "unlevered_em": _em_rediq(series["unlevered_annual"]),
+        "levered_em": _em_rediq(series["levered_annual"]),
+    }
+
+
 def compute_metrics(
     time_grid: TimeGrid,
     cashflow_by_month: List[Dict[str, Any]],
@@ -536,63 +600,15 @@ def compute_metrics(
 
     avg_coc = total_lev_cf / total_equity_basis / Decimal(len(cashflow_by_year)) if total_equity_basis > 0 and cashflow_by_year else None
 
-    # Build cash flow series for IRR calculation
-    # Monthly cash flows up to exit + exit proceeds
-    unlevered_cf_series: List[float] = []
-    levered_cf_series: List[float] = []
-
-    # Initial investment (negative)
-    # Unleveraged: total purchase price + closing costs
-    # Leveraged: total_equity_basis (actual cash outlay at Day 0)
-    unlevered_cf_series.append(-float(total_unlevered_basis))
-    levered_cf_series.append(-float(total_equity_basis))
-
-    # Monthly cash flows (limited to exit month)
-    # Note: exit proceeds are already injected into cashflow_by_month by the engine
-    for idx, cf_month in enumerate(cashflow_by_month):
-        if idx > exit_month_idx:
-            break
-
-        unlev_cf = float(cf_month.get("unleveraged_cash_flow", 0))
-        # Restore debt-funded CapEx for unlevered view (zeroed in engine for LCF)
-        unlev_cf -= float(cf_month.get("debt_funded_capex", 0))
-        lev_cf = float(cf_month.get("leveraged_cash_flow", 0))
-
-        unlevered_cf_series.append(unlev_cf)
-        levered_cf_series.append(lev_cf)
-
-    # Calculate IRR (monthly rate, then annualize)
-    monthly_irr_unlev = _calculate_irr(unlevered_cf_series)
-    monthly_irr_lev = _calculate_irr(levered_cf_series)
-
-    # Annualize monthly IRR: (1 + monthly)^12 - 1
-    annual_irr_unlev = ((1 + monthly_irr_unlev) ** 12 - 1) if monthly_irr_unlev is not None else None
-    annual_irr_lev = ((1 + monthly_irr_lev) ** 12 - 1) if monthly_irr_lev is not None else None
-
-    # Calculate Equity Multiple — RedIQ formula:
-    # EM = sum(positive annual CFs) / sum(|negative annual CFs|)
-    # Uses annual CFs (which include exit proceeds) plus Day 0 outflow.
-    # For unlevered EM, subtract debt-funded CapEx (same correction as IRR series).
-    dfc_by_year: Dict[str, float] = {}
-    for cf_m in cashflow_by_month[:exit_month_idx + 1]:
-        dfc = float(cf_m.get("debt_funded_capex", 0))
-        if dfc > 0:
-            yr = cf_m["month"][:4]
-            dfc_by_year[yr] = dfc_by_year.get(yr, 0.0) + dfc
-    unlev_annual = [
-        float(y.get("unleveraged_cash_flow", 0)) - dfc_by_year.get(y["year"], 0.0)
-        for y in cashflow_by_year
-    ]
-    lev_annual = [float(y.get("leveraged_cash_flow", 0)) for y in cashflow_by_year]
-
-    def _em_rediq(day0: float, annual_cfs: list) -> float | None:
-        all_cfs = [day0] + annual_cfs
-        pos = sum(cf for cf in all_cfs if cf > 0)
-        neg = sum(abs(cf) for cf in all_cfs if cf < 0)
-        return round(pos / neg, 2) if neg > 0 else None
-
-    unlev_em = _em_rediq(-float(total_unlevered_basis), unlev_annual)
-    lev_em = _em_rediq(-float(total_equity_basis), lev_annual)
+    # IRR and equity multiple from the Day-0 bases and the cash flows up to the
+    # exit (exit proceeds are already injected by the engine). The exit-cap
+    # sensitivity grid reuses the same series with only the reversion shifted.
+    series = return_series(
+        cashflow_by_month, cashflow_by_year, exit_month_idx, total_unlevered_basis, total_equity_basis,
+    )
+    returns = returns_from_series(series)
+    annual_irr_unlev, annual_irr_lev = returns["unlevered_irr"], returns["levered_irr"]
+    unlev_em, lev_em = returns["unlevered_em"], returns["levered_em"]
 
     # Calculate yields.
     # Year-2 unlevered NOI is the second 12-month projection year, the same

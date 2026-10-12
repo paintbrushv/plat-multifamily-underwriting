@@ -837,6 +837,11 @@ HOUSE_EXIT_CAP_GOING_IN_MAX = Decimal("0.25")
 HOUSE_STEAL_THRESHOLD = Decimal("0.0150")
 HOUSE_MAX_EXIT_COMPRESSION = Decimal("0.0100")
 HOUSE_STEAL_FULL_COMPRESSION_EXCESS = HOUSE_STEAL_THRESHOLD + Decimal("0.0200")
+# Exit-cap sensitivity grid (engine/modules/exit_cap_grid.py): every run and
+# the backsolve summary report the base case at these offsets (bps) around the
+# exit cap as run, each point pinned (never re-anchored to a price). Weighted
+# to the downside: a tighter exit is the less likely error for an older asset.
+HOUSE_EXIT_CAP_SENSITIVITY_OFFSETS_BPS = (-50, -25, 0, 25, 50, 75, 100, 150)
 
 
 def house_exit_cap_rate(

@@ -14,6 +14,7 @@ from engine.modules.capital_plan import (
     metric_basis as capital_plan_metric_basis,
 )
 from engine.modules import loan_sizing
+from engine.modules.exit_cap_grid import compute_exit_cap_grid
 from engine.modules.cashflow import compute_cashflow
 from engine.modules.debt import compute_debt, compute_preferred_equity, size_refi_loan
 from engine.modules.fund_waterfall import compute_fund_waterfall
@@ -555,6 +556,7 @@ def run_underwriting(
     federation_mode: bool = False,
     deal_root: Optional[Path] = None,
     run_id: Optional[str] = None,
+    exit_cap_sensitivity: bool = True,
 ) -> Dict[str, Any]:
     """Run the underwriting engine.
 
@@ -579,6 +581,11 @@ def run_underwriting(
         Optional federation run id paired with ``deal_root`` for validator
         cross-checks against ``<deal_root>/outputs/<run_id>/...``. Only used
         when ``federation_mode=True``.
+    exit_cap_sensitivity:
+        If True (the default), ``result['exit_cap_sensitivity']`` reports the
+        base case at ``HOUSE_EXIT_CAP_SENSITIVITY_OFFSETS_BPS`` around the
+        exit cap as run, each point pinned (``engine/modules/exit_cap_grid.py``).
+        Price-search loops that only need the base case turn it off.
 
     Returns
     -------
@@ -1340,6 +1347,20 @@ def run_underwriting(
                 "coc_below_target_7pct": coc_v15["coc_below_target_7pct"],
                 "coc_below_target_6pct": coc_v15["coc_below_target_6pct"],
             }
+
+    # Exit-cap sensitivity grid (ADR 0003 §3): the base case at named exit-cap
+    # offsets, each pinned; only the reversion is recomputed.
+    if exit_cap_sensitivity and exit_result:
+        grid = compute_exit_cap_grid(
+            cashflow_by_month=cashflow_result["by_month"],
+            cashflow_by_year=cashflow_result["by_year"],
+            exit_result=exit_result,
+            purchase_assumptions=inputs.get("purchase_assumptions"),
+            exit_assumptions=inputs.get("exit_assumptions"),
+            cash_on_cash_year_1=((result.get("metrics") or {}).get("coc") or {}).get("cash_on_cash_year_1"),
+        )
+        if grid is not None:
+            result["exit_cap_sensitivity"] = grid
 
     # Wave 1b Task 1.5: stash validator report so federation callers can embed
     # it in provenance. Only attached when federation_mode=True ran a validator;

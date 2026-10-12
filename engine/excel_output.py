@@ -60,6 +60,9 @@ def write_results_to_workbook(
     if "sensitivity" in results:
         _write_sensitivity_sheet(wb, results)
 
+    if results.get("exit_cap_sensitivity"):
+        _write_exit_cap_sensitivity_sheet(wb, results["exit_cap_sensitivity"])
+
     _write_model_health_sheet(wb, results, inputs)
 
     # ADR 0003 §8: the editable assumptions sheet travels with every workbook
@@ -443,6 +446,46 @@ def _write_sensitivity_sheet(wb: Workbook, results: Dict[str, Any]) -> None:
     ws.column_dimensions["A"].width = 12
     for i in range(10):
         ws.column_dimensions[get_column_letter(i + 2)].width = 10
+
+
+EXIT_CAP_GRID_COLUMNS = (
+    ("Offset (bps)", "offset_bps", "0"),
+    ("Exit Cap", "exit_cap_rate", "0.00%"),
+    ("Exit Value", "exit_value", CURRENCY_FORMAT),
+    ("Sale Costs", "sale_costs", CURRENCY_FORMAT),
+    ("Net Sale Proceeds", "net_sale_proceeds", CURRENCY_FORMAT),
+    ("Unlevered IRR", "unlevered_irr", PERCENT_FORMAT),
+    ("Levered IRR", "levered_irr", PERCENT_FORMAT),
+    ("Unlevered EM", "unlevered_em", '0.00"x"'),
+    ("Levered EM", "levered_em", '0.00"x"'),
+)
+
+
+def _write_exit_cap_sensitivity_sheet(wb: Workbook, grid: Dict[str, Any]) -> None:
+    """The exit-cap sensitivity grid (ADR 0003 §3): one row per pinned exit cap."""
+    ws = wb.create_sheet("Exit_Cap_Sensitivity")
+    ws["A1"] = "EXIT CAP SENSITIVITY"
+    ws["A1"].font = TITLE_FONT
+    ws["A2"] = f"Base exit cap {float(grid.get('base_exit_cap_rate') or 0):.2%}. {grid.get('rule', '')}"
+    coc = grid.get("cash_on_cash_year_1")
+    ws["A3"] = "Year-1 cash-on-cash (does not move with the exit cap):"
+    ws["E3"] = coc
+    ws["E3"].number_format = PERCENT_FORMAT
+    header_row = 5
+    for col, (label, _key, _fmt) in enumerate(EXIT_CAP_GRID_COLUMNS, start=1):
+        cell = ws.cell(row=header_row, column=col, value=label)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center")
+    for r, point in enumerate(grid.get("points") or [], start=header_row + 1):
+        for col, (_label, key, fmt) in enumerate(EXIT_CAP_GRID_COLUMNS, start=1):
+            cell = ws.cell(row=r, column=col, value=point.get(key))
+            cell.number_format = fmt
+            if point.get("is_base"):
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    for col in range(1, len(EXIT_CAP_GRID_COLUMNS) + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 18
 
 
 def _write_model_health_sheet(

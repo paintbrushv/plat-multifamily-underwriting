@@ -111,7 +111,9 @@ def preview_noi(
     if key is not None and key in _CACHE:
         _CACHE.move_to_end(key)
         return dict(_CACHE[key])
-    results = run(preview_case(canonical, price))
+    case = preview_case(canonical, price)
+    # The preview needs NOI only: skip the engine's exit-cap sensitivity grid.
+    results = run(case, exit_cap_sensitivity=False) if cacheable else run(case)
     by_year = results["cashflow"]["by_year"]
     projected = by_year[1] if len(by_year) >= 2 else (by_year[0] if by_year else {})
     year_1 = ((results.get("metrics") or {}).get("noi") or {}).get("year_1_noi")
