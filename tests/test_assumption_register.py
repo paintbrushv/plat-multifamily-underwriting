@@ -363,7 +363,7 @@ def test_edited_rows_are_flagged_with_their_delta():
     assert exit_row["user_edit"]["differs_from_default"] is True
     assert exit_row["user_edit"]["delta"] == pytest.approx(0.005)
     assert exit_row["user_edit"]["delta_display"] == "+50 bps"
-    assert exit_row["default"]["source"].startswith("market:")
+    assert exit_row["default"]["source"] == "house:exit_cap_spread"  # entry-anchored even with market data
     rent_row = _row(register, "rent_growth")
     default = rent_row["default"]["value"]
     assert rent_row["user_edit"]["delta"] == pytest.approx([0.02 - d for d in default])
@@ -569,7 +569,7 @@ def test_excel_tab_shows_the_register_and_still_round_trips(tmp_path):
 
     exit_row = next(row for row in body if row[0].value == "exit_cap_rate")
     assert exit_row[headers.index("Edited By / At")].value == "Analyst A · 2026-10-01"
-    assert exit_row[headers.index("Default Source")].value.startswith("market:")
+    assert exit_row[headers.index("Default Source")].value == "house:exit_cap_spread"
     assert exit_row[headers.index("Flags")].value.startswith("Edited by user")
     assert exit_row[headers.index("Group")].fill.start_color.rgb.endswith("FFF2CC")  # highlighted
     assert exit_row[0].font.bold
