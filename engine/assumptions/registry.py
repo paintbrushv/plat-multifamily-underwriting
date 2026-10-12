@@ -44,6 +44,8 @@ HOUSE_R_AND_M_PAYROLL_REVIEW = "house:r_and_m_payroll_review"
 # House sources that disclose a review rather than set a default to confirm:
 # they are flagged only when the resolver finds the case ambiguous.
 REVIEW_ON_FINDING_SOURCES = frozenset({HOUSE_R_AND_M_PAYROLL_REVIEW})
+# HOUSE_LOAN_SIZING_NOI_BASIS: loan sizing and DSCR on NOI less the below-NOI capex charge.
+HOUSE_LOAN_SIZING_NOI_BASIS = "house:loan_sizing_noi_basis"
 
 
 def house_vintage_source(bucket: str) -> str:

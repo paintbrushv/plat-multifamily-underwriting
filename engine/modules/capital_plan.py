@@ -13,15 +13,18 @@
    flow's ``replacement_reserves`` line, the one place reserves have always
    entered, so nothing is charged twice.
 
-NOI stays before capex: going-in cap, yield on cost, exit value and DSCR use
-NOI; unlevered and levered cash flow, cash-on-cash, IRR and the equity
-multiple are after the below-NOI charge.
+NOI stays before capex: going-in cap, yield on cost and exit value use NOI;
+unlevered and levered cash flow, cash-on-cash, IRR and the equity multiple are
+after the below-NOI charge. DSCR and agency loan sizing use underwritten NCF,
+NOI less the same charge (``loan_sizing_noi_basis``, ``engine/modules/loan_sizing.py``),
+with the NOI-based DSCR reported beside it.
 """
 from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Optional
 
+from engine.modules import loan_sizing
 from engine.modules.opex import _calculate_years_elapsed
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, get_total_units, month_id, round2
@@ -41,12 +44,49 @@ METRIC_BASIS = {
     "net_operating_income": "before capex (the below-NOI charge, renovation and immediate capex are excluded)",
     "going_in_cap_rate": "year-1 NOI / purchase price (before capex)",
     "exit_value": "forward NOI / exit cap rate (before capex)",
-    "dscr": "NOI / debt service (before capex)",
+    "dscr": "underwritten NCF / debt service: NOI less the below-NOI capex charge, max(recurring capex, "
+            "lender reserve) (loan_sizing_noi_basis ncf_after_capex_charge); NOI / debt service (before capex) "
+            "is reported beside it as dscr.noi_before_capex",
+    "loan_sizing": "agency DSCR sizing on underwritten NCF, the same basis as DSCR (backsolve, at every "
+                   "candidate price)",
     "unleveraged_cash_flow": "after the below-NOI charge and operating capex",
     "cash_on_cash": "levered cash flow after the below-NOI charge / total equity basis (immediate capex funded "
                     "at close is in the basis)",
     "irr_and_equity_multiple": "after the below-NOI charge, with immediate capex in the Day-0 outlay",
 }
+
+
+# DSCR and loan sizing text for the other loan_sizing_noi_basis values.
+_DSCR_BASIS = {
+    loan_sizing.NCF_AFTER_LENDER_RESERVE: (
+        "underwritten NCF / debt service: NOI less the lender replacement reserve only (loan_sizing_noi_basis "
+        "ncf_after_lender_reserve); NOI / debt service (before capex) is reported beside it as "
+        "dscr.noi_before_capex"
+    ),
+    loan_sizing.NOI_BEFORE_CAPEX: (
+        "NOI / debt service (before capex; loan_sizing_noi_basis noi_before_capex); the same figure is "
+        "reported as dscr.noi_before_capex"
+    ),
+}
+_SIZING_BASIS = {
+    loan_sizing.NCF_AFTER_LENDER_RESERVE: (
+        "agency DSCR sizing on underwritten NCF after the lender reserve, the same basis as DSCR (backsolve, "
+        "at every candidate price)"
+    ),
+    loan_sizing.NOI_BEFORE_CAPEX: (
+        "agency DSCR sizing on NOI before capex, the same basis as DSCR (backsolve, at every candidate price)"
+    ),
+}
+
+
+def metric_basis(loan_sizing_basis: Optional[str] = None) -> Dict[str, str]:
+    """``METRIC_BASIS`` with the DSCR and loan sizing lines for ``loan_sizing_basis``."""
+    basis = loan_sizing.resolve_basis(loan_sizing_basis)
+    out = dict(METRIC_BASIS)
+    if basis in _DSCR_BASIS:
+        out["dscr"] = _DSCR_BASIS[basis]
+        out["loan_sizing"] = _SIZING_BASIS[basis]
+    return out
 
 
 def capital_plan_section(inputs: Mapping[str, Any]) -> Mapping[str, Any]:

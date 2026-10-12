@@ -124,6 +124,20 @@ def _first_present(metrics: Dict[str, Any], *paths: Tuple[str, ...]) -> Tuple[An
     return None, None
 
 
+def _dscr_basis_note(metrics: Dict[str, Any]) -> str:
+    """`` on NCF after capex charge (1.30 on NOI)`` for a basis-labeled DSCR; empty without one."""
+    basis = _extract(metrics, "dscr", "basis")
+    if not isinstance(basis, str) or not basis:
+        return ""
+    from engine.modules.loan_sizing import NOI_BEFORE_CAPEX, SHORT_LABELS
+
+    note = f" on {SHORT_LABELS.get(basis, basis)}"
+    noi_dscr, err = _coerce_finite_float(_extract(metrics, "dscr", "noi_before_capex", "minimum_dscr"))
+    if basis != NOI_BEFORE_CAPEX and err is None and noi_dscr is not None:
+        note += f" ({noi_dscr:.2f} on NOI)"
+    return note
+
+
 def _pct(value: float) -> str:
     """Format a fraction as a percentage with 2dp (e.g. 0.4698 -> '46.98%')."""
     return f"{value * 100:.2f}%"
@@ -149,7 +163,10 @@ def classify(metrics: Dict[str, Any]) -> FeasibilityResult:
 
         - ``metrics['irr']['levered_irr']`` (float, fraction)
         - ``metrics['equity_multiple']['levered_em']`` (float)
-        - ``metrics['dscr']['minimum_dscr']`` (float; also accepts ``minimum`` / ``min_dscr``)
+        - ``metrics['dscr']['minimum_dscr']`` (float; also accepts ``minimum`` / ``min_dscr``),
+          on the basis ``metrics['dscr']['basis']`` names when present (the engine's
+          loan sizing basis, underwritten NCF by default); the DSCR floors apply
+          to it and the reasons name it
         - ``metrics['dscr']['average_dscr']`` (float; also accepts ``average`` / ``avg_dscr``)
         - ``metrics['yields']['going_in_cap_rate']`` (float, fraction)
         - ``metrics['yields']['exit_cap_rate']`` (float, fraction)
@@ -185,6 +202,11 @@ def classify(metrics: Dict[str, Any]) -> FeasibilityResult:
         ("dscr", "minimum"),
         ("dscr", "min_dscr"),
     )
+    # The engine reports DSCR on its loan sizing basis (ADR 0003 §3: underwritten
+    # NCF after the below-NOI capex charge by default; agency DSCR minimums are
+    # stated on underwritten NCF). The floors apply to that figure, and the
+    # message names the basis and the NOI-based DSCR beside it.
+    dscr_basis_note = _dscr_basis_note(metrics)
     avg_dscr_raw, _ = _first_present(
         metrics,
         ("dscr", "average_dscr"),
@@ -245,7 +267,7 @@ def classify(metrics: Dict[str, Any]) -> FeasibilityResult:
         flag = "dscr_below_1_10_likely_covenant_breach"
         hard_flags.append(flag)
         reasons_by_flag[flag] = (
-            f"Min DSCR {min_dscr:.2f} is below the {MIN_DSCR_HARD_FLOOR:.2f} "
+            f"Min DSCR {min_dscr:.2f}{dscr_basis_note} is below the {MIN_DSCR_HARD_FLOOR:.2f} "
             f"covenant-breach threshold."
         )
 
@@ -265,14 +287,14 @@ def classify(metrics: Dict[str, Any]) -> FeasibilityResult:
         flag = "dscr_below_1_20"
         warn_flags.append(flag)
         reasons_by_flag[flag] = (
-            f"Min DSCR {min_dscr:.2f} is below the {MIN_DSCR_WARN_120:.2f} "
+            f"Min DSCR {min_dscr:.2f}{dscr_basis_note} is below the {MIN_DSCR_WARN_120:.2f} "
             f"warn threshold (above the {MIN_DSCR_HARD_FLOOR:.2f} HARD floor)."
         )
     elif min_dscr is not None and MIN_DSCR_WARN_120 <= min_dscr < MIN_DSCR_WARN_130:
         flag = "dscr_below_1_30_lender_refi_floor"
         warn_flags.append(flag)
         reasons_by_flag[flag] = (
-            f"Min DSCR {min_dscr:.2f} is below the {MIN_DSCR_WARN_130:.2f} "
+            f"Min DSCR {min_dscr:.2f}{dscr_basis_note} is below the {MIN_DSCR_WARN_130:.2f} "
             f"typical lender refi floor."
         )
 

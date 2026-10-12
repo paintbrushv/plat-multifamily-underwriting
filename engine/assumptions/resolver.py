@@ -67,6 +67,7 @@ from engine.assumptions.registry import (
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_DEFERRED_CAPEX,
     HOUSE_DEFERRED_CAPEX_PLACEHOLDER,
+    HOUSE_LOAN_SIZING_NOI_BASIS,
     HOUSE_PREFIX,
     HOUSE_R_AND_M_PAYROLL_REVIEW,
     HOUSE_RECURRING_CAPEX,
@@ -1447,6 +1448,53 @@ def _fee_spec(name: str, section: str, field_name: str, unit: str, *, ingest_fil
     )
 
 
+# ── loan sizing NOI basis (ADR 0003 §3) ──────────────────────────────────
+# A categorical assumption: the cash flow agency loan sizing and DSCR use. The
+# canonical's top-level ``loan_sizing_noi_basis``; absent, the engine applies
+# the house default, so the default is never written.
+LOAN_SIZING_KEY = "loan_sizing_noi_basis"
+CATEGORICAL_KEYS = {LOAN_SIZING_KEY: house.LOAN_SIZING_NOI_BASES}
+
+
+def _read_loan_sizing_basis(ctx: _Context) -> _Current:
+    if LOAN_SIZING_KEY not in ctx.canonical:
+        return _Current(ABSENT)
+    value = ctx.canonical[LOAN_SIZING_KEY]
+    return _Current(PLACEHOLDER) if value is None else _Current(PRESENT, value)
+
+
+def _write_loan_sizing_basis(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    ctx.canonical[LOAN_SIZING_KEY] = value
+    return True
+
+
+def _loan_sizing_default(ctx: _Context, state: str) -> _Choice:
+    basis = house.HOUSE_LOAN_SIZING_NOI_BASIS
+    return _Choice(
+        HOUSE_LOAN_SIZING_NOI_BASIS,
+        basis,
+        f"House loan sizing basis {basis!r} (HOUSE_LOAN_SIZING_NOI_BASIS): agency DSCR sizing and the reported "
+        "DSCR use underwritten NCF, NOI less the below-NOI capex charge max(recurring capex, lender reserve), "
+        "as agency lenders size on NOI less replacement reserves. The NOI-based DSCR is reported beside it. "
+        "Alternatives: 'ncf_after_lender_reserve' (NOI less the lender reserve only) or 'noi_before_capex'.",
+        confidence="medium",
+    )
+
+
+def _loan_sizing_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    return [_candidate(
+        HOUSE_LOAN_SIZING_NOI_BASIS, house.HOUSE_LOAN_SIZING_NOI_BASIS,
+        "engine/underwriting_policy.HOUSE_LOAN_SIZING_NOI_BASIS.",
+    )]
+
+
+def _normalize_categorical(key: str, value: Any) -> str:
+    allowed = CATEGORICAL_KEYS[key]
+    if value not in allowed:
+        raise AssumptionOverrideError(f"override for {key!r} must be one of {list(allowed)}, got {value!r}")
+    return str(value)
+
+
 def _opex_slice():
     """ADR 0003 slice 5: per-line opex entries live in engine/assumptions/opex.py."""
     from engine.assumptions import opex
@@ -1708,6 +1756,15 @@ def _base_specs() -> tuple[_Spec, ...]:
             patch_paths=(("purchase_assumptions", "closing_costs"),),
         ),
         _fee_spec("loan_closing_costs", "debt_terms", "loan_closing_costs", "usd", ingest_fills=False),
+        _Spec(
+            key=LOAN_SIZING_KEY,
+            unit="enum",
+            read=_read_loan_sizing_basis,
+            write=_write_loan_sizing_basis,
+            default=_loan_sizing_default,
+            gather=_loan_sizing_candidates,
+            patch_paths=((LOAN_SIZING_KEY,),),
+        ),
     )
 
 
@@ -1779,8 +1836,12 @@ def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -
         raise AssumptionOverrideError(
             f"{key!r} does not support cohort_overrides; only {sorted(COHORT_OVERRIDE_KEYS)} do"
         )
-    # Slice 4: a scalar, a per-year vector, or the curve shape the key writes.
-    value = _curves().normalize_override_value(key, value)
+    # Slice 4: a scalar, a per-year vector, or the curve shape the key writes;
+    # a categorical key takes one of its named values.
+    if key in CATEGORICAL_KEYS:
+        value = _normalize_categorical(key, value)
+    else:
+        value = _curves().normalize_override_value(key, value)
     out: dict[str, Any] = {"value": value, "note": note}
     if cohorts:
         if not isinstance(value, float):

@@ -13,7 +13,7 @@ from typing import Any
 
 from engine.backsolve_policy import (
     CONTRACT_VERSION, DEFAULT_COC_BASIS, POLICY_VERSION, BacksolveInputError, decimal_value,
-    describe_policy, policy_value_sources, resolve_policy, validate_benchmark,
+    describe_policy, loan_sizing_basis_source, policy_value_sources, resolve_policy, validate_benchmark,
 )
 from engine.engine import (
     RENOVATION_FUNDING_EQUITY_AT_CLOSE,
@@ -21,6 +21,7 @@ from engine.engine import (
     run_underwriting,
 )
 from engine.modules.analysis_years import aggregate_analysis_years
+from engine.modules import loan_sizing
 from engine.modules.debt import LOAN_ROUNDING_STEP, compute_agency_loan_terms
 from engine.modules.metrics import compute_cash_on_cash_for_year, stabilized_analysis_year
 from engine.modules.renovations import compute_renovations
@@ -912,6 +913,15 @@ def _preview_projected_noi(canonical: dict[str, Any]) -> Decimal:
     return _exit_cap.preview_noi(canonical, _preview_price(canonical), run=run_underwriting)["projected"]
 
 
+def _sizing_deduction(preview: dict[str, Any], basis: str) -> Decimal:
+    """The below-NOI deduction ``basis`` takes from the preview's projected NOI (ADR 0003 §3)."""
+    if basis == loan_sizing.NCF_AFTER_CAPEX_CHARGE:
+        return preview["projected_capex_charge"]
+    if basis == loan_sizing.NCF_AFTER_LENDER_RESERVE:
+        return preview["projected_lender_reserve"]
+    return Decimal("0")
+
+
 # How the exit cap is priced (ADR 0003 §3). The policy's or the analyst's exit
 # cap (and the exit cap of a canonical that records no provenance) is fixed;
 # otherwise it is entry-anchored and re-measured at every candidate price.
@@ -1216,12 +1226,19 @@ def _prepare_house_assumptions(
     loan_closing_costs: Decimal,
     insurance_per_unit_override: Decimal | None = None,
     coc_basis: str | None = None,
+    loan_sizing_noi_basis: str | None = None,
     broker_snapshot: dict[str, Any] | None = None,
     grouped_comps: dict[str, Any] | None = None,
     revenue_quality_bridge: dict[str, Any] | None = None,
     trailing_actuals: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     prepared = deepcopy(canonical)
+    if loan_sizing_noi_basis is not None and loan_sizing_noi_basis != prepared.get(
+        loan_sizing.FIELD, loan_sizing.resolve_basis(None)
+    ):
+        # An explicit policy basis: every candidate case carries it, so the engine
+        # reports DSCR on the basis the loan was sized on.
+        prepared[loan_sizing.FIELD] = loan_sizing_noi_basis
     metadata = prepared.setdefault("metadata", {})
     property_summary = metadata.get("property_summary") or {}
     if year_built is None:
@@ -1489,6 +1506,7 @@ def _prepare_house_assumptions(
         "revenue_quality_bridge": revenue_quality_summary,
         "renovation_funding": renovation_funding,
         "coc_basis": coc_basis or DEFAULT_COC_BASIS[strategy],
+        "loan_sizing_noi_basis": loan_sizing.resolve_basis(loan_sizing_noi_basis),
         **revenue_summary,
         "guardrails": {
             "mode": guardrails.MODE_PRICING,
@@ -1519,8 +1537,14 @@ def _build_price_case(
     exit_cap_anchor: dict[str, Any] | None = None,
     immediate_capex: Decimal = Decimal("0"),
     immediate_capex_funding: str = "equity_at_close",
+    loan_sizing_noi_basis: str | None = None,
 ) -> dict[str, Any]:
     """The candidate case at ``price``.
+
+    The agency loan is sized on the ``loan_sizing_noi_basis`` (ADR 0003 §3;
+    house default: underwritten NCF, the projected year's NOI less its
+    below-NOI capex charge), measured on the all-equity preview at this price.
+    The sizing is kept in ``metadata.property_summary.loan_sizing``.
 
     With ``exit_cap_anchor`` (an entry-anchored exit cap, ADR 0003 §3) the exit
     cap is the going-in cap at this price (year-1 NOI / price) plus the house
@@ -1547,10 +1571,12 @@ def _build_price_case(
         purchase_price=price,
     )
     hold_months = _hold_months(case)
-    candidate_projected_noi = _preview_projected_noi(case)
+    preview = _exit_cap.preview_noi(case, _preview_price(case), run=run_underwriting)
+    candidate_projected_noi = preview["projected"]
     if exit_cap_anchor is not None:
         # Same preview as the projected NOI above (memoized), so no extra engine run.
         _anchor_exit_cap(case, price=persisted_price, anchor=exit_cap_anchor)
+    sizing_basis = loan_sizing.resolve_basis(loan_sizing_noi_basis)
     agency_terms = compute_agency_loan_terms(
         year_built,
         t12_noi=candidate_projected_noi,
@@ -1558,7 +1584,20 @@ def _build_price_case(
         purchase_price=price,
         benchmark_5yr_treasury=benchmark_treasury,
         agency_spread=agency_spread,
+        below_noi_deduction=_sizing_deduction(preview, sizing_basis),
+        noi_basis=sizing_basis,
     )
+    case.setdefault("metadata", {}).setdefault("property_summary", {})["loan_sizing"] = {
+        "basis": sizing_basis,
+        "basis_label": loan_sizing.LABELS[sizing_basis],
+        "sizing_noi_basis": sizing_basis,
+        "noi_used": agency_terms["noi_used"],
+        "below_noi_deduction": agency_terms["below_noi_deduction"],
+        "sizing_cash_flow": agency_terms["sizing_cash_flow"],
+        "required_dscr": agency_terms["required_dscr"],
+        "sizing_method": agency_terms["sizing_method"],
+        "loan_amount": agency_terms["loan_amount"],
+    }
     commitment = dec(agency_terms["loan_amount"])
     holdback = immediate_capex if immediate_capex_funding == IMMEDIATE_CAPEX_LENDER_HOLDBACK else Decimal("0")
     equity_immediate = immediate_capex - holdback
@@ -1615,8 +1654,9 @@ def _build_price_case(
             f"Backsolved to {float(target_coc) * 100:.1f}% {COC_BASIS_LABELS[coc_basis]} post-debt CoC "
             f"using hold-matched Treasury {agency_terms['rate_breakdown']['benchmark_5yr_treasury']:.4f} "
             f"+ spread {agency_terms['rate_breakdown']['agency_spread']:.4f}; "
-            f"DSCR sizing method {agency_terms['sizing_method']}; "
-            f"projected NOI used {float(candidate_projected_noi):,.0f}."
+            f"DSCR sizing method {agency_terms['sizing_method']} on "
+            f"{loan_sizing.LABELS[sizing_basis]}; projected NOI used {float(candidate_projected_noi):,.0f}, "
+            f"less {agency_terms['below_noi_deduction']:,.0f} = {agency_terms['sizing_cash_flow']:,.0f}."
         ),
         "om_pricing_process": "unknown",
         "as_of_date": str(date.today()),
@@ -1813,6 +1853,11 @@ def _label_pricing_entries(
                 f"({before.get('source')})."
             )
         label(key, guardrails.SOURCE_HOUSE_BACKSOLVE_POLICY, guardrails.PRICING_POLICY_NOTE, basis)
+    # The loan sizing NOI basis an explicit policy wrote into the case (ADR 0003 §3).
+    if "loan_sizing_noi_basis" in policy and case.get(loan_sizing.FIELD) is not None and changed(loan_sizing.FIELD):
+        label(loan_sizing.FIELD, guardrails.SOURCE_HOUSE_BACKSOLVE_POLICY, guardrails.PRICING_POLICY_NOTE,
+              f"Set by the backsolve pricing policy {POLICY_VERSION} (an explicit policy value): "
+              f"{case[loan_sizing.FIELD]!r}; the loan is sized, and DSCR reported, on this basis.")
 
     # 2. The house box-score rebase (the one remaining input normalization).
     rebase = policy_summary.get("house_box_score_rebase") or {}
@@ -1918,6 +1963,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--coc-basis", choices=["year_1", "stabilized_year"],
                         help="Cash-on-cash basis to target (default: year_1 for cashflow, "
                              "stabilized_year for value_add)")
+    parser.add_argument("--loan-sizing-noi-basis", choices=list(loan_sizing.BASES),
+                        help="Cash flow the agency loan is sized on (default: the canonical's "
+                             "loan_sizing_noi_basis, else ncf_after_capex_charge)")
     parser.add_argument("--min-price", type=Decimal, default=Decimal("1000000"))
     parser.add_argument("--max-price", type=Decimal, default=Decimal("100000000"))
     parser.add_argument("--max-iterations", type=int, default=40)
@@ -1973,6 +2021,7 @@ def backsolve_price(
     analyst_values = canonical_analyst_values(canonical, entries=entries)
     values = resolve_policy(policy, canonical, analyst_values)
     exit_cap_mode, exit_cap_anchor = _exit_cap_policy(policy, values, entries)
+    sizing_basis = values["loan_sizing_noi_basis"]
     analyst_keys = {key for key in analyst_values if key not in policy}
     require_property_tax_policy(canonical)
     treasury = Decimal(checked_benchmark["rate"])
@@ -2004,6 +2053,7 @@ def backsolve_price(
             projected_noi=projected_noi, renovation_budget=renovation_budget, coc_basis=coc_basis,
             exit_cap_anchor=exit_cap_anchor,
             immediate_capex=immediate_amount, immediate_capex_funding=immediate_funding,
+            loan_sizing_noi_basis=sizing_basis,
             **{key: values[key] for key in (
                 "year_built", "agency_spread", "purchase_closing_cost_pct",
                 "partnership_closing_costs", "acquisition_fee_pct", "loan_closing_costs")},
@@ -2090,6 +2140,8 @@ def backsolve_price(
         basis_detail.update(analysis_year=1, free_cf=basis_y1["free_cf_year_1"],
                             equity_basis=(basis_y1.get("components") or {}).get("equity_basis"))
     solved_projected_noi = dec(solved_by_year[1 if len(solved_by_year) >= 2 else 0]["net_operating_income"])
+    solved_dscr = solved_results["metrics"]["dscr"]
+    solved_sizing = ((solved_case.get("metadata") or {}).get("property_summary") or {}).get("loan_sizing") or {}
     summary = {
             "target_cash_on_cash_pct": float(target),
             "solved_purchase_price": solved_case["purchase_assumptions"]["purchase_price"],
@@ -2099,6 +2151,11 @@ def backsolve_price(
             "io_months": solved_case["debt_terms"]["io_months"],
             "term_months": solved_case["debt_terms"]["term_months"],
             "projected_noi_used_for_sizing": float(solved_projected_noi),
+            # The loan is sized, and DSCR reported, on this NOI basis (ADR 0003 §3).
+            "loan_sizing": {
+                **solved_sizing,
+                "source": loan_sizing_basis_source(policy, canonical),
+            },
             "property_tax_calculation": (
                 ((solved_case.get("metadata") or {}).get("property_summary") or {}).get(
                     "property_tax_calculation"
@@ -2147,7 +2204,9 @@ def backsolve_price(
             },
             "free_cf_year_1": solved_results["metrics"]["coc"]["free_cf_year_1"],
             "levered_irr": solved_results["metrics"]["irr"]["levered_irr"],
-            "minimum_dscr": solved_results["metrics"]["dscr"]["minimum_dscr"],
+            "minimum_dscr": solved_dscr["minimum_dscr"],
+            "minimum_dscr_basis": solved_dscr.get("basis"),
+            "minimum_dscr_noi_before_capex": (solved_dscr.get("noi_before_capex") or {}).get("minimum_dscr"),
             "going_in_cap_rate": solved_results["metrics"]["yields"]["going_in_cap_rate"],
             "exit_cap_rate": solved_results["metrics"]["yields"]["exit_cap_rate"],
             # How the exit cap was priced: entry-anchored at the solved price, or fixed.
@@ -2197,6 +2256,9 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
     findings = ((summary.get("policy_summary") or {}).get("guardrails") or {}).get("findings") or []
     enforced = sum(1 for f in findings if f.get("action") in guardrails.ENFORCING_ACTIONS)
     dscr = summary.get("minimum_dscr")
+    dscr_basis = summary.get("minimum_dscr_basis")
+    noi_dscr = summary.get("minimum_dscr_noi_before_capex")
+    sizing = summary.get("loan_sizing") or {}
     exit_calc = summary.get("exit_cap_calculation") or {}
     exit_line = _pct(summary.get("exit_cap_rate"))
     if exit_calc.get("mode") == EXIT_CAP_MODE_ANCHORED and exit_calc.get("going_in_cap_rate") is not None:
@@ -2213,7 +2275,11 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
         f"  CoC basis:        {basis_name or 'n/a'}, target {_pct(target)}",
         f"  Achieved CoC:     {_pct(None if achieved is None else float(achieved) / 100)}",
         f"  Levered IRR:      {_pct(summary.get('levered_irr'))}",
-        f"  Min DSCR:         {'n/a' if dscr is None else f'{float(dscr):.2f}x'}",
+        f"  Min DSCR:         {'n/a' if dscr is None else f'{float(dscr):.2f}x'}"
+        + (f" on {loan_sizing.SHORT_LABELS.get(dscr_basis, dscr_basis)}" if dscr_basis else "")
+        + (f" ({float(noi_dscr):.2f}x on NOI)" if noi_dscr is not None and dscr_basis != "noi_before_capex" else ""),
+        *([f"  Loan sizing:      {loan_sizing.SHORT_LABELS.get(sizing.get('basis'), sizing.get('basis'))}, "
+           f"{sizing.get('sizing_method')} ({sizing.get('source')})"] if sizing.get("basis") else []),
         f"  Exit cap:         {exit_line}",
         *_capital_plan_cli_lines(summary.get("capital_plan")),
         f"  Floors enforced:  {enforced}",
@@ -2245,6 +2311,8 @@ def main() -> None:
         policy["exit_cap_rate"] = args.exit_cap_rate
     if args.coc_basis is not None:
         policy["coc_basis"] = args.coc_basis
+    if args.loan_sizing_noi_basis is not None:
+        policy["loan_sizing_noi_basis"] = args.loan_sizing_noi_basis
     if args.policy_json:
         provided_policy = _load_json(Path(args.policy_json))
         if not isinstance(provided_policy, dict) or provided_policy.get("version") != args.policy_version:

@@ -163,6 +163,13 @@ SOURCE_RATIONALES: dict[str, str] = {
         "benchmark does the excess count, up to the labeled maintenance payroll. The review is always shown, "
         "and flagged when R&M is short and payroll is high, so the analyst can confirm or override the credit."
     ),
+    "house:loan_sizing_noi_basis": (
+        "Agency lenders size a loan on what the property earns after its capital needs, not on NOI: they "
+        "deduct replacement reserves before testing debt coverage. The house sizes the loan, and reports debt "
+        "coverage, on NOI less the same yearly capital charge the cash flow pays (the larger of recurring "
+        "capex and the lender reserve), so an older building that needs more capital carries a smaller loan. "
+        "The NOI-based coverage is shown beside it, and the analyst can choose another basis."
+    ),
     "house:deferred_capex": (
         "Without a property condition assessment or an analyst budget there is no evidence of what must "
         "be fixed at closing, so nothing is budgeted at close and the entry is flagged. Inspect the asset "

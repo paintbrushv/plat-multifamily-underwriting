@@ -28,6 +28,7 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional
 
 from engine import underwriting_policy as house
+from engine.modules import loan_sizing
 
 # The preview needs some exit cap to run; it never changes NOI.
 PREVIEW_EXIT_CAP_RATE = 0.0625
@@ -92,7 +93,11 @@ def preview_noi(
     *,
     run: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
 ) -> dict[str, Optional[Decimal]]:
-    """``{"year_1": analysis-year-1 NOI, "projected": the second cashflow year's NOI}``.
+    """``{"year_1": analysis-year-1 NOI, "projected": the second cashflow year's NOI, ...}``.
+
+    ``projected_capex_charge`` and ``projected_lender_reserve`` are that
+    year's below-NOI capex charge and lender reserve (the deductions the loan
+    sizing NOI basis takes, ``engine/modules/loan_sizing.py``).
 
     Runs the engine (``run``, default ``engine.engine.run_underwriting``) on
     ``preview_case``; an engine or validation error is raised. Results of the
@@ -113,6 +118,10 @@ def preview_noi(
     out = {
         "year_1": Decimal(str(year_1)) if year_1 is not None else None,
         "projected": Decimal(str(projected.get("net_operating_income", 0))),
+        "projected_capex_charge": loan_sizing.below_noi_deduction(projected, loan_sizing.NCF_AFTER_CAPEX_CHARGE),
+        "projected_lender_reserve": loan_sizing.below_noi_deduction(
+            projected, loan_sizing.NCF_AFTER_LENDER_RESERVE
+        ),
     }
     if key is not None:
         _CACHE[key] = out

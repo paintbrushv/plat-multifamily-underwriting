@@ -9,10 +9,11 @@ from engine.modules.analysis_years import aggregate_analysis_years
 from engine.modules.capex import compute_capex
 from engine.modules.capital_plan import (
     FUNDING_EQUITY_AT_CLOSE as IMMEDIATE_CAPEX_EQUITY_AT_CLOSE,
-    METRIC_BASIS as CAPITAL_PLAN_METRIC_BASIS,
     compute_below_noi_charge,
     immediate_capex as capital_plan_immediate_capex,
+    metric_basis as capital_plan_metric_basis,
 )
+from engine.modules import loan_sizing
 from engine.modules.cashflow import compute_cashflow
 from engine.modules.debt import compute_debt, compute_preferred_equity, size_refi_loan
 from engine.modules.fund_waterfall import compute_fund_waterfall
@@ -136,11 +137,16 @@ def _compute_layer_debt(
 def _build_capital_stack_summary(
     stack_results: List[Dict[str, Any]],
     cashflow_result: Dict[str, Any],
+    dscr_basis: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build capital stack summary with per-layer metrics and layered DSCR.
 
+    The layered DSCRs use the loan sizing basis (``dscr_basis``, underwritten
+    NCF by default); the NOI-based ones are beside them.
+
     Returns:
-        Dict with layers[] (per-layer summary), senior_dscr, combined_dscr
+        Dict with layers[] (per-layer summary), senior_dscr, combined_dscr,
+        dscr_basis and noi_before_capex
     """
     layers_summary = []
     senior_ds_total = Decimal("0")
@@ -168,19 +174,24 @@ def _build_capital_stack_summary(
             all_ds_total += layer_ds
         # Preferred equity DS is not included in DSCR (it's equity return, not debt)
 
-    # Compute DSCRs from cashflow NOI
-    total_noi = sum(
-        dec(yr.get("net_operating_income", 0))
-        for yr in cashflow_result.get("by_year", [])
-    )
+    # Compute DSCRs from the cash flow on the loan sizing basis, and from NOI.
+    dscr_basis = loan_sizing.resolve_basis(dscr_basis)
+    years = cashflow_result.get("by_year", [])
+    total_cf = sum((loan_sizing.sizing_cash_flow(yr, dscr_basis) for yr in years), Decimal("0"))
+    total_noi = sum((dec(yr.get("net_operating_income", 0)) for yr in years), Decimal("0"))
 
-    senior_dscr = round2(total_noi / senior_ds_total) if senior_ds_total > 0 else None
-    combined_dscr = round2(total_noi / all_ds_total) if all_ds_total > 0 else None
+    def ratio(numerator: Decimal, debt_service: Decimal) -> Optional[Decimal]:
+        return round2(numerator / debt_service) if debt_service > 0 else None
 
     return {
         "layers": layers_summary,
-        "senior_dscr": senior_dscr,
-        "combined_dscr": combined_dscr,
+        "senior_dscr": ratio(total_cf, senior_ds_total),
+        "combined_dscr": ratio(total_cf, all_ds_total),
+        "dscr_basis": dscr_basis,
+        "noi_before_capex": {
+            "senior_dscr": ratio(total_noi, senior_ds_total),
+            "combined_dscr": ratio(total_noi, all_ds_total),
+        },
     }
 
 
@@ -596,6 +607,8 @@ def run_underwriting(
             raise ValueError(f"Validation failed:\n{messages}")
 
     inputs, property_tax_calculation = apply_property_tax_policy(inputs)
+    # DSCR is reported on the loan sizing NOI basis (ADR 0003 §3); refuse an unknown one.
+    dscr_basis = loan_sizing.basis_from_inputs(inputs)
 
     validator_report_dict: Optional[Dict[str, Any]] = None
     if not skip_validation:
@@ -974,6 +987,9 @@ def run_underwriting(
             cashflow_by_month=cashflow_result["by_month"],
             debt_by_month=debt_by_month,
             exit_assumptions=inputs.get("exit_assumptions"),
+            # Sized on the loan sizing NOI basis (ADR 0003 §3), like the agency loan.
+            noi_basis=dscr_basis,
+            charge_by_month=reserves_by_month or None,
         )
 
         # Set bridge loan to terminate at refi month
@@ -1158,6 +1174,7 @@ def run_underwriting(
         debt_by_month=debt_by_month,
         purchase_assumptions=inputs.get("purchase_assumptions"),
         exit_assumptions=inputs.get("exit_assumptions"),
+        dscr_basis=dscr_basis,
     )
 
     result = {
@@ -1254,6 +1271,7 @@ def run_underwriting(
         result["capital_plan"] = _capital_plan_result(
             capital_charge, renovation_result, renovation_funding,
             immediate_amount, immediate_funding, immediate_in_basis,
+            dscr_basis,
         )
 
     # Pass renovation_detail sidecar through untouched
@@ -1264,7 +1282,7 @@ def run_underwriting(
         result["refi"] = refi_result
 
     if capital_stack_results:
-        result["capital_stack"] = _build_capital_stack_summary(capital_stack_results, cashflow_result)
+        result["capital_stack"] = _build_capital_stack_summary(capital_stack_results, cashflow_result, dscr_basis)
 
     # Fund-level waterfall (optional)
     if inputs.get("fund_assumptions") and inputs.get("purchase_assumptions") and inputs.get("exit_assumptions"):
@@ -1364,6 +1382,7 @@ def _capital_plan_result(
     immediate_amount: Decimal,
     immediate_funding: str,
     immediate_in_basis: Decimal,
+    dscr_basis: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The three capex buckets as run (ADR 0003 §3), next to the renovation budget."""
     equity_funded = immediate_funding == IMMEDIATE_CAPEX_EQUITY_AT_CLOSE
@@ -1384,7 +1403,7 @@ def _capital_plan_result(
         # The value-add renovation budget is its own budget, never part of bucket 1.
         "renovation_budget": {"amount": renovation_budget, "funding": renovation_funding},
         "below_noi_capex_charge": capital_charge,
-        "metric_basis": dict(CAPITAL_PLAN_METRIC_BASIS),
+        "metric_basis": capital_plan_metric_basis(dscr_basis),
     }
 
 

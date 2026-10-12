@@ -80,7 +80,9 @@ def resolve_policy(policy, canonical, analyst_values=None):
     canonical carries (``analyst_values``, keyed like ``DEFAULTS``), else
     ``DEFAULTS``. The exit cap is the policy's, else the canonical's.
     """
-    allowed = set(DEFAULTS) | {"version", "strategy", "year_built", "exit_cap_rate", "coc_basis"}
+    allowed = set(DEFAULTS) | {
+        "version", "strategy", "year_built", "exit_cap_rate", "coc_basis", "loan_sizing_noi_basis",
+    }
     if not isinstance(policy, dict) or policy.get("version") != POLICY_VERSION:
         raise BacksolveInputError(f"policy.version must be {POLICY_VERSION}")
     if set(policy) - allowed:
@@ -93,6 +95,13 @@ def resolve_policy(policy, canonical, analyst_values=None):
     coc_basis = policy.get("coc_basis", DEFAULT_COC_BASIS[policy["strategy"]])
     if coc_basis not in COC_BASES:
         raise BacksolveInputError(f"policy.coc_basis must be one of {', '.join(COC_BASES)}")
+    # The loan sizing NOI basis (ADR 0003 §3): the policy's, else the canonical's, else the house default.
+    sizing_basis = policy.get("loan_sizing_noi_basis", canonical.get("loan_sizing_noi_basis"))
+    if sizing_basis is None:
+        sizing_basis = house.HOUSE_LOAN_SIZING_NOI_BASIS
+    if sizing_basis not in house.LOAN_SIZING_NOI_BASES:
+        raise BacksolveInputError(
+            f"loan_sizing_noi_basis must be one of {', '.join(house.LOAN_SIZING_NOI_BASES)}")
     analyst = {}
     for name, value in (analyst_values or {}).items():
         if name not in DEFAULTS or name in policy:
@@ -107,7 +116,17 @@ def resolve_policy(policy, canonical, analyst_values=None):
         values[name] = decimal_value(value, f"policy.{name}",
                                      positive=name == "exit_cap_rate", rate=name in RATE_FIELDS,
                                      cents=name not in RATE_FIELDS)
-    return {**values, "strategy": policy["strategy"], "year_built": year, "coc_basis": coc_basis}
+    return {**values, "strategy": policy["strategy"], "year_built": year, "coc_basis": coc_basis,
+            "loan_sizing_noi_basis": sizing_basis}
+
+
+def loan_sizing_basis_source(policy, canonical):
+    """Who set the loan sizing NOI basis backsolve priced with (disclosed in the summary)."""
+    if "loan_sizing_noi_basis" in policy:
+        return "explicit policy value"
+    if canonical.get("loan_sizing_noi_basis") is not None:
+        return "canonical (analyst)"
+    return "house default (HOUSE_LOAN_SIZING_NOI_BASIS)"
 
 
 VALUE_SOURCE_POLICY = "explicit_policy"
