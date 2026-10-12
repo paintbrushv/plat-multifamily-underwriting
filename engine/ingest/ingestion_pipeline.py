@@ -250,7 +250,10 @@ def build_deal_from_documents(
         amort_years: Amortization period in years
         io_months: Interest-only months (default 0)
         term_months: Loan term in months (default: analysis duration)
-        exit_cap_rate: Exit cap rate (0-1)
+        exit_cap_rate: Exit cap rate (0-1), recorded as an analyst override.
+            When omitted but ``exit_month`` or ``sale_cost_pct`` is given, the
+            exit is still modeled and the resolver fills the cap rate (the
+            market exit-year cap rate, else the disclosed engine default).
         exit_month: Exit month "YYYY-MM" (default: analysis end)
         sale_cost_pct: Sale cost percent. When omitted, the house default
             (``backsolve_policy.DEFAULTS``, 2%) is used and flagged for review.
@@ -526,14 +529,18 @@ def build_deal_from_documents(
             "loan_start_month": start,
         }
 
-    # Build exit_assumptions from CLI flags (or OM)
-    if exit_cap_rate is not None and "exit_assumptions" not in deal:
+    # Build exit_assumptions from CLI flags (or OM). An exit month or sale cost
+    # without an exit cap rate still models the exit: the resolver fills the
+    # cap rate (market exit-year cap rate, else the disclosed engine default).
+    exit_given = any(value is not None for value in (exit_cap_rate, exit_month, sale_cost_pct))
+    if exit_given and "exit_assumptions" not in deal:
         deal["exit_assumptions"] = {
-            "exit_cap_rate": None,
             "exit_month": exit_month or end,
             "sale_cost_percent": None,
         }
-        overrides["exit_cap_rate"] = {"value": exit_cap_rate, "note": "ingest input exit_cap_rate"}
+        if exit_cap_rate is not None:
+            deal["exit_assumptions"]["exit_cap_rate"] = None
+            overrides["exit_cap_rate"] = {"value": exit_cap_rate, "note": "ingest input exit_cap_rate"}
         if sale_cost_pct is not None:
             overrides["sale_cost_percent"] = {"value": sale_cost_pct, "note": "ingest input sale_cost_pct"}
 

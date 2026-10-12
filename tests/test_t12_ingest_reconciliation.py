@@ -159,6 +159,36 @@ def test_bare_other_income_line_counts_toward_income(tmp_path):
     assert [line["kind"] for line in statement["income_lines"]] == ["rental", "other"]
 
 
+def test_account_coded_gl_lines_named_like_their_section_are_summed(tmp_path):
+    """Two GL accounts named like their section header are detail lines, not
+    subtotals; an account-coded rollup that ties to the section is still skipped."""
+    csv_path = tmp_path / "coded_gl_collision.csv"
+    csv_path.write_text(
+        "Account Name,M1,M2\n"
+        "Gross Potential Rent,5000,5000\n"
+        "Total Income,5000,5000\n"
+        "EXPENSES,,\n"
+        "Repairs & Maintenance,,\n"
+        "6110 - Repairs & Maintenance,300,300\n"
+        "6120 - Repairs & Maintenance,130,130\n"
+        "Plumbing Repairs,120,120\n"
+        "6100 - Repairs & Maintenance,550,550\n"
+        "Insurance,,\n"
+        "Property Insurance,200,200\n"
+        "Total Expenses,750,750\n"
+    )
+    statement = parse_t12_statement(csv_path)
+    by_name = {row["category_name"]: row["base_value"] for row in statement["opex_table"]}
+
+    assert by_name == {"Repairs & Maintenance": 1100.0, "Insurance": 400.0}
+    assert statement["provenance"]["Repairs & Maintenance"] == [
+        "6110 - Repairs & Maintenance",
+        "6120 - Repairs & Maintenance",
+        "Plumbing Repairs",
+    ]
+    assert statement["reconciliation"]["status"] == "PASS"
+
+
 def test_operating_expense_total_preferred_over_total_expenses(tmp_path):
     csv_path = tmp_path / "non_operating_below_noi.csv"
     csv_path.write_text(

@@ -1,0 +1,287 @@
+{
+  "slug": "d_value_add_1980s_msa_only",
+  "property_id": "SYN-D-BRINDLEWOOD",
+  "property_name": "Brindlewood Row (synthetic)",
+  "summary": "Value-add 1986 deal, 90 units, MSA-only market data (the submarket has none); the T12 has GL collisions, other income and a repair line with a utility word.",
+  "synthetic": true,
+  "documents": {
+    "rent_roll": "rent_roll.csv",
+    "t12": "t12.csv"
+  },
+  "analysis": {
+    "start": "2026-11",
+    "end": "2031-10"
+  },
+  "deal_profile": {
+    "deal_type": "value_add",
+    "year_built": 1986,
+    "msa": {
+      "name": "Brindlewood Synthetic MSA",
+      "metro_slug": "brindlewood_sx"
+    },
+    "metro_slug": "brindlewood_sx",
+    "submarket": "Brindlewood South"
+  },
+  "economics": {
+    "purchase_price": 11380000,
+    "ltv": 0.62,
+    "loan_rate": 0.06,
+    "amort_years": 30,
+    "io_months": 24,
+    "exit_month": "2031-10",
+    "sale_cost_pct": 0.02,
+    "exit_cap_rate": null
+  },
+  "analyst_inputs": {
+    "metadata": {
+      "property_summary": {
+        "property_tax_policy": {
+          "millage_rate_mills": 17.0,
+          "assessment_ratio": 0.75,
+          "source": "synthetic_tax_bill",
+          "source_locator": "tests/fixtures/deals/d_value_add_1980s_msa_only/deal.json",
+          "analyst_override": true
+        }
+      }
+    }
+  },
+  "market_data": {
+    "provider": "synthetic",
+    "as_of": "2026-09-30",
+    "confidence": "medium",
+    "observations": [
+      {
+        "metric": "rent_growth_forecast",
+        "level": "msa",
+        "value": {
+          "2026Q4": 0.016,
+          "2027Q1": 0.018,
+          "2027Q2": 0.02,
+          "2027Q3": 0.022,
+          "2027Q4": 0.024,
+          "2028Q1": 0.026,
+          "2028Q2": 0.027,
+          "2028Q3": 0.028,
+          "2028Q4": 0.029
+        }
+      },
+      {
+        "metric": "vacancy_stabilized",
+        "level": "msa",
+        "value": 0.06
+      },
+      {
+        "metric": "concession_rate",
+        "level": "msa",
+        "value": 0.015
+      },
+      {
+        "metric": "market_cap_rate",
+        "level": "msa",
+        "value": {
+          "2026Q4": 0.06,
+          "2027Q4": 0.0605,
+          "2028Q4": 0.061,
+          "2029Q4": 0.0612,
+          "2030Q4": 0.0614,
+          "2031Q1": 0.0613,
+          "2031Q2": 0.0615,
+          "2031Q3": 0.0616,
+          "2031Q4": 0.0616
+        }
+      }
+    ]
+  },
+  "expected": {
+    "documents": {
+      "units": 90,
+      "rent_roll_physical_vacancy": 0.066667,
+      "rent_roll_loss_to_lease": 0.043359,
+      "rent_roll_gpr_annual": 1480200.0,
+      "t12_gpr_annual": 1469098.5,
+      "t12_total_income": 1369260.48,
+      "t12_total_opex": 649613.42,
+      "t12_opex_to_egi": 0.474426,
+      "t12_opex_by_category": {
+        "Payroll": 117000.0,
+        "Repairs & Maintenance": 130500.0,
+        "Turnover / Make-Ready": 27900.0,
+        "Landscaping / Grounds": 17100.0,
+        "Pest Control": 4500.0,
+        "Water & Sewer": 43200.0,
+        "Electricity": 18900.0,
+        "Fuel (Gas & Oil)": 8100.0,
+        "Trash": 10800.0,
+        "Office Supplies": 8100.0,
+        "Telephone": 5400.0,
+        "Legal & Professional": 4500.0,
+        "Marketing / Advertising": 11700.0,
+        "Insurance": 57600.0,
+        "Real Estate Taxes": 136389.3,
+        "Property Management Fee": 47924.12
+      }
+    },
+    "ingest_gate": "PASS",
+    "sources": {
+      "rent_growth": "market:synthetic",
+      "physical_vacancy": "market:synthetic",
+      "loss_to_lease": "house:vintage_1980s",
+      "concessions": "market:synthetic",
+      "collection_loss": "deal:t12",
+      "exit_cap_rate": "market:synthetic",
+      "insurance_per_unit": "deal:t12",
+      "r_and_m_per_unit": "deal:t12",
+      "replacement_reserve_per_unit": "engine_fallback",
+      "turn_cost_per_unit": "house:vintage_1980s",
+      "sale_cost_percent": "analyst"
+    },
+    "bands": {
+      "rent_growth": [
+        [
+          0.022,
+          0.026
+        ],
+        [
+          0.027,
+          0.031
+        ],
+        [
+          0.026,
+          0.028
+        ],
+        [
+          0.025,
+          0.025
+        ]
+      ],
+      "vacancy_start": [
+        0.06,
+        0.075
+      ],
+      "vacancy_stabilized": [
+        0.06,
+        0.06
+      ],
+      "loss_to_lease_start": [
+        0.035,
+        0.055
+      ],
+      "loss_to_lease_floor": [
+        0.0125,
+        0.0125
+      ],
+      "concessions_year1": [
+        0.015,
+        0.015
+      ],
+      "concessions_stabilized": [
+        0.015,
+        0.015
+      ],
+      "collection_loss": [
+        0.007,
+        0.011
+      ],
+      "exit_cap_rate": [
+        0.061,
+        0.062
+      ],
+      "insurance_per_unit": [
+        600,
+        680
+      ],
+      "r_and_m_per_unit": [
+        1400,
+        1500
+      ]
+    },
+    "opex_growth": {
+      "Payroll": [
+        0.035,
+        0.035
+      ],
+      "Repairs & Maintenance": [
+        0.03,
+        0.03
+      ],
+      "Turnover / Make-Ready": [
+        0.03,
+        0.03
+      ],
+      "Landscaping / Grounds": [
+        0.03,
+        0.03
+      ],
+      "Pest Control": [
+        0.03,
+        0.03
+      ],
+      "Water & Sewer": [
+        0.04,
+        0.04
+      ],
+      "Electricity": [
+        0.03,
+        0.03
+      ],
+      "Fuel (Gas & Oil)": [
+        0.03,
+        0.03
+      ],
+      "Trash": [
+        0.035,
+        0.035
+      ],
+      "Office Supplies": [
+        0.025,
+        0.03
+      ],
+      "Telephone": [
+        0.025,
+        0.03
+      ],
+      "Legal & Professional": [
+        0.025,
+        0.03
+      ],
+      "Marketing / Advertising": [
+        0.025,
+        0.025
+      ],
+      "Insurance": [
+        0.05,
+        0.05
+      ],
+      "Real Estate Taxes": [
+        0.0,
+        0.0
+      ],
+      "Property Management Fee": [
+        0.03,
+        0.03
+      ]
+    },
+    "results": {
+      "unlevered_irr": [
+        0.05,
+        0.12
+      ],
+      "levered_irr": [
+        0.04,
+        0.2
+      ],
+      "minimum_dscr": [
+        1.05,
+        2.0
+      ],
+      "going_in_cap_rate": [
+        0.052,
+        0.068
+      ]
+    },
+    "guardrail_warnings": [
+      "collection_loss",
+      "replacement_reserve_per_unit"
+    ]
+  }
+}

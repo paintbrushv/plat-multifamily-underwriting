@@ -1,0 +1,291 @@
+{
+  "slug": "a_stabilized_1990s",
+  "property_id": "SYN-A-LARKSPUR",
+  "property_name": "Larkspur Bend Apartments (synthetic)",
+  "summary": "Stabilized 1994 garden deal, 200 units, submarket and MSA market data.",
+  "synthetic": true,
+  "documents": {
+    "rent_roll": "rent_roll.csv",
+    "t12": "t12.csv"
+  },
+  "analysis": {
+    "start": "2026-11",
+    "end": "2031-10"
+  },
+  "deal_profile": {
+    "deal_type": "stabilized",
+    "year_built": 1994,
+    "msa": {
+      "name": "Larkspur Synthetic MSA",
+      "metro_slug": "larkspur_sx",
+      "cbsa_code": "99901"
+    },
+    "metro_slug": "larkspur_sx",
+    "submarket": "Larkspur North"
+  },
+  "economics": {
+    "purchase_price": 33120000,
+    "ltv": 0.6,
+    "loan_rate": 0.0575,
+    "amort_years": 30,
+    "io_months": 24,
+    "exit_month": "2031-10",
+    "sale_cost_pct": 0.02,
+    "exit_cap_rate": null
+  },
+  "analyst_inputs": {
+    "metadata": {
+      "property_summary": {
+        "property_tax_policy": {
+          "millage_rate_mills": 20.0,
+          "assessment_ratio": 0.7,
+          "source": "synthetic_tax_bill",
+          "source_locator": "tests/fixtures/deals/a_stabilized_1990s/deal.json",
+          "analyst_override": true
+        }
+      }
+    }
+  },
+  "market_data": {
+    "provider": "synthetic",
+    "as_of": "2026-09-30",
+    "confidence": "high",
+    "observations": [
+      {
+        "metric": "rent_growth_forecast",
+        "level": "submarket",
+        "value": {
+          "2026Q4": 0.018,
+          "2027Q1": 0.02,
+          "2027Q2": 0.022,
+          "2027Q3": 0.025,
+          "2027Q4": 0.028,
+          "2028Q1": 0.03,
+          "2028Q2": 0.031,
+          "2028Q3": 0.032,
+          "2028Q4": 0.033
+        }
+      },
+      {
+        "metric": "rent_growth_forecast",
+        "level": "msa",
+        "value": {
+          "2026Q4": 0.015,
+          "2027Q1": 0.017,
+          "2027Q2": 0.019,
+          "2027Q3": 0.022,
+          "2027Q4": 0.025,
+          "2028Q1": 0.027,
+          "2028Q2": 0.028,
+          "2028Q3": 0.029,
+          "2028Q4": 0.03
+        }
+      },
+      {
+        "metric": "rent_growth_long_run",
+        "level": "msa",
+        "value": 0.028
+      },
+      {
+        "metric": "vacancy_stabilized",
+        "level": "submarket",
+        "value": 0.055
+      },
+      {
+        "metric": "vacancy_stabilized",
+        "level": "msa",
+        "value": 0.058
+      },
+      {
+        "metric": "concession_rate",
+        "level": "submarket",
+        "value": 0.01
+      },
+      {
+        "metric": "market_cap_rate",
+        "level": "submarket",
+        "value": {
+          "2026Q4": 0.054,
+          "2027Q4": 0.055,
+          "2028Q4": 0.056,
+          "2029Q4": 0.0565,
+          "2030Q4": 0.057,
+          "2031Q1": 0.0572,
+          "2031Q2": 0.0574,
+          "2031Q3": 0.0576,
+          "2031Q4": 0.0578
+        }
+      }
+    ]
+  },
+  "expected": {
+    "documents": {
+      "units": 200,
+      "rent_roll_physical_vacancy": 0.05,
+      "rent_roll_loss_to_lease": 0.033639,
+      "rent_roll_gpr_annual": 3518400.0,
+      "t12_gpr_annual": 3492012.0,
+      "t12_total_income": 3297011.51,
+      "t12_total_opex": 1443132.75,
+      "t12_opex_to_egi": 0.437709,
+      "t12_opex_by_category": {
+        "Payroll": 300000.0,
+        "Repairs & Maintenance": 146000.0,
+        "Turnover / Make-Ready": 58000.0,
+        "Landscaping / Grounds": 36000.0,
+        "Pest Control": 9000.0,
+        "Utilities": 176000.0,
+        "Office Supplies": 18000.0,
+        "Telephone": 12000.0,
+        "Marketing / Advertising": 28000.0,
+        "Insurance": 130000.0,
+        "Real Estate Taxes": 431222.4,
+        "Property Management Fee": 98910.35
+      }
+    },
+    "ingest_gate": "PASS",
+    "sources": {
+      "rent_growth": "market:synthetic",
+      "physical_vacancy": "market:synthetic",
+      "loss_to_lease": "house:vintage_1990s",
+      "concessions": "deal:t12",
+      "collection_loss": "deal:t12",
+      "exit_cap_rate": "market:synthetic",
+      "insurance_per_unit": "deal:t12",
+      "r_and_m_per_unit": "deal:t12",
+      "replacement_reserve_per_unit": "engine_fallback",
+      "sale_cost_percent": "analyst"
+    },
+    "bands": {
+      "rent_growth": [
+        [
+          0.026,
+          0.03
+        ],
+        [
+          0.031,
+          0.035
+        ],
+        [
+          0.029,
+          0.032
+        ],
+        [
+          0.027,
+          0.029
+        ]
+      ],
+      "vacancy_start": [
+        0.045,
+        0.055
+      ],
+      "vacancy_stabilized": [
+        0.05,
+        0.06
+      ],
+      "loss_to_lease_start": [
+        0.03,
+        0.04
+      ],
+      "loss_to_lease_floor": [
+        0.01,
+        0.01
+      ],
+      "concessions_year1": [
+        0.006,
+        0.01
+      ],
+      "concessions_stabilized": [
+        0.008,
+        0.012
+      ],
+      "collection_loss": [
+        0.006,
+        0.01
+      ],
+      "exit_cap_rate": [
+        0.057,
+        0.058
+      ],
+      "insurance_per_unit": [
+        600,
+        700
+      ],
+      "r_and_m_per_unit": [
+        700,
+        760
+      ]
+    },
+    "opex_growth": {
+      "Payroll": [
+        0.035,
+        0.035
+      ],
+      "Repairs & Maintenance": [
+        0.03,
+        0.03
+      ],
+      "Turnover / Make-Ready": [
+        0.03,
+        0.03
+      ],
+      "Landscaping / Grounds": [
+        0.03,
+        0.03
+      ],
+      "Pest Control": [
+        0.03,
+        0.03
+      ],
+      "Utilities": [
+        0.035,
+        0.035
+      ],
+      "Office Supplies": [
+        0.025,
+        0.03
+      ],
+      "Telephone": [
+        0.025,
+        0.03
+      ],
+      "Marketing / Advertising": [
+        0.025,
+        0.025
+      ],
+      "Insurance": [
+        0.05,
+        0.05
+      ],
+      "Real Estate Taxes": [
+        0.0,
+        0.0
+      ],
+      "Property Management Fee": [
+        0.03,
+        0.03
+      ]
+    },
+    "results": {
+      "unlevered_irr": [
+        0.05,
+        0.1
+      ],
+      "levered_irr": [
+        0.05,
+        0.16
+      ],
+      "minimum_dscr": [
+        1.15,
+        2.0
+      ],
+      "going_in_cap_rate": [
+        0.048,
+        0.06
+      ]
+    },
+    "guardrail_warnings": [
+      "replacement_reserve_per_unit"
+    ]
+  }
+}

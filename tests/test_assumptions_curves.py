@@ -345,6 +345,29 @@ def test_exit_cap_rate_market_beats_existing_behavior_but_not_the_analyst():
     assert _entries(no_exit)["exit_cap_rate"]["value"] is None
 
 
+def test_ingest_exit_month_without_a_cap_rate_resolves_the_exit_cap():
+    """An exit month (or sale cost) given at ingest without an exit cap rate models
+    the exit; the resolver fills the cap rate instead of the exit being dropped."""
+    deal = _ingest(year_built=1984, purchase_price=1_000_000, exit_month="2031-07", sale_cost_pct=0.025,
+                   market=_registry(), **_geo_kwargs())
+    entries = _entries(deal)
+    assert deal["exit_assumptions"]["exit_month"] == "2031-07"
+    assert deal["exit_assumptions"]["exit_cap_rate"] == pytest.approx(0.063)
+    assert entries["exit_cap_rate"]["source"] == "market:synthetic"
+    assert entries["exit_cap_rate"]["override"] is None
+    assert deal["exit_assumptions"]["sale_cost_percent"] == 0.025
+    assert entries["sale_cost_percent"]["source"] == "analyst"
+
+    no_market = _ingest(year_built=1984, purchase_price=1_000_000, exit_month="2031-07", market=None)
+    entries = _entries(no_market)
+    assert no_market["exit_assumptions"]["exit_month"] == "2031-07"
+    assert "exit_cap_rate" not in no_market["exit_assumptions"]  # the engine default applies, disclosed
+    assert entries["exit_cap_rate"]["source"] == "engine_fallback"
+    assert entries["exit_cap_rate"]["review_required"] is True
+    assert no_market["exit_assumptions"]["sale_cost_percent"] == 0.02
+    assert entries["sale_cost_percent"]["source"] == "house:backsolve_policy"
+
+
 def test_star_tier_and_submarket_become_the_geo():
     from engine.assumptions.curves import profile_geo
     from engine.assumptions import DealProfile

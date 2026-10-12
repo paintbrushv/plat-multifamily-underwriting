@@ -74,6 +74,9 @@ ALLOWED_METADATA_KEYS = {
     "intake_sanity_flags",
     "purchase_assumptions_source",
     "analyst_review_required",
+    # The ingest gate carries the deal evidence the assumption resolver reads
+    # (and its blockers): the solved case is re-resolved from it.
+    "ingest_gate",
 }
 _PRICE_CENT = Decimal("0.01")
 
@@ -977,6 +980,8 @@ def _prepare_house_assumptions(
     property_summary = metadata.get("property_summary") or {}
     if year_built is None:
         for candidate in (
+            # deal_profile drives the vintage, as in the resolver (ADR 0003 §1).
+            (prepared.get("deal_profile") or {}).get("year_built"),
             metadata.get("year_built"),
             property_summary.get("year_built"),
             (property_summary.get("broker_underwriting_snapshot") or {}).get("year_built"),
