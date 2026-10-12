@@ -80,10 +80,15 @@ def test_the_reserve_is_a_floor_not_stacked(minimal_deal_inputs, recurring, bind
     month = results["cashflow"]["by_month"][0]
     assert month["replacement_reserves"] == pytest.approx(charge / 12, abs=0.01)
     assert month["replacement_reserves"] < month["recurring_capex_by_vintage"] + month["replacement_reserve_floor"]
-    # NOI and DSCR are before capex; unlevered cash flow carries the charge.
+    # NOI is before capex; DSCR is on underwritten NCF (NOI less the charge), with the
+    # NOI-based DSCR beside it; unlevered cash flow carries the charge.
     for field in ("net_operating_income", "debt_service"):
         assert [y[field] for y in results["cashflow"]["by_year"]] == [y[field] for y in base["cashflow"]["by_year"]]
-    assert results["metrics"]["dscr"] == base["metrics"]["dscr"]
+    assert results["metrics"]["dscr"]["noi_before_capex"] == base["metrics"]["dscr"]["noi_before_capex"]
+    if charge > 25_000.0:
+        assert results["metrics"]["dscr"]["minimum_dscr"] < base["metrics"]["dscr"]["minimum_dscr"]
+    else:
+        assert results["metrics"]["dscr"]["minimum_dscr"] == base["metrics"]["dscr"]["minimum_dscr"]
     assert results["metrics"]["yields"]["going_in_cap_rate"] == base["metrics"]["yields"]["going_in_cap_rate"]
     extra = charge - 25_000.0
     assert results["metrics"]["coc"]["components"]["replacement_reserves_year_1"] == pytest.approx(
@@ -91,7 +96,7 @@ def test_the_reserve_is_a_floor_not_stacked(minimal_deal_inputs, recurring, bind
     if extra:
         assert results["metrics"]["coc"]["cash_on_cash_year_1"] < base["metrics"]["coc"]["cash_on_cash_year_1"]
         assert results["metrics"]["irr"]["levered_irr"] < base["metrics"]["irr"]["levered_irr"]
-    assert results["capital_plan"]["metric_basis"]["dscr"].startswith("NOI / debt service (before capex)")
+    assert results["capital_plan"]["metric_basis"]["dscr"].startswith("underwritten NCF / debt service")
 
 
 def test_recurring_capex_grows_every_year_and_can_overtake_the_reserve(minimal_deal_inputs):
