@@ -167,6 +167,47 @@ How each key combines sources:
     `max(value, floor)` per segment and listed in `policy_overrides`.
   - The shape of an analyst curve is always preserved (UPL-43).
 
+As implemented (slice 6), `engine/assumptions/guardrails.py` is the one place
+that defines the floors for a (deal type → strategy, year built) profile. It
+reuses the `underwriting_policy` vintage functions:
+
+| Key | Floor | Checked against |
+|---|---|---|
+| `physical_vacancy` | Property-level anchor: max of the vintage floor, rent-roll vacant share (`house_box_score`), T12 vacancy / GPR, broker vacancy, and a supplied `market_vacancy_benchmark` | each `physical_vacancy_curve` segment |
+| `loss_to_lease` | max(vintage LTL floor, broker LTL) | each `loss_to_lease` segment whose cohort market rent exceeds in-place rent |
+| `collection_loss` | max(vintage floor, broker bad debt) | each `collection_loss_curve` segment (no curve counts as 0) |
+| `concessions` | max(vintage year-1 floor, broker concessions) | the year-1 rate (highest `pct_rent` / `free_months` row) |
+| `insurance_per_unit` | $600/unit (`DEFAULT_YEAR1_INSURANCE_PER_UNIT`); waived by an explicit analyst insurance override | the matched insurance line, annualized |
+| `r_and_m_per_unit` | vintage R&M per unit | the R&M bucket, annualized; a shortfall is one top-up line |
+| `replacement_reserve_per_unit` | vintage reserve per unit | each `replacement_reserves` segment (none counts as 0) |
+
+Broker notes and trailing actuals are anchors a caller passes in `context`;
+they can only raise a floor. `apply_guardrails(canonical, *, mode, profile,
+context=None)` returns `(canonical_copy, findings)`:
+
+- `mode="underwrite"`: no value changes. Each value below its floor is a
+  finding, recorded on `assumptions.entries[key].guardrail` with
+  `status: "below_floor"`, `action: "warned"`, the floor, its source and the
+  lowest value. The validator emits a `GUARDRAIL_BELOW_FLOOR` WARNING; never an
+  ERROR.
+- `mode="pricing"`: each value below its floor is raised to it, per segment for
+  curves (segments at or above the floor keep the analyst's value) and with
+  `max` for scalars. Every raise is a finding with original and applied values,
+  appended to `policy_overrides` in backsolve. The entry records
+  `action: "enforced"`, takes the floor's source, and its `override` pins the
+  priced value (note "pinned at the house floor enforced by the pricing
+  guardrail") so a later re-resolution keeps it. The pre-floor value stays in
+  `guardrail.original`. An entry without an override always has
+  `value == default_value`.
+
+`resolve_assumptions(mode=...)` calls the same module through one hook, so an
+ingested canonical carries underwrite warnings. Backsolve keeps its pricing
+normalizations (LTL re-derived from market vs in-place rent, collection loss
+flattened to its worst rate, concessions as one year-1 schedule, reserves set
+to the vintage reserve), then enforces the shared floors. Its solved canonical
+is re-resolved in `mode="pricing"` so `assumptions` matches the priced values
+and lists the enforced floors.
+
 ### 6. Opex treatment
 
 - Each opex line keeps its T12 provenance (`source_rows`) and is displayed in

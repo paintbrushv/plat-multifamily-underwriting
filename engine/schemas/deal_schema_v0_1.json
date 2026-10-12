@@ -386,6 +386,22 @@
         "detail": {
           "type": "object",
           "description": "Display-only facts about the canonical field, e.g. an opex line's calculation_type, annual dollars and per-unit amount (ADR 0003 §6)."
+        },
+        "guardrail": {
+          "type": "object",
+          "description": "ADR 0003 §5. Present when a value is below its house floor: warned in underwrite mode, enforced in pricing mode.",
+          "additionalProperties": false,
+          "required": ["floor", "floor_source", "status", "action", "original"],
+          "properties": {
+            "floor": { "type": "number" },
+            "floor_source": { "type": ["string", "null"] },
+            "status": { "type": "string", "enum": ["below_floor"] },
+            "action": { "type": "string", "enum": ["warned", "enforced"] },
+            "original": { "type": ["number", "null"] },
+            "applied": { "type": "number" },
+            "segments": { "type": "array", "items": { "type": "object" } },
+            "basis": { "type": "string" }
+          }
         }
       }
     },

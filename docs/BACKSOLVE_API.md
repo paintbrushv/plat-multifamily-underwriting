@@ -46,6 +46,31 @@ resulting curve is reported as `physical_vacancy_curve_applied`. Every analyst
 input the policy replaced, including each raised vacancy segment, is listed in
 `policy_overrides` with its original and applied value.
 
+### Shared guardrails
+
+The floors are defined once, in `engine/assumptions/guardrails.py` (ADR 0003
+§5), and the assumption resolver uses the same module. Backsolve runs them in
+`mode="pricing"`: every value below its floor is raised (per segment for the
+vacancy, loss-to-lease, collection-loss and reserve curves; `max` for the
+year-1 concession rate, insurance and R&M). Each raise appears in
+`policy_overrides` with `assumption`, `floor`, `floor_source`, `original` and
+`applied` (opex floors also carry `original_annual` and `applied_annual`).
+`house_adjustments.guardrails` lists the profile and every finding. Before the
+floors, backsolve applies its own pricing normalizations: loss to lease is
+re-derived from market vs in-place rent, collection loss becomes one row at
+the worst rate, concessions become one year-1 schedule, and reserves are set to
+the vintage reserve.
+
+The same floors in `mode="underwrite"` (ingest, `resolve_assumptions`) never
+change a value; they add a `guardrail` record with `action: "warned"` and a
+`GUARDRAIL_BELOW_FLOOR` validator warning.
+
+The solved `case` is re-resolved in `mode="pricing"`: its `assumptions` section
+holds the priced values, and each enforced floor is recorded on its entry
+(`guardrail.action: "enforced"`, `guardrail.original` the pre-floor value, and
+an `override` that pins the priced value). Only `assumptions` and
+`deal_profile` change; every priced number is unchanged.
+
 All fields in `DEFAULTS`, plus `year_built` and `exit_cap_rate`, can be explicitly
 overridden. Unknown keys, unsupported versions, non-finite values, invalid
 dates, invalid iteration limits, and sub-cent price bounds refuse before

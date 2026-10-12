@@ -65,6 +65,8 @@ class AssumptionEntry:
     # Display-only facts about the canonical field (e.g. an opex line's
     # calculation_type and per-unit amount). The resolver never reads it.
     detail: Optional[dict[str, Any]] = None
+    # ADR 0003 §5 guardrail record (engine/assumptions/guardrails.py).
+    guardrail: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not is_valid_source(self.source):
@@ -91,6 +93,8 @@ class AssumptionEntry:
             out["cohort_overrides"] = deepcopy(self.cohort_overrides)
         if self.detail:
             out["detail"] = deepcopy(self.detail)
+        if self.guardrail:
+            out["guardrail"] = deepcopy(self.guardrail)
         return out
 
     @classmethod
@@ -108,4 +112,5 @@ class AssumptionEntry:
             review_required=bool(data.get("review_required", False)),
             cohort_overrides=deepcopy(data.get("cohort_overrides")) or None,
             detail=deepcopy(data.get("detail")) or None,
+            guardrail=deepcopy(data.get("guardrail")) or None,
         )

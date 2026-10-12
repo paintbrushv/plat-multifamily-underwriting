@@ -7,6 +7,7 @@ from engine.assumptions.profile import (
     DealProfile,
     UnsupportedDealTypeError,
 )
+from engine.assumptions.guardrails import apply_guardrails
 from engine.assumptions.registry import RESOLVER_VERSION, AssumptionEntry
 from engine.assumptions.resolver import (
     ASSUMPTION_KEYS,
@@ -26,6 +27,7 @@ __all__ = [
     "RESOLVER_VERSION",
     "SUPPORTED_DEAL_TYPES",
     "UnsupportedDealTypeError",
+    "apply_guardrails",
     "normalize_overrides",
     "overrides_from_patch",
     "resolve_assumptions",

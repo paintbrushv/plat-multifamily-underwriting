@@ -1287,6 +1287,36 @@ def _resolve_key(
     )
 
 
+# ── ADR 0003 slice 6: guardrail modes ────────────────────────────────────
+
+
+def _apply_guardrail_mode(
+    ctx: _Context,
+    specs: tuple[_Spec, ...],
+    entries: dict[str, Any],
+    prior_entries: Mapping[str, Any],
+    context: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Warn (underwrite) or enforce (pricing) the house floors on the resolved canonical."""
+    from engine.assumptions import guardrails
+
+    context = dict(context or {})
+    enforced = context.pop("enforced", None)
+    if ctx.mode == guardrails.MODE_PRICING and enforced is not None:
+        findings = list(enforced)
+    else:
+        profile = guardrails.GuardrailProfile(strategy=ctx.strategy, year_built=ctx.year_built)
+        findings = guardrails.enforce_floors(ctx.canonical, mode=ctx.mode, profile=profile, context=context)
+        if any(f["action"] == guardrails.ACTION_ENFORCED for f in findings):
+            # Re-read the raised values, with the first pass as the prior resolution.
+            # Keys outside the specs (opex.*) are kept; the caller re-reads them.
+            entries = {
+                **entries,
+                **{spec.key: _resolve_key(spec, ctx, entries[spec.key], None).to_dict() for spec in specs},
+            }
+    return guardrails.record_on_entries(entries, findings, mode=ctx.mode, prior_entries=prior_entries)
+
+
 def resolve_assumptions(
     canonical: Mapping[str, Any],
     *,
@@ -1294,6 +1324,7 @@ def resolve_assumptions(
     overrides: Optional[Mapping[str, Any]] = None,
     mode: str = "underwrite",
     market: Any = None,
+    guardrail_context: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Resolve every v1 assumption key and return a NEW canonical.
 
@@ -1309,14 +1340,21 @@ def resolve_assumptions(
         overrides: ``{key: value | {"value": ..., "note": ...}}``. An overridden
             entry keeps ``default_value``, records ``override``, and its value
             wins. Overrides already recorded in the canonical are preserved.
-        mode: ``"underwrite"`` or ``"pricing"``. Recorded only in this slice;
-            guardrail enforcement arrives with ADR 0003 slice 6.
+        mode: ``"underwrite"`` or ``"pricing"`` (ADR 0003 §5). Underwrite
+            never changes a value for a house floor; each value below its
+            floor gets a ``guardrail`` record (``action: "warned"``). Pricing
+            raises it to the floor (per segment for curves) and records
+            ``action: "enforced"``. See ``engine/assumptions/guardrails.py``.
         market: Optional ``engine.market_data`` registry (anything exposing
             ``resolve(metric, Geo, as_of=None) -> (observation | None, candidates)``).
             The deal profile is converted to a ``Geo``. Market observations feed
             rent_growth, physical_vacancy, concessions and exit_cap_rate under the
             ADR 0003 §3 precedence (``engine/assumptions/curves.py``) and every
             observation is recorded as a candidate. Missing data falls through.
+        guardrail_context: Passed to the guardrails (``broker_snapshot``,
+            ``trailing_actuals``, ``insurance_per_unit_override``). In pricing
+            mode, ``enforced`` lists findings a caller (backsolve) already
+            enforced: they are recorded and no floor is enforced again.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
@@ -1348,6 +1386,13 @@ def resolve_assumptions(
         entries[spec.key] = entry.to_dict()
     # ── ADR 0003 slice 5 hook: opex.<slug>.base / opex.<slug>.growth per opex line ──
     entries.update(opex_slice.resolve_opex_entries(ctx, prior_entries, explicit))
+
+    # ── ADR 0003 slice 6 hook: guardrail modes (engine/assumptions/guardrails.py) ──
+    entries = _apply_guardrail_mode(ctx, specs, entries, prior_entries, guardrail_context)
+    # Pricing floors can add opex lines (e.g. the R&M vintage floor top-up);
+    # re-read the opex entries so a second resolution is identical.
+    entries.update(opex_slice.resolve_opex_entries(ctx, prior_entries, explicit))
+    # ── end slice 6 hook ──
 
     out["deal_profile"] = profile.to_dict()
     out["assumptions"] = {

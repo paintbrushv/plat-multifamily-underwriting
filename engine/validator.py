@@ -605,6 +605,35 @@ def _check_assumption_layer(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     return issues
 
 
+def _check_guardrails(inputs: Dict[str, Any]) -> List[ValidationIssue]:
+    """ADR 0003 §5: a value below its house floor in underwrite mode is a WARNING.
+
+    Underwrite mode never changes the value; pricing mode (backsolve) enforces
+    the floor, so an ``enforced`` record is not warned again. Never an ERROR.
+    """
+    assumptions = inputs.get("assumptions")
+    entries = assumptions.get("entries") if isinstance(assumptions, Mapping) else None
+    if not isinstance(entries, Mapping):
+        return []
+    issues: List[ValidationIssue] = []
+    for key in sorted(entries):
+        entry = entries[key]
+        record = entry.get("guardrail") if isinstance(entry, Mapping) else None
+        if not isinstance(record, Mapping):
+            continue
+        if record.get("status") != "below_floor" or record.get("action") != "warned":
+            continue
+        issues.append(
+            ValidationIssue(
+                severity="WARNING",
+                code="GUARDRAIL_BELOW_FLOOR",
+                message=f"{key}: {record.get('basis') or 'below the house floor'}",
+                path=f"/assumptions/entries/{key}/guardrail",
+            )
+        )
+    return issues
+
+
 def _check_required_revenue_quality_bridge(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     property_summary = ((inputs.get("metadata") or {}).get("property_summary") or {})
     material = property_summary.get("material_ancillary_income") or {}
@@ -1597,6 +1626,7 @@ def validate_deal(
     issues.extend(_check_required_revenue_quality_bridge(inputs))
     issues.extend(_check_ingest_gate(inputs))
     issues.extend(_check_assumption_layer(inputs))
+    issues.extend(_check_guardrails(inputs))
     issues.extend(_check_renovation_programs(inputs, month_ids))
     issues.extend(_check_growth_bounds(inputs))
     issues.extend(_check_vacancy_bounds(inputs))
