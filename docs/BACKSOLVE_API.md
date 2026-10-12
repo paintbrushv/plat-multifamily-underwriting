@@ -288,8 +288,12 @@ Contract: `plat.backsolve/1`. Results include `summary`, `case`, `results`,
 | `iteration_limit` | A feasible candidate exists, but the cent boundary is unresolved. |
 
 The search assumes cash-on-cash return does not increase with price. Observed
-material violations refuse. It does not establish a global optimum for an
-arbitrary non-monotonic model. The search stays inside the supplied bounds.
+material violations refuse. The sized loan is rounded to the nearest $1,000, so
+cash-on-cash can rise by about |CoC| x $1,000 / equity where the loan steps up;
+a rise up to twice that is tolerated, and the solved price is a feasible cent
+whose next cent is infeasible, within one loan rounding step of the true
+boundary. It does not establish a global optimum for an arbitrary
+non-monotonic model. The search stays inside the supplied bounds.
 
 ## CLI and MCP
 

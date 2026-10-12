@@ -18,6 +18,9 @@ from typing import Any, Dict, List, Optional
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, month_id, round2
 
+# Sized loans are rounded to the nearest $1,000 (institutional convention).
+LOAN_ROUNDING_STEP = Decimal("1000")
+
 
 @dataclass(frozen=True)
 class DebtMonthResult:
@@ -362,7 +365,7 @@ def compute_agency_loan_terms(
 
     # Round to nearest $1,000 (institutional convention)
     if loan_amount > 0:
-        loan_amount = (loan_amount / Decimal("1000")).quantize(Decimal("1")) * Decimal("1000")
+        loan_amount = (loan_amount / LOAN_ROUNDING_STEP).quantize(Decimal("1")) * LOAN_ROUNDING_STEP
 
     # Effective LTV (only meaningful when purchase_price provided)
     if purchase_price is not None and dec(purchase_price) > 0:
@@ -469,7 +472,7 @@ def size_refi_loan(
         raise ValueError(f"Unknown refi sizing_method: {sizing_method}")
 
     # Round to nearest $1,000 (institutional convention)
-    sized_commitment = (sized_commitment / Decimal("1000")).quantize(Decimal("1")) * Decimal("1000")
+    sized_commitment = (sized_commitment / LOAN_ROUNDING_STEP).quantize(Decimal("1")) * LOAN_ROUNDING_STEP
 
     # Bridge payoff: outstanding balance at trigger month
     bridge_payoff = Decimal("0")
