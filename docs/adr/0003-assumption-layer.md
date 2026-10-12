@@ -789,11 +789,17 @@ completed (f):
    projected year of the all-equity preview at that price, and discloses it
    (`summary.loan_sizing`); `results.capital_plan.metric_basis` names it. A
    charge that consumes the NOI sizes no loan rather than falling back to
-   LTV. A DSCR-sized stabilized refinance (`refi_event`) uses the same basis:
-   trailing NOI less the forward year's deduction from the refi date
-   (`results.refi`: `noi_used`, `below_noi_deduction`, `sizing_cash_flow`,
-   `sizing_noi_basis`, `deduction_window`); an LTV-sized refi values the
-   property on NOI. The feasibility DSCR floors (1.10 hard, 1.20 and 1.30
+   LTV. A DSCR-sized stabilized refinance (`refi_event`) uses the same basis
+   on forward NOI, as lenders underwrite a refi on forward NCF: the projected
+   NOI for the 12 months from the refi month (annualized when fewer remain in
+   the analysis) less the same forward year's deduction, so NOI and deduction
+   cover the same months (`results.refi`: `noi_used`, `below_noi_deduction`,
+   `sizing_cash_flow`, `sizing_noi_basis`, `deduction_window`, and
+   `noi_window` with its `start`, `end`, `months` and `forward`). An
+   LTV-sized refi values the property on the same forward NOI over the cap
+   rate, before capex like the exit value. `refi_event.noi_window` is
+   `forward` by default; `trailing` opts into the `noi_months` before the
+   refi month, which apply only then. The feasibility DSCR floors (1.10 hard, 1.20 and 1.30
    warn) are unchanged and apply to the reported basis, since agency DSCR
    minimums are stated on underwritten NCF; their reasons name the basis and
    the NOI-based DSCR. Where 1.25x DSCR binds the loan is smaller; where 65% LTV binds
