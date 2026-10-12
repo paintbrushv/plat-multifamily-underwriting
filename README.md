@@ -165,7 +165,11 @@ python runs/ingest_deal.py --property-id SYN-A \
   by default, or `ncf_after_lender_reserve` / `noi_before_capex` as an
   override); the NOI-based DSCR is reported beside it
   (`metrics.dscr.noi_before_capex`). A DSCR-sized refinance (`refi_event`) and
-  the feasibility DSCR floors use the same basis.
+  the feasibility DSCR floors use the same basis; the refinance sizes on
+  forward NOI, the 12 months from the refi month (annualized near the end of
+  the analysis), less the same year's charge, and an LTV-sized refinance
+  values the property on that forward NOI (`results.refi.noi_window`;
+  `refi_event.noi_window: trailing` opts into the trailing `noi_months`).
 - `--deferred-maintenance` also raises the house minimums for physical
   vacancy, collection loss, year-1 concessions and R&M to the upper part of
   their vintage bands (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and
