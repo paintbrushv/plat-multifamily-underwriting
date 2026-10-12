@@ -871,11 +871,17 @@
           "maximum": 0.1,
           "description": "Refi closing costs as % of new loan amount (default 0.01 = 1%)"
         },
+        "noi_window": {
+          "type": "string",
+          "enum": ["forward", "trailing"],
+          "default": "forward",
+          "description": "NOI window the perm loan is sized on. House default 'forward': projected NOI for the 12 months from trigger_month (annualized when fewer remain in the analysis), the same year as the below-NOI deduction. 'trailing' opts into the noi_months before trigger_month."
+        },
         "noi_months": {
           "type": "integer",
           "minimum": 1,
           "maximum": 24,
-          "description": "Trailing months of NOI to annualize for sizing (default 12)"
+          "description": "Trailing months of NOI to annualize for sizing (default 12). Applies only when noi_window is 'trailing'; the house default window is forward."
         },
         "exit_cap_for_ltv": {
           "type": "number",

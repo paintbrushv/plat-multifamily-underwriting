@@ -22,6 +22,13 @@ from engine.modules.util import dec, month_id, round2
 # Sized loans are rounded to the nearest $1,000 (institutional convention).
 LOAN_ROUNDING_STEP = Decimal("1000")
 
+# The NOI window a stabilized refi (``refi_event``) sizes on. The house sizes
+# on the forward year from the refi month, as lenders underwrite a refi on
+# forward NCF; ``trailing`` (the ``noi_months`` before the refi) is an opt-in.
+REFI_NOI_WINDOW_FORWARD = "forward"
+REFI_NOI_WINDOW_TRAILING = "trailing"
+REFI_NOI_WINDOWS = (REFI_NOI_WINDOW_FORWARD, REFI_NOI_WINDOW_TRAILING)
+
 
 @dataclass(frozen=True)
 class DebtMonthResult:
@@ -424,13 +431,16 @@ def size_refi_loan(
 ) -> Dict[str, Any]:
     """Size a permanent loan from stabilized NOI and compute refi proceeds.
 
-    DSCR sizing uses the ``loan_sizing_noi_basis`` (ADR 0003 §3; ``None`` is
-    the house default, underwritten NCF after the below-NOI capex charge): the
-    trailing stabilized NOI less the forward year's below-NOI deduction for
-    the basis (the 12 months from the trigger month, annualized when fewer
-    remain), as a lender underwrites trailing NOI less underwritten reserves.
-    LTV sizing values the property on NOI (NOI / cap rate, like the exit
-    value), so it takes no deduction.
+    The sizing NOI is forward NOI: the projected NOI for the 12 months from
+    the trigger month, annualized when fewer remain in the analysis, as a
+    lender underwrites a refi on forward NCF. ``refi_event.noi_window =
+    "trailing"`` opts into the ``noi_months`` (default 12) before the trigger
+    month instead. DSCR sizing uses the ``loan_sizing_noi_basis`` (ADR 0003
+    §3; ``None`` is the house default, underwritten NCF after the below-NOI
+    capex charge): that NOI less the same forward year's below-NOI deduction
+    for the basis, so on the default window NOI and deduction cover the same
+    months. LTV sizing values the property on the same NOI over the cap rate,
+    before capex like the exit value, so it takes no deduction.
 
     Args:
         refi_event: The refi_event object from deal inputs
@@ -453,9 +463,16 @@ def size_refi_loan(
           - stabilized_noi: The NOI used for sizing
           - noi_used, below_noi_deduction, sizing_cash_flow (what DSCR sizing
             used), sizing_noi_basis and deduction_window
+          - noi_window: ``start``/``end`` months of the NOI window, its
+            ``months`` (annualized when under 12) and ``forward``
     """
     trigger_month = refi_event["trigger_month"][:7]  # Normalize to YYYY-MM
     sizing_method = refi_event["sizing_method"]
+    noi_window = refi_event.get("noi_window", REFI_NOI_WINDOW_FORWARD)
+    if noi_window not in REFI_NOI_WINDOWS:
+        raise ValueError(
+            f"Unknown refi noi_window: {noi_window!r} (expected one of {', '.join(REFI_NOI_WINDOWS)})"
+        )
     noi_months = int(refi_event.get("noi_months", 12))
     refi_costs_pct = dec(refi_event.get("refi_costs_pct", Decimal("0.01")))
     perm_terms = refi_event.get("perm_loan_terms", {})
@@ -469,26 +486,34 @@ def size_refi_loan(
     if trigger_idx is None:
         raise ValueError(f"refi_event trigger_month {trigger_month} not found in cashflow")
 
-    # Compute trailing stabilized NOI
-    start_idx = max(0, trigger_idx - noi_months)
-    trailing_noi = sum(
-        dec(cashflow_by_month[i].get("net_operating_income", 0))
-        for i in range(start_idx, trigger_idx)
-    )
-    # Annualize if less than 12 months of history
-    actual_months = trigger_idx - start_idx
-    if actual_months > 0 and actual_months < 12:
-        stabilized_noi = trailing_noi * Decimal("12") / Decimal(str(actual_months))
-    elif actual_months == 0:
-        # Use the trigger month's NOI × 12 as fallback
-        stabilized_noi = dec(cashflow_by_month[trigger_idx].get("net_operating_income", 0)) * Decimal("12")
+    # The forward year: the 12 months from the refi month, fewer near the end
+    # of the analysis. Both the sizing NOI (by default) and the below-NOI
+    # deduction are taken over it.
+    forward = cashflow_by_month[trigger_idx:trigger_idx + 12]
+
+    def _annualized_noi(rows: List[Dict[str, Any]]) -> Decimal:
+        total = sum((dec(r.get("net_operating_income", 0)) for r in rows), Decimal("0"))
+        return total * Decimal("12") / Decimal(len(rows))
+
+    if noi_window == REFI_NOI_WINDOW_FORWARD:
+        noi_rows = forward
     else:
-        stabilized_noi = trailing_noi
+        # Trailing opt-in: the noi_months before the refi month, annualized
+        # when fewer exist; the refi month alone when none do.
+        noi_rows = cashflow_by_month[max(0, trigger_idx - noi_months):trigger_idx]
+        if not noi_rows:
+            noi_rows = forward[:1]
+    stabilized_noi = _annualized_noi(noi_rows)
+    noi_window_disclosure = {
+        "start": str(noi_rows[0]["month"])[:7],
+        "end": str(noi_rows[-1]["month"])[:7],
+        "months": len(noi_rows),
+        "forward": noi_window == REFI_NOI_WINDOW_FORWARD,
+    }
 
     # The forward year's below-NOI deduction for the loan sizing basis.
     basis = loan_sizing.resolve_basis(noi_basis)
     charges = {str(row["month"])[:7]: row for row in charge_by_month or []}
-    forward = cashflow_by_month[trigger_idx:trigger_idx + 12]
     deduction = Decimal("0")
     if sizing_method == "dscr" and forward:
         forward_total = sum(
@@ -513,7 +538,8 @@ def size_refi_loan(
             sized_commitment = Decimal("0")
     elif sizing_method == "ltv":
         target_ltv = dec(refi_event["target_ltv"])
-        # Property value = NOI / cap rate
+        # Property value = sizing NOI (forward by default) / cap rate, before
+        # capex like the exit value
         cap_rate = dec(refi_event.get("exit_cap_for_ltv", 0))
         if cap_rate == 0 and exit_assumptions:
             cap_rate = dec(exit_assumptions.get("exit_cap_rate", Decimal("0.05")))
@@ -579,6 +605,7 @@ def size_refi_loan(
             [str(forward[0]["month"])[:7], str(forward[-1]["month"])[:7]]
             if sizing_method == "dscr" and forward else None
         ),
+        "noi_window": noi_window_disclosure,
         "sizing_method": sizing_method,
         "trigger_month": trigger_month,
     }
