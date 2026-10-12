@@ -66,6 +66,7 @@ from engine.assumptions.registry import (
     DEAL_PREFIX,
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_DEFERRED_CAPEX,
+    HOUSE_DEFERRED_CAPEX_PLACEHOLDER,
     HOUSE_PREFIX,
     HOUSE_RECURRING_CAPEX,
     HOUSE_REPLACEMENT_RESERVE,
@@ -273,18 +274,22 @@ def _house_vintage(
     unit: str,
     *,
     strategy: Optional[str] = None,
+    deferred: bool = False,
 ) -> Optional[dict[str, Any]]:
+    """The house vintage candidate; ``deferred`` applies the deferred-maintenance minimums."""
     if ctx.bucket is None:
         return None
     strategy = strategy or ctx.strategy
-    value = fn(ctx.year_built, strategy=strategy)
+    value = fn(ctx.year_built, strategy=strategy, deferred=True) if deferred else fn(ctx.year_built, strategy=strategy)
     if value is None:
         return None
     return _candidate(
         house_vintage_source(ctx.bucket),
         float(value),
         f"Year built {ctx.year_built} ({ctx.year_built_origin}) maps to the {ctx.bucket} vintage "
-        f"bucket; house {label} {_fmt(value, unit)} (VINTAGE_FRAMEWORK_2026, {strategy} strategy).",
+        f"bucket; house {label} {_fmt(value, unit)} (VINTAGE_FRAMEWORK_2026, {strategy} strategy"
+        + ("; deferred maintenance flagged: the upper part of the vintage band" if deferred else "")
+        + ").",
     )
 
 
@@ -723,7 +728,8 @@ def _collection_loss_candidates(ctx: _Context) -> list[dict[str, Any]]:
     if t12_rate is not None:
         out.append(_candidate(SOURCE_DEAL_T12, t12_rate, "T12 bad debt / gross potential rent."))
     house_candidate = _house_vintage(
-        ctx, house.default_collection_loss_rate, "collection-loss floor", "decimal_of_rent"
+        ctx, house.default_collection_loss_rate, "collection-loss floor", "decimal_of_rent",
+        deferred=ctx.profile.deferred_maintenance,
     )
     if house_candidate:
         out.append(house_candidate)
@@ -756,7 +762,8 @@ def _vacancy_candidates(ctx: _Context) -> list[dict[str, Any]]:
     if roll_rate is not None:
         out.append(_candidate(SOURCE_DEAL_RENT_ROLL, roll_rate, "Current physical vacancy from the rent roll."))
     house_candidate = _house_vintage(
-        ctx, house.default_physical_vacancy_rate, "physical-vacancy floor", "decimal_of_units"
+        ctx, house.default_physical_vacancy_rate, "physical-vacancy floor", "decimal_of_units",
+        deferred=ctx.profile.deferred_maintenance,
     )
     if house_candidate:
         guardrails = house.revenue_guardrails(ctx.year_built, strategy=ctx.strategy)
@@ -801,7 +808,8 @@ def _concession_candidates(ctx: _Context) -> list[dict[str, Any]]:
     if t12_rate is not None:
         out.append(_candidate(SOURCE_DEAL_T12, t12_rate, "T12 concessions / gross potential rent."))
     house_candidate = _house_vintage(
-        ctx, house.default_year1_concessions_rate, "year-1 concessions floor", "decimal_of_rent"
+        ctx, house.default_year1_concessions_rate, "year-1 concessions floor", "decimal_of_rent",
+        deferred=ctx.profile.deferred_maintenance,
     )
     if house_candidate:
         out.append(house_candidate)
@@ -863,7 +871,8 @@ def _r_and_m_candidates(ctx: _Context) -> list[dict[str, Any]]:
     )
     if evidence:
         out.append(evidence)
-    house_candidate = _house_vintage(ctx, house.default_r_and_m_per_unit, "R&M per unit", "usd_per_unit_year")
+    house_candidate = _house_vintage(ctx, house.default_r_and_m_per_unit, "R&M per unit", "usd_per_unit_year",
+                                     deferred=ctx.profile.deferred_maintenance)
     if house_candidate:
         out.append(house_candidate)
     out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No R&M opex lines: the engine carries none."))
@@ -1007,11 +1016,32 @@ def _immediate_capex_candidates(ctx: _Context) -> list[dict[str, Any]]:
             f"Property condition assessment{_pca_label(pca)}: immediate needs {_fmt(pca_value, 'usd')}.",
             as_of=pca.get("as_of"),
         ))
+    placeholder = _deferred_capex_placeholder(ctx)
+    if placeholder:
+        out.append(placeholder)
     out.append(_candidate(
         HOUSE_DEFERRED_CAPEX, float(house.HOUSE_IMMEDIATE_CAPEX_DEFAULT),
         "No PCA immediate needs and no analyst figure: nothing is budgeted at close.",
     ))
     return out
+
+
+def _deferred_capex_placeholder(ctx: _Context) -> Optional[dict[str, Any]]:
+    """Deferred maintenance flagged: one year of the vintage band high end per unit at close."""
+    if not ctx.profile.deferred_maintenance or not ctx.units:
+        return None
+    per_unit = house.default_deferred_capex_placeholder_per_unit(ctx.year_built)
+    if per_unit is None:
+        return None
+    escrow = house.LENDER_PCA_REPAIR_ESCROW_FACTOR
+    return _candidate(
+        HOUSE_DEFERRED_CAPEX_PLACEHOLDER,
+        float(per_unit * Decimal(ctx.units)),
+        f"Deferred maintenance is flagged with no PCA and no analyst figure: placeholder of "
+        f"{house.HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS:g} year of the {ctx.bucket} economic CapEx band high end "
+        f"({_fmt(per_unit, 'usd')}/unit x {ctx.units} units). Commission a PCA and replace it: lenders escrow "
+        f"PCA immediate repairs at {float(escrow):.0%} of the estimate.",
+    )
 
 
 def _immediate_capex_default(ctx: _Context, state: str) -> _Choice:
@@ -1022,10 +1052,18 @@ def _immediate_capex_default(ctx: _Context, state: str) -> _Choice:
         "separate from the renovation budget."
     )
     choice = _choice_from(candidates[0], ctx, candidates[0]["basis"] + note)
-    if ctx.profile.deferred_maintenance and candidates[0]["source"] != SOURCE_DEAL_PCA:
+    if ctx.profile.deferred_maintenance and candidates[0]["source"] == HOUSE_DEFERRED_CAPEX:
         choice.basis += " Deferred maintenance is flagged: budget the immediate needs (PCA or analyst)."
         choice.review_always = True
+    elif candidates[0]["source"] == HOUSE_DEFERRED_CAPEX_PLACEHOLDER:
+        choice.review_always = True
     choice.detail = {"bucket": "1: immediate / deferred capex at close"}
+    if candidates[0]["source"] == HOUSE_DEFERRED_CAPEX_PLACEHOLDER:
+        choice.detail.update(
+            placeholder_per_unit=float(house.default_deferred_capex_placeholder_per_unit(ctx.year_built)),
+            placeholder_years=float(house.HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS),
+            lender_pca_repair_escrow_factor=float(house.LENDER_PCA_REPAIR_ESCROW_FACTOR),
+        )
     return choice
 
 
@@ -2002,8 +2040,9 @@ def _apply_guardrail_mode(
 
     context = dict(context or {})
     enforced = context.pop("enforced", None)
-    # The guardrails read who set a value (an analyst or PCA recurring capex below
-    # the vintage floor is waived and disclosed, not raised) from these entries.
+    # The guardrails read who set a value (an analyst recurring capex below the
+    # vintage floor is waived and disclosed; a PCA one is warned, or raised in
+    # pricing) from these entries.
     context["assumption_entries"] = entries
     if ctx.mode == guardrails.MODE_PRICING and enforced is not None:
         findings = list(enforced)
@@ -2013,7 +2052,7 @@ def _apply_guardrail_mode(
             deferred_maintenance=ctx.profile.deferred_maintenance,
         )
         findings = guardrails.enforce_floors(ctx.canonical, mode=ctx.mode, profile=profile, context=context)
-        if any(f["action"] == guardrails.ACTION_ENFORCED for f in findings):
+        if any(f["action"] in guardrails.ENFORCING_ACTIONS for f in findings):
             # Re-read the raised values, with the first pass as the prior resolution.
             # Keys outside the specs (opex.*) are kept; the caller re-reads them.
             entries = {

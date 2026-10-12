@@ -149,6 +149,13 @@ SOURCE_RATIONALES: dict[str, str] = {
         "deal, the midpoint for value-add, the high end when deferred maintenance is flagged. It grows "
         "with repairs and maintenance, and in pricing the band is a floor."
     ),
+    "house:deferred_capex_placeholder": (
+        "The deal is flagged with deferred maintenance, so there is capital to spend at closing, but no "
+        "property condition assessment or analyst budget says how much. Pricing it at zero would ignore a "
+        "known cost, so the house budgets one year of the top of the vintage capex band per unit, funded with "
+        "equity at close, and flags it. It is a placeholder, not an estimate: commission a PCA (lenders escrow "
+        "its immediate repairs at 125% of the estimate) and replace it."
+    ),
     "house:deferred_capex": (
         "Without a property condition assessment or an analyst budget there is no evidence of what must "
         "be fixed at closing, so nothing is budgeted at close and the entry is flagged. Inspect the asset "

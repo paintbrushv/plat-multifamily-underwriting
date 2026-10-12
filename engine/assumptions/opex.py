@@ -287,14 +287,17 @@ def _house_core(ctx: Any, core: str) -> Optional[dict[str, Any]]:
     elif core == CORE_REPAIRS_MAINTENANCE:
         if ctx.bucket is None:
             return None
-        per_unit = house.default_r_and_m_per_unit(ctx.year_built, strategy=ctx.strategy)
+        deferred = bool(ctx.profile.deferred_maintenance)
+        per_unit = house.default_r_and_m_per_unit(ctx.year_built, strategy=ctx.strategy, deferred=deferred)
         if per_unit is None:
             return None
         source = house_vintage_source(ctx.bucket)
         basis = (
             f"The T12 has no repairs & maintenance line; year built {ctx.year_built} maps to the "
             f"{ctx.bucket} vintage bucket: house R&M ${float(per_unit):,.2f}/unit (VINTAGE_FRAMEWORK_2026, "
-            f"{ctx.strategy} strategy)."
+            f"{ctx.strategy} strategy"
+            + ("; deferred maintenance flagged: the high end of the band" if deferred else "")
+            + ")."
         )
     else:
         pct = house.DEFAULT_MANAGEMENT_FEE_PCT_EGR

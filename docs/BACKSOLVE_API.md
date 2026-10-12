@@ -146,12 +146,20 @@ The floors are defined once, in `engine/assumptions/guardrails.py` (ADR 0003
   §3): `max(value, vintage band)`, the band being the low end for `cashflow`,
   the midpoint for `value_add` and the high end when
   `deal_profile.deferred_maintenance` is set. A hold with none gets the floor
-  (growing at the house R&M rate). An analyst or PCA (`deal:pca`) figure below
-  the floor is priced as given and disclosed, as the insurance override is:
-  `policy_overrides` gets `{input: "recurring_capex_per_unit", action:
-  "floor_waived_by_analyst_override" | "floor_waived_by_deal_evidence",
-  floor, floor_source, waived_by, original, applied}`. The reserve floor never
-  stacks on it: the engine charges max(recurring capex, reserve) below NOI.
+  (growing at the house R&M rate). An analyst figure below the floor is priced
+  as given and disclosed, as the insurance override is: `policy_overrides`
+  gets `{input: "recurring_capex_per_unit", action:
+  "floor_waived_by_analyst_override", floor, floor_source, waived_by,
+  original, applied}`. A PCA (`deal:pca`) figure below the floor is raised to
+  it, `max(PCA, floor)`, and disclosed as `{input: "recurring_capex_per_unit",
+  action: "floor_applied_over_deal_evidence", floor, floor_source, evidence,
+  original, applied}`: a lender PCA sizes a lender reserve and understates
+  economic capex on older stock. The reserve floor never stacks on it: the
+  engine charges max(recurring capex, reserve) below NOI.
+- deferred maintenance (`deal_profile.deferred_maintenance`): the vacancy,
+  collection-loss and year-1 concession floors move to the upper part of the
+  vintage bands (ADR 0003 decision (i)), and so does the R&M floor (its high
+  end); `policy_summary.guardrails.profile.deferred_maintenance` is `true`.
 - insurance and R&M: `max` on the annualized line or the R&M floor basis
   (below).
 
@@ -246,7 +254,10 @@ Every candidate price carries the canonical's capital plan (ADR 0003 §3):
    loan commitment is upsized by it instead (equity unchanged) and it is in
    the unlevered basis. The priced case records
    `immediate_capex.amount_in_stated_basis`, so the engine does not add it
-   again. It is never in NOI or the monthly cash flows.
+   again. It is never in NOI or the monthly cash flows. A deal flagged with
+   deferred maintenance and no PCA or analyst figure carries the house
+   placeholder (`house:deferred_capex_placeholder`: one year of the vintage
+   capex band high end per unit), which is priced like any other amount.
 2. Recurring capex by vintage reduces cash flow below NOI at every candidate,
    so it lowers cash-on-cash and the price.
 3. The $250/unit replacement reserve is the floor of that charge.

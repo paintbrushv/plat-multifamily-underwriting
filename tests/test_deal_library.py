@@ -371,7 +371,8 @@ def test_underwrite_guardrails_warn_exactly_where_a_value_is_below_its_floor(slu
     assert canonical["assumptions"]["mode"] == "underwrite"
     flagged_keys = {k for k, e in entries.items() if e.get("guardrail")}
     warned = {k for k in flagged_keys if entries[k]["guardrail"]["action"] == "warned"}
-    # A PCA (or analyst) recurring capex below the vintage floor is kept and disclosed, never warned.
+    # An analyst recurring capex (or insurance) figure below its floor is kept and
+    # disclosed, never warned; a PCA figure below the vintage band is warned.
     waived = flagged_keys - warned
     assert all("waived" in entries[k]["guardrail"]["action"] for k in waived)
     assert waived == set(deal["expected"]["guardrail_waivers"])
@@ -413,12 +414,23 @@ def test_backsolve_enforces_floors_and_its_case_is_stable_on_re_resolve(slug):
     assert all(_entries(canonical)[k]["guardrail"]["action"] == "warned" for k in enforced)
     findings = summary["guardrails"]["findings"]
     assert {f["key"] for f in findings if f["action"] == "enforced"} == enforced
-    # A waived floor is disclosed, never raised (deal d: the PCA recurring capex).
+    # A waived floor is disclosed, never raised.
     waived = {f["key"] for f in findings if "waived" in f["action"]}
     assert waived == set(_deal(slug)["expected"]["guardrail_waivers"])
     for key in waived:
         assert entries[key]["value"] == _entries(canonical)[key]["value"]
         assert "waived" in entries[key]["guardrail"]["action"]
+    # PCA evidence below the vintage band is raised to it and disclosed (deal d).
+    applied = {f["key"] for f in findings if f["action"] == "floor_applied_over_deal_evidence"}
+    assert applied == {
+        k for k, e in _entries(canonical).items()
+        if e["source"] == "deal:pca" and (e.get("guardrail") or {}).get("action") == "warned"
+    }
+    for key in applied:
+        record = entries[key]["guardrail"]
+        assert record["action"] == "floor_applied_over_deal_evidence"
+        assert entries[key]["value"] == record["applied"] > record["original"]
+        assert any(o.get("input") == key and o["action"] == record["action"] for o in summary["policy_overrides"])
     assert {o["assumption"] for o in summary["policy_overrides"] if "assumption" in o} == enforced
     for key in enforced:
         record = entries[key]["guardrail"]

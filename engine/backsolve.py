@@ -567,6 +567,7 @@ def _apply_house_revenue_policy(
     year_built: int | None,
     strategy: str,
     deferred: bool = False,
+    deferred_maintenance: bool = False,
     broker_snapshot: dict[str, Any] | None = None,
     trailing_actuals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -582,7 +583,10 @@ def _apply_house_revenue_policy(
     value.
     """
     broker_notes = (broker_snapshot or {}).get("underwriting_notes", {})
-    profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=deferred)
+    # deal_profile.deferred_maintenance raises the vacancy, collection-loss and
+    # year-1 concession floors (underwriting_policy, "Deferred maintenance minimums").
+    profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=deferred,
+                               deferred_maintenance=deferred_maintenance)
     context: dict[str, Any] = {"broker_snapshot": broker_snapshot, "trailing_actuals": trailing_actuals}
     floors, vacancy_summary = guardrails.house_floors(canonical, profile, context)
 
@@ -1320,10 +1324,12 @@ def _prepare_house_assumptions(
         keys=("replacement_reserve_per_unit",),
     )
 
-    # Recurring capex by vintage: max(value, vintage band floor). An analyst or
-    # PCA figure below the floor is kept and disclosed (the insurance waiver
-    # convention); a hold with none gets the floor. The charge below NOI is
-    # max(recurring capex, reserve), so the reserve floor above never stacks.
+    # Recurring capex by vintage: max(value, vintage band floor). An analyst
+    # figure below the floor is kept and disclosed (the insurance waiver
+    # convention); a PCA figure below it is raised to the floor and disclosed
+    # (floor_applied_over_deal_evidence); a hold with none gets the floor. The
+    # charge below NOI is max(recurring capex, reserve), so the reserve floor
+    # above never stacks.
     recurring_findings = guardrails.enforce_floors(
         prepared,
         mode=guardrails.MODE_PRICING,
@@ -1408,6 +1414,7 @@ def _prepare_house_assumptions(
         year_built=year_built,
         strategy=strategy,
         deferred=False,
+        deferred_maintenance=guardrail_profile.deferred_maintenance,
         broker_snapshot=broker_snapshot,
         trailing_actuals=trailing_actuals,
     )
@@ -2188,7 +2195,7 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
         target = float(summary["target_coc_pct"]) / 100
     achieved = summary.get("achieved_coc_pct")
     findings = ((summary.get("policy_summary") or {}).get("guardrails") or {}).get("findings") or []
-    enforced = sum(1 for f in findings if f.get("action") == guardrails.ACTION_ENFORCED)
+    enforced = sum(1 for f in findings if f.get("action") in guardrails.ENFORCING_ACTIONS)
     dscr = summary.get("minimum_dscr")
     exit_calc = summary.get("exit_cap_calculation") or {}
     exit_line = _pct(summary.get("exit_cap_rate"))

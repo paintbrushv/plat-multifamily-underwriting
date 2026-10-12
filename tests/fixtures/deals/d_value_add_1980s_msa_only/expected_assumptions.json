@@ -255,11 +255,10 @@
         "floor": 1750.0,
         "floor_source": "house:recurring_capex_vintage",
         "status": "below_floor",
-        "action": "floor_waived_by_deal_evidence",
+        "action": "warned",
         "original": 1500.0,
-        "applied": 1500.0,
-        "basis": "recurring_capex_per_unit $1,500.00 is below the house floor $1,750.00 (house:recurring_capex_vintage); the PCA (deal:pca) recurring capex waives the floor, so pricing keeps the figure. Review it.",
-        "waived_by": "the PCA (deal:pca) recurring capex"
+        "basis": "recurring_capex_per_unit is below the house floor $1,750.00 (house:recurring_capex_vintage); lowest value before the guardrail $1,500.00. Underwrite mode keeps the value; pricing mode would enforce the floor. The value is the PCA (deal:pca) recurring capex. A lender PCA sizes a lender replacement reserve for building systems and components over the loan term (routine items and discretionary upgrades excluded), so on older stock it understates economic capex.",
+        "evidence": "the PCA (deal:pca) recurring capex"
       }
     }
   },

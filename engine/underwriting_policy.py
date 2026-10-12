@@ -415,7 +415,11 @@ def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
 #    maintenance and PCA immediate needs, funded with equity at close (or a
 #    lender holdback). It is separate from the value-add renovation budget.
 #    Without PCA evidence or an analyst figure nothing is budgeted
-#    (``HOUSE_IMMEDIATE_CAPEX_DEFAULT``, flagged for review).
+#    (``HOUSE_IMMEDIATE_CAPEX_DEFAULT``, flagged for review), unless the deal
+#    is flagged with deferred maintenance: then a placeholder of
+#    ``HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS`` year(s) of the vintage band high
+#    end per unit is budgeted (``default_deferred_capex_placeholder_per_unit``),
+#    flagged for review with a recommendation to commission a PCA.
 # 2. Recurring capex by vintage: annual $/unit below NOI (not opex), grown
 #    every analysis year at ``HOUSE_RECURRING_CAPEX_GROWTH``. The house
 #    default is the vintage framework's economic CapEx band
@@ -430,6 +434,16 @@ def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
 #    never both. It is also backsolve's pricing floor for reserves.
 HOUSE_REPLACEMENT_RESERVE_PER_UNIT = Decimal("250")
 HOUSE_IMMEDIATE_CAPEX_DEFAULT = Decimal("0")
+# Deferred maintenance flagged with no PCA and no analyst figure: budget this
+# many years of the vintage economic CapEx band high end per unit at close.
+# One year of the top of the band is a placeholder, not an estimate: it keeps
+# a known capital need from being priced at $0 until a PCA sizes it.
+HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS = Decimal("1")
+# Agency lenders escrow PCA immediate repairs at 125% of the engineer's
+# estimate (Fannie Mae Multifamily Guide 405.02 completion/repair escrow
+# guidance; Freddie Mac SBL priority repair escrow guidance, 2024). Disclosed
+# with the placeholder so the analyst knows what a lender will hold back.
+LENDER_PCA_REPAIR_ESCROW_FACTOR = Decimal("1.25")
 # Recurring capex is labor and materials for building systems (roofs, HVAC,
 # paving, unit interiors), so it grows with repairs & maintenance.
 HOUSE_RECURRING_CAPEX_GROWTH_CONSTANT = "OPEX_GROWTH_REPAIRS_MAINTENANCE"
@@ -517,6 +531,19 @@ def recurring_capex_band(year_built: Optional[int]) -> Optional[tuple[Decimal, D
     return row["economic_capex_low"], row["economic_capex_high"]
 
 
+def default_deferred_capex_placeholder_per_unit(year_built: Optional[int]) -> Optional[Decimal]:
+    """Immediate capex per unit when deferred maintenance is flagged without a PCA or analyst figure.
+
+    ``HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS`` x the vintage economic CapEx band
+    high end (e.g. $2,500/unit for the 1980s). ``None`` when the year built is
+    unknown (nothing is budgeted; the entry stays flagged).
+    """
+    band = recurring_capex_band(year_built)
+    if band is None:
+        return None
+    return band[1] * HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS
+
+
 def default_r_and_m_per_unit(
     year_built: Optional[int],
     *,
@@ -526,7 +553,9 @@ def default_r_and_m_per_unit(
     """Return a conservative annual/unit R&M assumption by vintage.
 
     The value is on ``R_AND_M_FLOOR_BASIS``: R&M including turnover /
-    make-ready, excluding payroll.
+    make-ready, excluding payroll. The low end of the band for a stabilized
+    deal, the midpoint for value-add, the high end with deferred maintenance
+    (``deferred``: ``deal_profile.deferred_maintenance``).
     """
     bucket = vintage_bucket(year_built)
     if bucket is None:
@@ -569,18 +598,84 @@ def default_loss_to_lease_rate(
     return value
 
 
+# ── Deferred maintenance minimums (ADR 0003 §3, §5) ──────────────────────
+# HOUSE POLICY, NOT MARKET DATA. A deal flagged with deferred maintenance
+# (``deal_profile.deferred_maintenance``) carries more vacancy (down units,
+# slower turns), weaker collections and more year-1 concessions (units come
+# back on line into a discounted lease-up), and spends more on repairs. The
+# flag moves each house minimum to the upper part of its vintage band, so the
+# step scales with vintage, and never by less than a named step over the
+# minimum the same deal would carry without the flag:
+#
+#   physical vacancy   max(vintage physical_vacancy_typical_high, floor + 100 bp)
+#   collection loss    max(midpoint of the vintage bad_debt typical band, floor + 50 bp)
+#   year-1 concessions max(midpoint of the vintage concessions typical band, floor + 50 bp)
+#   R&M (ex payroll)   the vintage r_and_m_high (R&M including turnover)
+#   recurring capex    the vintage economic_capex_high (``recurring_capex_band_pick``)
+#
+# "floor" is the minimum for the deal's strategy without the flag (the
+# value-add floors already sit above the stabilized ones). For a 1980s
+# stabilized deal: vacancy 5.0% -> 7.0%, collection loss 0.75% -> 2.25%,
+# year-1 concessions 0.75% -> 1.50%, R&M $900 -> $1,700/unit. Physical vacancy
+# + collection loss + year-1 concessions + loss to lease under these minimums
+# lands inside every vintage's economic-vacancy typical band, and above the
+# agency 5% minimum economic vacancy (``deferred_maintenance_economic_vacancy``).
+#
+# Sources (see ADR 0003, "Deferred maintenance minimums"). The band points are
+# house judgment; the sources set the direction and the agency minimums:
+# - Fannie Mae Multifamily Guide Part II 203.01 (conventional): underwritten
+#   vacancy + concessions + bad debt is at least the greater of the trailing
+#   3-month collections gap and 5% of GPR. Freddie Mac Guide ch. 17, 17.2(k):
+#   vacancy and collection loss may not be less than 5%, adjusted upward when
+#   conditions require; the Freddie SBL update of 2024-06-28 adds an economic
+#   vacancy allowance on top of physical vacancy where there are concessions
+#   or a history of delinquency or eviction.
+# - Freddie Mac Guide ch. 62 (PCA): the engineer inspects at least half of the
+#   down units and costs making them rent-ready, i.e. down units are a real
+#   vacancy and capital item on older stock.
+# - RealPage concessions report (December 2025 data, published 2026-01-23):
+#   Class C has the most units offering concessions (19.1%, average discount
+#   10.5%), above Class A/B. No public RealPage or Yardi Matrix series gives
+#   Class C bad debt as a percent of rent; RealPage commentary describes Class C
+#   bad debt as deeper than A/B, so the house uses its own vintage band.
+# - NAA Income/Expense IQ 2024 data (NAA, 2025-12-22): national repairs &
+#   maintenance $1,098/unit/year, turnover cost up 17.5% year on year, bad
+#   debt $75/unit (an institutional, stabilized sample: not a Class C floor).
+#   Older garden stock with deferred maintenance sits at the top of the
+#   vintage R&M band (R&M including turnover).
+DEFERRED_MAINTENANCE_VACANCY_STEP = Decimal("0.010")
+DEFERRED_MAINTENANCE_COLLECTION_LOSS_STEP = Decimal("0.005")
+DEFERRED_MAINTENANCE_CONCESSIONS_STEP = Decimal("0.005")
+# Agency minimum underwritten vacancy and collection loss (Fannie Mae Guide
+# Part II 203.01, Freddie Mac Guide 17.2(k)): a check on the deferred
+# minimums, never applied as its own floor.
+AGENCY_MIN_ECONOMIC_VACANCY = Decimal("0.05")
+
+
+def _typical_midpoint(row: dict, name: str) -> Decimal:
+    return (row[f"{name}_typical_low"] + row[f"{name}_typical_high"]) / Decimal("2")
+
+
 def default_physical_vacancy_rate(
     year_built: Optional[int],
     *,
     strategy: str = "cashflow",
     deferred: bool = False,
 ) -> Optional[Decimal]:
+    """House physical-vacancy floor: the vintage floor (+100 bp value-add).
+
+    With deferred maintenance (``deferred``): max(vintage typical-band high,
+    that floor + ``DEFERRED_MAINTENANCE_VACANCY_STEP``).
+    """
     bucket = vintage_bucket(year_built)
     if bucket is None:
         return None
-    value = VINTAGE_FRAMEWORK_2026[bucket]["vacancy_floor"]
-    if deferred or strategy == "value_add":
-        return value + Decimal("0.010")
+    row = VINTAGE_FRAMEWORK_2026[bucket]
+    value = row["vacancy_floor"]
+    if strategy == "value_add":
+        value += Decimal("0.010")
+    if deferred:
+        return max(row["physical_vacancy_typical_high"], value + DEFERRED_MAINTENANCE_VACANCY_STEP)
     return value
 
 
@@ -590,12 +685,20 @@ def default_collection_loss_rate(
     strategy: str = "cashflow",
     deferred: bool = False,
 ) -> Optional[Decimal]:
+    """House collection-loss floor: the vintage floor (+25 bp value-add).
+
+    With deferred maintenance: max(midpoint of the vintage bad-debt typical
+    band, that floor + ``DEFERRED_MAINTENANCE_COLLECTION_LOSS_STEP``).
+    """
     bucket = vintage_bucket(year_built)
     if bucket is None:
         return None
-    value = VINTAGE_FRAMEWORK_2026[bucket]["collection_loss_floor"]
-    if deferred or strategy == "value_add":
-        return value + Decimal("0.0025")
+    row = VINTAGE_FRAMEWORK_2026[bucket]
+    value = row["collection_loss_floor"]
+    if strategy == "value_add":
+        value += Decimal("0.0025")
+    if deferred:
+        return max(_typical_midpoint(row, "bad_debt"), value + DEFERRED_MAINTENANCE_COLLECTION_LOSS_STEP)
     return value
 
 
@@ -605,13 +708,45 @@ def default_year1_concessions_rate(
     strategy: str = "cashflow",
     deferred: bool = False,
 ) -> Optional[Decimal]:
+    """House year-1 concessions floor: the vintage floor (+25 bp value-add).
+
+    With deferred maintenance: max(midpoint of the vintage concessions typical
+    band, that floor + ``DEFERRED_MAINTENANCE_CONCESSIONS_STEP``).
+    """
     bucket = vintage_bucket(year_built)
     if bucket is None:
         return None
-    value = VINTAGE_FRAMEWORK_2026[bucket]["year1_concessions_floor"]
-    if deferred or strategy == "value_add":
-        return value + Decimal("0.0025")
+    row = VINTAGE_FRAMEWORK_2026[bucket]
+    value = row["year1_concessions_floor"]
+    if strategy == "value_add":
+        value += Decimal("0.0025")
+    if deferred:
+        return max(_typical_midpoint(row, "concessions"), value + DEFERRED_MAINTENANCE_CONCESSIONS_STEP)
     return value
+
+
+def deferred_maintenance_economic_vacancy(
+    year_built: Optional[int],
+    *,
+    strategy: str = "cashflow",
+) -> Optional[Decimal]:
+    """Economic vacancy implied by the deferred-maintenance minimums.
+
+    Physical vacancy + collection loss + year-1 concessions (all with
+    deferred maintenance) + the loss-to-lease floor. A disclosure and a test
+    of the minimums against the vintage economic-vacancy band and
+    ``AGENCY_MIN_ECONOMIC_VACANCY``; the engine floors each component, never
+    the sum.
+    """
+    parts = (
+        default_physical_vacancy_rate(year_built, strategy=strategy, deferred=True),
+        default_collection_loss_rate(year_built, strategy=strategy, deferred=True),
+        default_year1_concessions_rate(year_built, strategy=strategy, deferred=True),
+        default_loss_to_lease_rate(year_built, strategy=strategy),
+    )
+    if any(part is None for part in parts):
+        return None
+    return sum(parts, Decimal("0"))
 
 
 # ── ADR 0003 slice 4: house curve policy ─────────────────────────────────
@@ -695,12 +830,26 @@ def house_exit_cap_rate(
     }
 
 
-def default_bad_debt_rate(year_built: Optional[int]) -> Decimal:
-    """House default collection loss: vintage ``bad_debt_typical_low``, else 2.0%."""
+def default_bad_debt_rate(
+    year_built: Optional[int],
+    *,
+    strategy: str = "cashflow",
+    deferred: bool = False,
+) -> Decimal:
+    """House default collection loss: vintage ``bad_debt_typical_low``, else 2.0%.
+
+    With deferred maintenance the default is never below the deferred
+    collection-loss floor (``default_collection_loss_rate``), so a house-only
+    deal does not sit below its own floor.
+    """
     bucket = vintage_bucket(year_built)
     if bucket is None:
         return HOUSE_DEFAULT_COLLECTION_LOSS
-    return VINTAGE_FRAMEWORK_2026[bucket]["bad_debt_typical_low"]
+    value = VINTAGE_FRAMEWORK_2026[bucket]["bad_debt_typical_low"]
+    if deferred:
+        floor = default_collection_loss_rate(year_built, strategy=strategy, deferred=True)
+        return max(value, floor) if floor is not None else value
+    return value
 
 
 def typical_physical_vacancy_rate(year_built: Optional[int]) -> Optional[Decimal]:

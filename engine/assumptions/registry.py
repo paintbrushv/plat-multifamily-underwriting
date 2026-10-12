@@ -35,6 +35,9 @@ HOUSE_REPLACEMENT_RESERVE = "house:replacement_reserve"
 HOUSE_RECURRING_CAPEX = "house:recurring_capex_vintage"
 # HOUSE_IMMEDIATE_CAPEX_DEFAULT: nothing budgeted at close without PCA or analyst evidence.
 HOUSE_DEFERRED_CAPEX = "house:deferred_capex"
+# default_deferred_capex_placeholder_per_unit: deferred maintenance flagged with no
+# PCA and no analyst figure, one year of the vintage band high end at close.
+HOUSE_DEFERRED_CAPEX_PLACEHOLDER = "house:deferred_capex_placeholder"
 
 
 def house_vintage_source(bucket: str) -> str:

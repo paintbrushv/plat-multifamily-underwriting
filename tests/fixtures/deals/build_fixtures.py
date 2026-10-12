@@ -729,8 +729,10 @@ DEALS: tuple[DealSpec, ...] = (
                 "minimum_dscr": [1.05, 2.0],
                 "going_in_cap_rate": [0.052, 0.068],
             },
-            "guardrail_warnings": ["collection_loss"],
-            "guardrail_waivers": ["recurring_capex_per_unit"],
+            # The PCA recurring capex ($1,500) is below the value-add band midpoint
+            # ($1,750): warned in underwrite, raised to the band in pricing.
+            "guardrail_warnings": ["collection_loss", "recurring_capex_per_unit"],
+            "guardrail_waivers": [],
         },
     ),
 )

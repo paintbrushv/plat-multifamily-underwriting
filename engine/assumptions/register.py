@@ -430,7 +430,7 @@ def _guardrail(record: Any, unit: Any) -> Optional[dict[str, Any]]:
     action = record.get("action")
     action_text = str(action or "")
     status_text = str(status or "")
-    if action_text == "enforced":
+    if action_text in ("enforced", "floor_applied_over_deal_evidence"):
         state = GUARDRAIL_ENFORCED
     elif action_text == "warned":
         state = GUARDRAIL_WARNED
