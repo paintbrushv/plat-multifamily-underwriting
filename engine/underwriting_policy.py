@@ -129,8 +129,9 @@ def default_opex_growth_rate(
     return "OPEX_GROWTH_DEFAULT", OPEX_GROWTH_DEFAULT
 
 # Institutional vintage framework supplied by the user on 2026-05-08.
-# Ranges are in 2026 dollars and represent annual/unit reserve floors plus a
-# rough turn-cost band for use when a deal lacks better property-specific data.
+# Ranges are in 2026 dollars: annual/unit R&M (on R_AND_M_FLOOR_BASIS),
+# economic CapEx (sustaining capital, not the replacement reserve) and a rough
+# turn-cost band, for use when a deal lacks better property-specific data.
 VINTAGE_FRAMEWORK_2026 = {
     "1960s": {
         "year_min": 1960,
@@ -379,6 +380,20 @@ VINTAGE_FRAMEWORK_2026 = {
 }
 
 
+# What the vintage R&M band (``r_and_m_low`` / ``r_and_m_high``, e.g.
+# $900-$1,700/unit for the 1980s) is compared with: the R&M floor checks the
+# deal's repairs & maintenance lines plus its turnover / make-ready lines,
+# annualized. The band excludes payroll, so site payroll (maintenance staff
+# wages, benefits, payroll taxes) is never counted toward the floor, even on a
+# line labeled as repairs. A T12 that books turns on their own lines is not
+# topped up for R&M it already carries. engine/assumptions/canonical_ops
+# (``in_r_and_m_floor_basis``) applies this; the guardrail and the resolver's
+# ``r_and_m_per_unit`` use the same basis.
+R_AND_M_FLOOR_BASIS = (
+    "repairs & maintenance plus turnover / make-ready lines, annualized; payroll excluded"
+)
+
+
 def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
     if year_built is None:
         return None
@@ -392,15 +407,46 @@ def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
     return None
 
 
+# ── Replacement reserve vs economic CapEx (ADR 0003 §3, §5) ──────────────
+# HOUSE POLICY, NOT MARKET DATA. The replacement reserve is the lender-style
+# annual reserve carried below NOI. It is the same for every vintage and
+# strategy: $250/unit/year is the desk practice. The resolver writes it when
+# the canonical carries no reserve, and backsolve's pricing floor for reserves
+# is this constant.
+#
+# The vintage framework's economic CapEx band (``economic_capex_low`` /
+# ``economic_capex_high``) is sustaining capital (roofs, HVAC, paving, unit
+# interiors), not a reserve. It is disclosed as its own assumption
+# (``economic_capex_per_unit``) and does not reach the cash flows unless the
+# analyst opts in (a capex budget, or an override of that key).
+HOUSE_REPLACEMENT_RESERVE_PER_UNIT = Decimal("250")
+
+
 def default_replacement_reserve_per_unit(
+    year_built: Optional[int] = None,
+    *,
+    strategy: str = "cashflow",
+    deferred: bool = False,
+) -> Decimal:
+    """House lender-style annual replacement reserve per unit (below NOI).
+
+    Always ``HOUSE_REPLACEMENT_RESERVE_PER_UNIT``: the reserve does not vary by
+    vintage, strategy or deferred maintenance. The arguments are accepted so
+    callers that pass the deal profile keep working. Economic CapEx is
+    ``default_economic_capex_per_unit``.
+    """
+    return HOUSE_REPLACEMENT_RESERVE_PER_UNIT
+
+
+def default_economic_capex_per_unit(
     year_built: Optional[int],
     *,
     strategy: str = "cashflow",
     deferred: bool = False,
 ) -> Optional[Decimal]:
-    """Return a conservative annual/unit economic CapEx reserve.
+    """Annual/unit economic CapEx (sustaining capital) from the vintage band.
 
-    Default policy:
+    This is not the replacement reserve. Default policy:
     - cashflow / stabilized deals start at the low end of the sustainable band
     - value-add / deferred deals use the midpoint of the sustainable band
     - explicitly deferred assets can be pushed to the high end
@@ -424,7 +470,11 @@ def default_r_and_m_per_unit(
     strategy: str = "cashflow",
     deferred: bool = False,
 ) -> Optional[Decimal]:
-    """Return a conservative annual/unit R&M assumption by vintage."""
+    """Return a conservative annual/unit R&M assumption by vintage.
+
+    The value is on ``R_AND_M_FLOOR_BASIS``: R&M including turnover /
+    make-ready, excluding payroll.
+    """
     bucket = vintage_bucket(year_built)
     if bucket is None:
         return None
@@ -538,15 +588,58 @@ HOUSE_LTL_BURN_OFF_MONTHS = 12
 # stabilized level.
 HOUSE_YEAR1_CONCESSION_MONTHS = 12
 
-# Exit cap rate when an exit is modeled but neither the analyst nor market
-# data supplies one (ADR 0003 §3): the going-in cap rate (trailing T12 NOI /
-# purchase price) plus this spread. 50 bps of cap-rate expansion over a
-# typical 5-year hold is the conservative house assumption: it prices the exit
-# on an older asset in a market that may not stay as tight as today's.
+# ── Exit cap rate (ADR 0003 §3) ──────────────────────────────────────────
+# HOUSE POLICY. Exit caps track entry caps: unless the analyst sets one, the
+# exit cap is the going-in cap rate AT THE PRICE BEING MODELED (year-1 NOI /
+# purchase price) plus HOUSE_EXIT_CAP_SPREAD. It is re-measured whenever the
+# price changes (backsolve recomputes it at every candidate price), so a solved
+# price never pairs a high entry cap with an exit cap anchored at the ask.
+#
+# 50 bps of cap-rate expansion over a typical 5-year hold is the conservative
+# house assumption: it prices the exit on an older asset in a market that may
+# not stay as tight as today's.
 HOUSE_EXIT_CAP_SPREAD = Decimal("0.0050")
-# A trailing NOI / purchase price above this is not a usable going-in cap rate
-# (the price or the T12 is not comparable), so the house spread is not applied.
+# A going-in cap above this is not usable (the price or the NOI is not
+# comparable), so the exit is not anchored to it.
 HOUSE_EXIT_CAP_GOING_IN_MAX = Decimal("0.25")
+# The "screaming steal" exception, which is rare: only when a market or
+# submarket cap rate is available AND the going-in cap at the modeled price is
+# more than HOUSE_STEAL_THRESHOLD above it may the exit compress toward market
+# + spread, and never by more than HOUSE_MAX_EXIT_COMPRESSION below going-in +
+# spread. Without market data there is never compression; a going-in cap at or
+# below market (paying up) still exits at entry + spread.
+HOUSE_STEAL_THRESHOLD = Decimal("0.0150")
+HOUSE_MAX_EXIT_COMPRESSION = Decimal("0.0100")
+
+
+def house_exit_cap_rate(
+    going_in_cap_rate: Decimal | float,
+    *,
+    market_cap_rate: Optional[Decimal | float] = None,
+) -> dict[str, Decimal | bool | None]:
+    """The house exit cap for a going-in cap rate measured at the modeled price.
+
+    Returns ``exit_cap_rate`` and how it was reached: ``anchored`` (going-in +
+    spread), ``market_cap_rate``, ``steal`` and ``compression`` (anchored minus
+    the exit cap; 0 unless it is a steal). The caller guards the going-in cap
+    with ``HOUSE_EXIT_CAP_GOING_IN_MAX``.
+    """
+    going_in = Decimal(str(going_in_cap_rate))
+    market = Decimal(str(market_cap_rate)) if market_cap_rate is not None else None
+    anchored = going_in + HOUSE_EXIT_CAP_SPREAD
+    value = anchored
+    steal = market is not None and going_in - market > HOUSE_STEAL_THRESHOLD
+    if steal:
+        value = max(market + HOUSE_EXIT_CAP_SPREAD, anchored - HOUSE_MAX_EXIT_COMPRESSION)
+    return {
+        "going_in_cap_rate": going_in,
+        "spread": HOUSE_EXIT_CAP_SPREAD,
+        "anchored": anchored,
+        "market_cap_rate": market,
+        "steal": steal,
+        "compression": anchored - value,
+        "exit_cap_rate": value,
+    }
 
 
 def default_bad_debt_rate(year_built: Optional[int]) -> Decimal:
@@ -742,6 +835,7 @@ def default_vintage_operating_profile(
     when they need a conservative first-pass assumption set.
     """
     bucket = vintage_bucket(year_built)
+    economic_capex = default_economic_capex_per_unit(year_built, strategy=strategy, deferred=deferred)
     return {
         "vintage_bucket": bucket,
         "strategy": strategy,
@@ -756,11 +850,11 @@ def default_vintage_operating_profile(
             if default_turn_capex_per_unit(year_built, strategy=strategy) is not None
             else None
         ),
-        "economic_capex_reserve_per_unit": (
-            float(default_replacement_reserve_per_unit(year_built, strategy=strategy, deferred=deferred))
-            if default_replacement_reserve_per_unit(year_built, strategy=strategy, deferred=deferred) is not None
-            else None
-        ),
+        "replacement_reserve_per_unit": float(default_replacement_reserve_per_unit()),
+        # Sustaining capital, disclosed separately from the reserve. The older
+        # key name is kept for callers that read it.
+        "economic_capex_per_unit": float(economic_capex) if economic_capex is not None else None,
+        "economic_capex_reserve_per_unit": float(economic_capex) if economic_capex is not None else None,
         "year1_insurance_per_unit": float(
             default_year1_insurance_per_unit(observed_insurance_per_unit)
         ),

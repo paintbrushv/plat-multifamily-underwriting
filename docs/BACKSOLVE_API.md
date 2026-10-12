@@ -27,9 +27,10 @@ argument uses percent units (7 means 7%).
 ## Policy version 1
 
 The caller must select `plat.backsolve-policy/1` and a strategy (`cashflow` or
-`value_add`). This selects the existing engine house policy: vintage reserve,
-repair/maintenance, vacancy, loss-to-lease, collection-loss, concession, and
-insurance floors. It also selects the fee defaults in
+`value_add`). This selects the existing engine house policy: the house
+replacement reserve ($250/unit, lender-style; never the vintage economic
+CapEx), repair/maintenance, vacancy, loss-to-lease, collection-loss,
+concession, and insurance floors. It also selects the fee defaults in
 `engine.backsolve_policy.DEFAULTS` and the cash-on-cash basis (`coc_basis`,
 below).
 The result discloses resolved fees, benchmark, tax policy, inferred vintage,
@@ -53,14 +54,46 @@ pricing-policy field (`sale_cost_percent`, `acquisition_fee_pct`,
    label;
 3. else `engine.backsolve_policy.DEFAULTS`, labeled `house:backsolve_policy`.
 
-The exit cap follows the same rule: the policy's `exit_cap_rate` when given,
-else the canonical's. A canonical with no `assumptions` section records no
-provenance, so its values are not treated as analyst values and the defaults
-apply; run it through the resolver (ingest, or `resolve_assumptions`) first to
-have them honored. `effective_assumptions.policy_value_sources` says who set
-each value: `explicit_policy`, `canonical_analyst`, `policy_default`, or (exit
-cap only) `canonical`. A deal whose canonical carries no analyst value for
-these fields prices exactly as before.
+A canonical with no `assumptions` section records no provenance, so its values
+are not treated as analyst values and the defaults apply; run it through the
+resolver (ingest, or `resolve_assumptions`) first to have them honored.
+`effective_assumptions.policy_value_sources` says who set each value:
+`explicit_policy`, `canonical_analyst`, `policy_default`, or (exit cap only)
+`canonical` or `entry_anchored`. A deal whose canonical carries no analyst
+value for these fields prices exactly as before.
+
+### Exit cap: tracks the entry cap
+
+Exit caps should be roughly in line with entry caps (ADR 0003 §3). The exit
+cap priced at each candidate price is, in order:
+
+1. the policy's `exit_cap_rate` when given (`exit_cap_mode: "explicit_policy"`,
+   labeled `house:backsolve_policy`);
+2. else the canonical's analyst exit cap (its `exit_cap_rate` entry is
+   `analyst`-sourced; `canonical_analyst`), priced as given;
+3. else, for a canonical with no `assumptions` section, its exit cap as given
+   (`canonical`; the resolver treats such a value as the analyst's);
+4. else entry-anchored (`entry_anchored`): at every candidate price the going-in
+   cap at that price (engine year-1 NOI / price, from the same all-equity
+   preview that sizes the debt, so no extra engine run) plus
+   `HOUSE_EXIT_CAP_SPREAD` (50 bps). The steal exception applies when the
+   resolver recorded a market cap rate (`detail.market` on the canonical's
+   `exit_cap_rate` entry): a going-in cap more than `HOUSE_STEAL_THRESHOLD`
+   (150 bps) above it compresses the exit toward market + spread, at most
+   `HOUSE_MAX_EXIT_COMPRESSION` (100 bps) below going-in + spread. Without a
+   market rate there is never compression. A candidate whose going-in cap is
+   outside `HOUSE_EXIT_CAP_GOING_IN_MAX` (an extreme bracket price) uses the
+   market rate, else the canonical's exit cap.
+
+`summary.exit_cap_calculation` discloses the solved exit cap: for
+`entry_anchored`, `{mode, rule, purchase_price, year1_noi, going_in_cap_rate,
+spread, anchored_exit_cap_rate, market_cap_rate, steal, compression,
+exit_cap_rate, market}` (also kept in the solved case's
+`metadata.property_summary.exit_cap_calculation`); otherwise `{mode,
+exit_cap_rate}`. `effective_assumptions.exit_cap_mode` names the mode. The
+solved case's `exit_cap_rate` entry is the resolver's own default at the solved
+price (`house:exit_cap_spread`, no override), so re-resolving it changes
+nothing. The CLI summary prints the exit cap and how it was set.
 
 Floors compare annual dollars: opex lines are annualized from their
 `calculation_type` first, and a floor replaces the analyst's matching line
@@ -78,7 +111,10 @@ rate over the hold. Summary fields named `*_applied` (and
 `replacement_reserve_per_unit`, the first priced reserve segment per unit, with
 the curve in `replacement_reserves_applied`) report what was priced; the floors
 are reported separately (`physical_vacancy_floor`,
-`replacement_reserve_floor_per_unit`, `repairs_maintenance_floor_per_unit`).
+`replacement_reserve_floor_per_unit` (the $250/unit house reserve),
+`repairs_maintenance_floor_per_unit`). `observed_repairs_maintenance_annual` is
+on the R&M floor basis: repairs & maintenance plus turnover / make-ready,
+payroll excluded.
 Every analyst
 input the policy replaced, including each raised vacancy segment, is listed in
 `policy_overrides` with its original and applied value.
@@ -106,7 +142,8 @@ The floors are defined once, in `engine/assumptions/guardrails.py` (ADR 0003
   the analyst's rate). A `free_months` row is compared as months / 12 and keeps
   its type. With no year-1 row, one year-1 `pct_rent` row at the floor is
   added.
-- insurance and R&M: `max` on the annualized line or bucket (below).
+- insurance and R&M: `max` on the annualized line or the R&M floor basis
+  (below).
 
 The loss-to-lease, collection-loss and concession floors are the max of the
 vintage floor and the broker note (`underwriting_notes.loss_to_lease`,
@@ -118,7 +155,11 @@ concession rows carry their `concession_id` and, when split, `split_at`).
 input normalization left is the house box-score rebase (loss to lease and
 vacancy rebuilt on the rent-roll floorplans).
 
-The R&M floor tops the bucket up with one "Repairs & Maintenance Vintage Floor
+The R&M floor compares the vintage R&M band, which excludes payroll, with R&M
+including turnover: the repairs & maintenance and turnover / make-ready lines,
+never payroll (a "Repairs Salaries" line is payroll). A T12 that books turns on
+their own lines is therefore not topped up for R&M it already carries. A
+shortfall tops the basis up with one "Repairs & Maintenance Vintage Floor
 Top-Up" line sized from the other R&M lines; a top-up line left by an earlier
 pricing run never counts toward the floor, so re-pricing a priced canonical
 after lowering R&M lands exactly on the floor (`replaced_top_up_annual`

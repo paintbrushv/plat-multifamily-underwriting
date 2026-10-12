@@ -728,6 +728,57 @@ def _check_guardrails(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     return issues
 
 
+# Vintages built before this year need a capex review (ADR 0003 §3): the
+# replacement reserve is a lender-style $250/door, not sustaining capital.
+CAPEX_REVIEW_BEFORE_YEAR = 2000
+
+
+def _canonical_year_built(inputs: Mapping[str, Any]) -> Optional[int]:
+    metadata = inputs.get("metadata") or {}
+    for value in (
+        (inputs.get("deal_profile") or {}).get("year_built"),
+        metadata.get("year_built"),
+        (metadata.get("property_summary") or {}).get("year_built"),
+    ):
+        if isinstance(value, bool) or value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _check_capex_budget(inputs: Dict[str, Any]) -> List[ValidationIssue]:
+    """A pre-2000 vintage with no capex budget, renovation program or capex line is a WARNING.
+
+    The house replacement reserve ($250/door, below NOI) does not fund
+    sustaining capital. The vintage economic CapEx is disclosed as
+    ``assumptions.entries.economic_capex_per_unit`` and stays out of the cash
+    flows unless the analyst opts in, so an older asset needs a PCA / capex
+    review. Never an ERROR.
+    """
+    year = _canonical_year_built(inputs)
+    if year is None or year >= CAPEX_REVIEW_BEFORE_YEAR:
+        return []
+    if any(inputs.get(field) for field in (
+        "capex_schedule", "capex_upfront_funded", "renovation_programs", "unit_renovations",
+    )):
+        return []
+    return [
+        ValidationIssue(
+            severity="WARNING",
+            code="CAPEX_BUDGET_MISSING",
+            message=(
+                f"Built {year} (before {CAPEX_REVIEW_BEFORE_YEAR}) with no capex budget, renovation program "
+                "or capex line: the $250/door replacement reserve does not fund sustaining capital. Review the "
+                "PCA / capex plan; the vintage economic CapEx is disclosed as economic_capex_per_unit."
+            ),
+            path="/capex_schedule",
+        )
+    ]
+
+
 def _check_required_revenue_quality_bridge(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     property_summary = ((inputs.get("metadata") or {}).get("property_summary") or {})
     material = property_summary.get("material_ancillary_income") or {}
@@ -1721,6 +1772,7 @@ def validate_deal(
     issues.extend(_check_ingest_gate(inputs))
     issues.extend(_check_assumption_layer(inputs))
     issues.extend(_check_guardrails(inputs))
+    issues.extend(_check_capex_budget(inputs))
     issues.extend(_check_renovation_programs(inputs, month_ids))
     issues.extend(_check_growth_bounds(inputs))
     issues.extend(_check_vacancy_bounds(inputs))

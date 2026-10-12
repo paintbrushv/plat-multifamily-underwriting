@@ -18,10 +18,12 @@ Semantics (v1):
   fills it with the resolved default and flags house or fallback values
   ``review_required``. That covers rent growth (a ``growth_assumptions``
   section is created when there is none), opex growth rates, the
-  replacement reserve (house vintage reserve x units over the analysis
-  window), purchase closing costs (house percent of price), the exit cap rate
-  of a modeled exit (market, else going-in cap + house spread) and a
-  renovation program's missing rent premium.
+  replacement reserve (the house lender-style reserve x units over the
+  analysis window; economic CapEx is a separate, informational key that is
+  written only when the analyst opts in), purchase closing costs (house
+  percent of price), the exit cap rate of a modeled exit (the going-in cap
+  at the modeled price + the house spread; ``engine/assumptions/exit_cap.py``)
+  and a renovation program's missing rent premium.
 - Overrides: ``{key: value | {"value", "note"[, "cohort_overrides"]}}``. A
   ``null`` value (``{key: None}`` or ``{key: {"value": None}}``) clears the
   key's override: the entry reverts to its resolved default and source.
@@ -52,8 +54,8 @@ from engine.assumptions.canonical_ops import (
     ensure_year1_concession_schedule,
     matching_opex_rows,
     annual_opex_amount,
-    opex_bucket_for_policy,
-    sum_opex_bucket,
+    r_and_m_floor_rows,
+    sum_r_and_m_floor_basis,
     sum_units,
     upsert_annual_opex,
     upsert_annual_opex_by_match,
@@ -63,6 +65,7 @@ from engine.assumptions.registry import (
     DEAL_PREFIX,
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_PREFIX,
+    HOUSE_REPLACEMENT_RESERVE,
     HOUSE_YEAR1_INSURANCE_FLOOR,
     MARKET_PREFIX,
     MODES,
@@ -123,6 +126,8 @@ class _Choice:
     confidence: Optional[str] = None
     # Forces review_required on (True) beyond the source rule; None follows the source.
     review: Optional[bool] = None
+    # Display-only facts recorded on the entry (e.g. how the exit cap was anchored).
+    detail: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -165,6 +170,12 @@ class _Spec:
     adr_rank: Optional[Callable[[str], Optional[int]]] = None
     cohort: bool = False
     value_add_only: bool = False
+    # Disclosed, never written: only an analyst value reaches the canonical.
+    informational: bool = False
+    # The default moves with the purchase price (the entry-anchored exit cap):
+    # resolved after every other key, and a value that moved with the price is
+    # not an analyst edit.
+    price_linked: bool = False
 
 
 # ── small helpers ────────────────────────────────────────────────────────
@@ -435,18 +446,15 @@ def _write_insurance(ctx: _Context, value: Any, _cohorts: Optional[dict[str, flo
 
 
 def _r_and_m_rows(canonical: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    return [
-        row
-        for row in canonical.get("opex_table") or []
-        if opex_bucket_for_policy(str(row.get("category_name", ""))) == "repairs_maintenance"
-    ]
+    """The lines on the R&M floor basis: R&M and turnover / make-ready, never payroll."""
+    return r_and_m_floor_rows(canonical)
 
 
 def _read_r_and_m(ctx: _Context) -> _Current:
     if not _r_and_m_rows(ctx.canonical):
         return _Current(ABSENT)
     try:
-        return _Current(PRESENT, _per_unit(ctx, sum_opex_bucket(ctx.canonical, "repairs_maintenance")))
+        return _Current(PRESENT, _per_unit(ctx, sum_r_and_m_floor_basis(ctx.canonical)))
     except ValueError as exc:
         ctx.notes.setdefault("r_and_m_per_unit", []).append(str(exc))
         return _Current(PRESENT, None)
@@ -479,17 +487,11 @@ def _prior_entry(ctx: _Context, key: str) -> Optional[Mapping[str, Any]]:
     return entry if isinstance(entry, Mapping) else None
 
 
-def _house_reserve(ctx: _Context) -> Optional[Decimal]:
-    if ctx.bucket is None:
-        return None
-    return house.default_replacement_reserve_per_unit(ctx.year_built, strategy=ctx.strategy)
-
-
 def _read_reserves(ctx: _Context) -> _Current:
     rows = [row for row in ctx.canonical.get("replacement_reserves") or [] if isinstance(row, Mapping)]
     if not rows:
-        # No reserves: the resolver fills the house vintage reserve when it has one.
-        fillable = _house_reserve(ctx) is not None and ctx.units and len(ctx.start) == 7 and len(ctx.end) == 7
+        # No reserves: the resolver fills the house lender-style reserve.
+        fillable = ctx.units and len(ctx.start) == 7 and len(ctx.end) == 7
         return _Current(PLACEHOLDER if fillable else ABSENT)
     first = sorted(rows, key=lambda r: str(r.get("start_period", "")))[0]
     if first.get("annual_amount") is None:
@@ -507,6 +509,45 @@ def _write_reserves(ctx: _Context, value: Any, _cohorts: Optional[dict[str, floa
             "annual_amount": float(Decimal(str(value)) * Decimal(str(ctx.units))),
         }
     ]
+    return True
+
+
+# The capex_schedule row an analyst's economic CapEx opt-in writes (ADR 0003 §3).
+ECONOMIC_CAPEX_CATEGORY = "Economic CapEx (analyst opt-in)"
+
+
+def _economic_capex_rows(ctx: _Context) -> list[dict[str, Any]]:
+    return [
+        row for row in ctx.canonical.get("capex_schedule") or []
+        if isinstance(row, dict) and row.get("category") == ECONOMIC_CAPEX_CATEGORY
+    ]
+
+
+def _read_economic_capex(ctx: _Context) -> _Current:
+    """The analyst's opt-in row, else ABSENT: the house value is never written."""
+    rows = _economic_capex_rows(ctx)
+    if not rows:
+        return _Current(ABSENT)
+    return _Current(PRESENT, _num(rows[0].get("amount_per_unit")))
+
+
+def _write_economic_capex(ctx: _Context, value: Any, _cohorts: Optional[dict[str, float]]) -> bool:
+    """Write the opt-in row (an annual reserve-type capex line), or remove it for ``None``."""
+    schedule = [
+        row for row in ctx.canonical.get("capex_schedule") or []
+        if not (isinstance(row, dict) and row.get("category") == ECONOMIC_CAPEX_CATEGORY)
+    ]
+    if _num(value) is not None:
+        schedule.append({
+            "category": ECONOMIC_CAPEX_CATEGORY,
+            "capex_type": "reserve",
+            "amount_per_unit": float(value),
+            "timing": "annual",
+        })
+    if schedule:
+        ctx.canonical["capex_schedule"] = schedule
+    else:
+        ctx.canonical.pop("capex_schedule", None)
     return True
 
 
@@ -727,7 +768,9 @@ def _opex_default(field_name: str, label: str, absent_basis: str):
 
 def _r_and_m_candidates(ctx: _Context) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    evidence = _opex_evidence(ctx, "repairs_maintenance_annual", "repairs & maintenance bucket")
+    evidence = _opex_evidence(
+        ctx, "repairs_maintenance_annual", "R&M including turnover / make-ready (payroll excluded)"
+    )
     if evidence:
         out.append(evidence)
     house_candidate = _house_vintage(ctx, house.default_r_and_m_per_unit, "R&M per unit", "usd_per_unit_year")
@@ -738,26 +781,52 @@ def _r_and_m_candidates(ctx: _Context) -> list[dict[str, Any]]:
 
 
 def _reserve_candidates(ctx: _Context) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    house_candidate = _house_vintage(
-        ctx, house.default_replacement_reserve_per_unit, "economic CapEx reserve per unit", "usd_per_unit_year"
-    )
-    if house_candidate:
-        out.append(house_candidate)
-    out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No replacement_reserves: the engine reserves nothing."))
-    return out
+    reserve = house.default_replacement_reserve_per_unit()
+    return [
+        _candidate(
+            HOUSE_REPLACEMENT_RESERVE,
+            float(reserve),
+            f"House lender-style replacement reserve {_fmt(reserve, 'usd')}/unit/year below NOI "
+            "(HOUSE_REPLACEMENT_RESERVE_PER_UNIT, the same for every vintage). Economic CapEx is "
+            "disclosed separately as economic_capex_per_unit.",
+        ),
+        _candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No replacement_reserves: the engine reserves nothing."),
+    ]
 
 
 def _reserve_default(ctx: _Context, state: str) -> _Choice:
-    candidate = next((c for c in _reserve_candidates(ctx) if c["source"].startswith(HOUSE_PREFIX)), None)
-    if candidate is not None:
-        return _choice_from(
-            candidate,
-            ctx,
-            candidate["basis"] + " Written as replacement_reserves = reserve per unit x units over the "
-            "analysis window when the canonical carries none.",
-        )
-    return _fallback(0.0, "Year built unknown, so no house vintage reserve is available: the engine reserves nothing.")
+    candidate = _reserve_candidates(ctx)[0]
+    return _choice_from(
+        candidate,
+        ctx,
+        candidate["basis"] + " Written as replacement_reserves = reserve per unit x units over the "
+        "analysis window when the canonical carries none.",
+    )
+
+
+_ECONOMIC_CAPEX_NOTE = (
+    " Informational: sustaining capital, not the replacement reserve. It does not reach the cash flows "
+    "unless the analyst opts in (an override of this key writes an annual capex_schedule line; a capex "
+    "budget or renovation program can carry it instead). Review it against the PCA / capex plan."
+)
+
+
+def _economic_capex_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    house_candidate = _house_vintage(
+        ctx, house.default_economic_capex_per_unit, "economic CapEx per unit", "usd_per_unit_year"
+    )
+    return [house_candidate] if house_candidate else []
+
+
+def _economic_capex_default(ctx: _Context, state: str) -> _Choice:
+    candidates = _economic_capex_candidates(ctx)
+    if candidates:
+        choice = _choice_from(candidates[0], ctx, candidates[0]["basis"] + _ECONOMIC_CAPEX_NOTE)
+        choice.review = True
+        return choice
+    return _fallback(
+        None, "Year built unknown, so no house vintage economic CapEx is available." + _ECONOMIC_CAPEX_NOTE
+    )
 
 
 def _turn_candidates(ctx: _Context) -> list[dict[str, Any]]:
@@ -900,44 +969,83 @@ def t12_egi(canonical: Mapping[str, Any]) -> Optional[float]:
     return _t12_total(gate, "income") if isinstance(gate, Mapping) else None
 
 
-def _going_in_cap(ctx: _Context) -> Optional[tuple[float, str]]:
-    """Going-in cap rate on trailing NOI: (T12 total income - T12 total opex) / purchase price."""
-    purchase = ctx.canonical.get("purchase_assumptions")
-    price = _num(purchase.get("purchase_price")) if isinstance(purchase, Mapping) else None
+# ── exit cap rate (ADR 0003 §3): entry-anchored at the modeled price ────
+#
+# Precedence: analyst > entry-anchored (going-in cap at the modeled price +
+# HOUSE_EXIT_CAP_SPREAD, with the rare steal exception) > the exit-year market
+# cap rate (only when there is no price to anchor to) > the offering
+# memorandum's exit cap (likewise only without an anchor or a market rate) >
+# engine default. Every source is recorded as a candidate. The market
+# candidates and the steal test live in curves.py; the anchor here.
+
+
+def _t12_noi(ctx: _Context) -> Optional[Decimal]:
+    """Trailing NOI (T12 total income - T12 total opex) from the ingest gate, else None."""
     gate = (ctx.canonical.get("metadata") or {}).get("ingest_gate")
-    if not price or not isinstance(gate, Mapping):
+    if not isinstance(gate, Mapping):
         return None
     income, opex = _t12_total(gate, "income"), _t12_total(gate, "opex")
     if income is None or opex is None:
         return None
-    rate = (income - opex) / price
-    if not 0 < rate <= float(house.HOUSE_EXIT_CAP_GOING_IN_MAX):
-        return None
-    basis = f"going-in cap {rate:.2%} = T12 NOI ${income - opex:,.2f} / purchase price ${price:,.2f}"
-    return rate, basis
+    return Decimal(str(income)) - Decimal(str(opex))
 
 
-def _house_exit_cap(ctx: _Context) -> Optional[dict[str, Any]]:
-    going_in = _going_in_cap(ctx)
-    if going_in is None:
+def _purchase_price(ctx: _Context) -> Optional[float]:
+    purchase = ctx.canonical.get("purchase_assumptions")
+    return _num(purchase.get("purchase_price")) if isinstance(purchase, Mapping) else None
+
+
+def entry_anchor(ctx: _Context, market: Optional[Mapping[str, Any]] = None) -> Optional[dict[str, Any]]:
+    """The entry-anchored exit cap record at the canonical's price, or None.
+
+    Year-1 NOI comes from the engine at that price; when the engine cannot run
+    the canonical (an incomplete or hand-authored one), trailing T12 NOI is
+    the anchor instead and the record says so. ``market`` is the exit-year
+    market cap rate reference used only for the steal test.
+    """
+    price = _purchase_price(ctx)
+    if not price:
         return None
-    rate, going_in_basis = going_in
-    spread = float(house.HOUSE_EXIT_CAP_SPREAD)
-    value = round(rate + spread, 6)
+    noi, noi_basis = _exit_cap_module().year1_noi(ctx.canonical, price), "year-1 NOI"
+    if noi is None:
+        noi, noi_basis = _t12_noi(ctx), "trailing T12 NOI (the engine could not compute year-1 NOI)"
+    record = _exit_cap_module().anchored_exit_cap(
+        noi, price, market_cap_rate=(market or {}).get("rate"),
+    )
+    if record is None:
+        return None
+    record["noi_basis"] = noi_basis
+    record["market"] = deepcopy(dict(market)) if market else None
+    return record
+
+
+def _exit_cap_module():
+    from engine.assumptions import exit_cap
+
+    return exit_cap
+
+
+def _house_exit_cap(ctx: _Context, market: Optional[Mapping[str, Any]] = None) -> Optional[dict[str, Any]]:
+    record = entry_anchor(ctx, market)
+    if record is None:
+        return None
     return _candidate(
         HOUSE_EXIT_CAP_SPREAD,
-        value,
-        f"No analyst or market exit cap rate: {going_in_basis}, plus the house spread "
-        f"{spread * 10_000:g} bps (HOUSE_EXIT_CAP_SPREAD) = {value:.2%}.",
+        record["exit_cap_rate"],
+        _exit_cap_module().describe(record, noi_basis=record["noi_basis"]),
     )
 
 
-def _exit_cap_candidates(ctx: _Context) -> list[dict[str, Any]]:
+def _exit_cap_candidates(ctx: _Context, market: Optional[Mapping[str, Any]] = None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     om_cap = _num((ctx.evidence.get("om") or {}).get("exit_cap_rate"))
     if om_cap is not None:
-        out.append(_candidate(SOURCE_DEAL_OM, om_cap, "Exit cap rate extracted from the offering memorandum."))
-    spread = _house_exit_cap(ctx)
+        out.append(_candidate(
+            SOURCE_DEAL_OM, om_cap,
+            "Exit cap rate extracted from the offering memorandum (a candidate only: the house exit "
+            "cap tracks the entry cap).",
+        ))
+    spread = _house_exit_cap(ctx, market)
     if spread is not None:
         out.append(spread)
     out.append(
@@ -950,19 +1058,40 @@ def _exit_cap_candidates(ctx: _Context) -> list[dict[str, Any]]:
     return out
 
 
+def _anchored_exit_cap_choice(ctx: _Context, market: Optional[Mapping[str, Any]] = None) -> Optional[_Choice]:
+    record = entry_anchor(ctx, market)
+    if record is None:
+        return None
+    return _Choice(
+        HOUSE_EXIT_CAP_SPREAD,
+        record["exit_cap_rate"],
+        _exit_cap_module().describe(record, noi_basis=record["noi_basis"]),
+        confidence=_confidence_for(HOUSE_EXIT_CAP_SPREAD, ctx),
+        review=True,
+        detail=record,
+    )
+
+
 def _exit_cap_default(ctx: _Context, state: str) -> _Choice:
     if state == NO_SECTION:
         return _not_modeled("exit_assumptions")
-    candidates = _exit_cap_candidates(ctx)
-    for source in (SOURCE_DEAL_OM, HOUSE_EXIT_CAP_SPREAD):
-        match = next((c for c in candidates if c["source"] == source), None)
-        if match:
-            return _choice_from(match, ctx)
+    anchored = _anchored_exit_cap_choice(ctx)
+    if anchored is not None:
+        return anchored
+    om_cap = _num((ctx.evidence.get("om") or {}).get("exit_cap_rate"))
+    if om_cap is not None:
+        # No price to anchor to and no market rate (curves.py checks the market first).
+        return _Choice(
+            SOURCE_DEAL_OM, om_cap,
+            "No usable going-in cap rate to anchor to (no purchase price, or year-1 NOI / price outside the "
+            "HOUSE_EXIT_CAP_GOING_IN_MAX guard) and no market cap rate: the offering memorandum's exit cap.",
+            confidence=_confidence_for(SOURCE_DEAL_OM, ctx),
+        )
     if state == ABSENT:
         return _fallback(
             ENGINE_DEFAULT_EXIT_CAP,
-            "exit_assumptions has no exit_cap_rate and no going-in cap rate is available (no T12 "
-            "reconciliation or purchase price): engine default applies.",
+            "exit_assumptions has no exit_cap_rate and no usable going-in cap rate (no purchase price, "
+            "or year-1 NOI / price outside the HOUSE_EXIT_CAP_GOING_IN_MAX guard): engine default applies.",
         )
     return _not_modeled("exit cap rate")
 
@@ -1166,7 +1295,7 @@ def _base_specs() -> tuple[_Spec, ...]:
             write=_write_r_and_m,
             default=_opex_default(
                 "repairs_maintenance_annual",
-                "repairs & maintenance bucket",
+                "R&M including turnover / make-ready (payroll excluded)",
                 "No R&M opex lines in the canonical: the engine carries none.",
             ),
             gather=_r_and_m_candidates,
@@ -1180,6 +1309,16 @@ def _base_specs() -> tuple[_Spec, ...]:
             default=_reserve_default,
             gather=_reserve_candidates,
             patch_paths=(("replacement_reserves",),),
+        ),
+        _Spec(
+            key="economic_capex_per_unit",
+            unit="usd_per_unit_year",
+            read=_read_economic_capex,
+            write=_write_economic_capex,
+            default=_economic_capex_default,
+            gather=_economic_capex_candidates,
+            patch_paths=(("capex_schedule",),),
+            informational=True,
         ),
         _Spec(
             key="turn_cost_per_unit",
@@ -1212,6 +1351,7 @@ def _base_specs() -> tuple[_Spec, ...]:
             market_metrics=("market_cap_rate",),
             patch_paths=(("exit_assumptions", "exit_cap_rate"),),
             adr_rank=_market_first_rank,
+            price_linked=True,
         ),
         _Spec(
             key="sale_cost_percent",
@@ -1499,8 +1639,11 @@ def _resolve_key(
     current = spec.read(ctx)
     default = spec.default(ctx, current.state)
     candidates = spec.gather(ctx) + _market_candidates(ctx, spec)
-    # Slice 4 hook: re-resolving without market data keeps a market-sourced default.
-    default, candidates = _curves().carry_market_default(ctx, current, prior, default, candidates)
+    if not spec.price_linked:
+        # Slice 4 hook: re-resolving without market data keeps a market-sourced default.
+        # A price-linked default is always re-measured (its market reference is kept
+        # on the entry's detail instead).
+        default, candidates = _curves().carry_market_default(ctx, current, prior, default, candidates)
 
     override: Optional[dict[str, Any]] = None
     cleared = is_clear(explicit)
@@ -1509,14 +1652,26 @@ def _resolve_key(
     elif explicit is not None:
         override = deepcopy(explicit)
     elif prior is not None:
-        if current.state == PRESENT and not _same_current(current, prior):
+        edited = current.state == PRESENT and not _same_current(current, prior)
+        if (
+            edited and spec.price_linked and not prior.get("override")
+            and _same(current.value, default.value)
+        ):
+            # The value moved with the price (e.g. backsolve re-anchored the exit
+            # cap at the solved price): it is still the resolver default.
+            edited = False
+        if edited:
             override = {"value": current.value, "note": _NOTE_EDITED}
             if current.cohort_overrides:
                 override["cohort_overrides"] = dict(current.cohort_overrides)
         elif prior.get("override"):
             override = deepcopy(dict(prior["override"]))
     elif current.state == PRESENT:
-        is_default = ctx.ingested and _same(current.value, default.value) and not current.cohort_overrides
+        # An informational key's default is never written, so a value present is the analyst's.
+        is_default = (
+            ctx.ingested and not spec.informational
+            and _same(current.value, default.value) and not current.cohort_overrides
+        )
         if not is_default:
             override = {"value": current.value, "note": _NOTE_PRESENT}
             if current.cohort_overrides:
@@ -1552,7 +1707,14 @@ def _resolve_key(
             )
 
     write_needed = False
-    if current.state == PLACEHOLDER:
+    if spec.informational:
+        # Only an analyst value is written. Without one, an opt-in left in the
+        # canonical (a cleared override) is removed.
+        if override is not None:
+            write_needed = current.state != PRESENT or not _same(current.value, value)
+        elif current.state == PRESENT and not spec.write(ctx, None, None):
+            notes.append("Not written: the canonical has no field the engine reads for this value.")
+    elif current.state == PLACEHOLDER:
         write_needed = True
     elif current.state == NO_FIELD:
         write_needed = False
@@ -1582,6 +1744,7 @@ def _resolve_key(
         override=_jsonable(override),
         review_required=requires_review(source) or (override is None and default.review is True),
         cohort_overrides=_jsonable(cohorts),
+        detail=_jsonable(default.detail) if default.detail else None,
     )
 
 
@@ -1698,10 +1861,19 @@ def resolve_assumptions(
     explicit = {**opex_slice.prepare_opex_table(ctx, explicit), **explicit}
     entries: dict[str, Any] = {}
     for spec in specs:
+        if spec.price_linked:
+            continue
         entry = _resolve_key(spec, ctx, prior_entries.get(spec.key), explicit.get(spec.key))
         entries[spec.key] = entry.to_dict()
     # ── ADR 0003 slice 5 hook: opex.<slug>.base / opex.<slug>.growth per opex line ──
-    entries.update(opex_slice.resolve_opex_entries(ctx, prior_entries, explicit))
+    opex_entries = opex_slice.resolve_opex_entries(ctx, prior_entries, explicit)
+    # Price-linked keys (the entry-anchored exit cap) read year-1 NOI, so they
+    # resolve after every value that feeds it has been written.
+    for spec in specs:
+        if spec.price_linked:
+            entries[spec.key] = _resolve_key(spec, ctx, prior_entries.get(spec.key), explicit.get(spec.key)).to_dict()
+    entries = {spec.key: entries[spec.key] for spec in specs}
+    entries.update(opex_entries)
 
     # ── ADR 0003 slice 6 hook: guardrail modes (engine/assumptions/guardrails.py) ──
     entries = _apply_guardrail_mode(ctx, specs, entries, prior_entries, guardrail_context)

@@ -150,10 +150,11 @@
       "loss_to_lease": "house:vintage_1990s",
       "concessions": "deal:t12",
       "collection_loss": "deal:t12",
-      "exit_cap_rate": "market:synthetic",
+      "exit_cap_rate": "house:exit_cap_spread",
       "insurance_per_unit": "deal:t12",
       "r_and_m_per_unit": "deal:t12",
-      "replacement_reserve_per_unit": "house:vintage_1990s",
+      "replacement_reserve_per_unit": "house:replacement_reserve",
+      "economic_capex_per_unit": "house:vintage_1990s",
       "purchase_closing_cost_pct": "house:backsolve_policy",
       "sale_cost_percent": "analyst"
     },
@@ -205,20 +206,20 @@
         0.01
       ],
       "exit_cap_rate": [
-        0.057,
-        0.058
+        0.062,
+        0.0626
       ],
       "insurance_per_unit": [
         600,
         700
       ],
       "r_and_m_per_unit": [
-        700,
-        760
+        990,
+        1050
       ],
       "replacement_reserve_per_unit": [
-        750,
-        750
+        250,
+        250
       ]
     },
     "opex_growth": {

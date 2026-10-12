@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Slices 1-8 are implemented, and so are the four product decisions
-that followed them; see "Implementation status" at the end.
+Accepted. Slices 1-8 are implemented, and so are the product decisions that
+followed them; see "Implementation status" at the end.
 
 ## Context
 
@@ -117,7 +117,8 @@ key:
 | `house:vintage_<bucket>` | `VINTAGE_FRAMEWORK_2026` for the year-built bucket (e.g. `house:vintage_1980s`) |
 | `house:long_run_rent_growth` | The house long-run rent growth after the forecast horizon |
 | `house:default_collection_loss` | The house default collection loss when the vintage is unknown |
-| `house:exit_cap_spread` | Going-in cap rate plus the house exit spread |
+| `house:exit_cap_spread` | The entry-anchored exit cap: the going-in cap rate at the modeled price plus the house exit spread (§3), with the rare steal adjustment |
+| `house:replacement_reserve` | `HOUSE_REPLACEMENT_RESERVE_PER_UNIT`: the lender-style $250/unit annual replacement reserve below NOI |
 | `house:opex_growth_table` | The house per-category opex growth table (also the 3% real estate tax growth) |
 | `house:property_tax_module` | `engine/property_tax.py`: the real estate tax line reassessed at the purchase price |
 | `house:management_fee_pct_egr` | The house management fee as a percent of EGR |
@@ -180,8 +181,10 @@ How each key combines sources:
 | `other_income` | T12 run-rate programs (UPL-42), else the house per-unit default. |
 | `opex.<category>.base` | T12 line (normalized to annual dollars), else the house per-unit default for the category. |
 | `opex.<category>.growth` | House per-category growth table (§6), unless a provider supplies a market trend. |
-| `insurance_per_unit`, `r_and_m_per_unit`, `replacement_reserve_per_unit`, `turn_cost_per_unit` | Deal evidence (annualized), else house vintage defaults. Floors are guardrails (§5). |
-| `exit_cap_rate` | Analyst, else submarket market cap rate (forecast row at exit if present), else MSA, else the going-in cap rate plus the house spread. |
+| `insurance_per_unit`, `r_and_m_per_unit`, `turn_cost_per_unit` | Deal evidence (annualized), else house vintage defaults. Floors are guardrails (§5). `r_and_m_per_unit` is on the R&M floor basis: repairs & maintenance plus turnover / make-ready lines, never payroll (§5). |
+| `replacement_reserve_per_unit` | Analyst, else `HOUSE_REPLACEMENT_RESERVE_PER_UNIT` ($250/unit/year, `house:replacement_reserve`, review_required): the lender-style annual reserve below NOI, the same for every vintage. It is also the pricing floor for reserves (§5). |
+| `economic_capex_per_unit` | Disclosed, informational: the vintage `economic_capex_low` (cashflow) or the band midpoint (value_add), `house:vintage_<bucket>`, review_required. It is sustaining capital, not a reserve, and does not reach the cash flows unless the analyst opts in: an override writes an annual `capex_schedule` line ("Economic CapEx (analyst opt-in)"), and clearing it removes the line; a capex budget or renovation program can carry it instead. A pre-2000 vintage with no capex budget, renovation program or capex line gets a `CAPEX_BUDGET_MISSING` validator WARNING pointing to the PCA / capex review. |
+| `exit_cap_rate` | Exit caps track entry caps. Analyst, else entry-anchored: the going-in cap rate at the price being modeled (engine year-1 NOI / purchase price; trailing T12 NOI only when the engine cannot run the canonical) plus `HOUSE_EXIT_CAP_SPREAD` (50 bps), `house:exit_cap_spread`, review_required. It is re-measured whenever the price changes: backsolve recomputes it at every candidate price unless the analyst or an explicit policy set it. Steal exception, which is rare: only when a submarket or MSA `market_cap_rate` (the exit-year value) is available and the going-in cap exceeds it by more than `HOUSE_STEAL_THRESHOLD` (150 bps) does the exit compress toward market + spread, never more than `HOUSE_MAX_EXIT_COMPRESSION` (100 bps) below going-in + spread; the basis says "Steal: going-in X vs market Y". Without market data there is never compression, and a going-in cap at or below market still exits at entry + spread. `HOUSE_EXIT_CAP_GOING_IN_MAX` (25%) guards the going-in cap. Only when there is no usable price to anchor to: the market cap rate, else the OM's exit cap, else the engine default. Every source is a candidate, and the entry's `detail` records the calculation and the market reference (`detail.market`), so a re-resolution without market data applies the same steal test. |
 | `value_add.renovation_premium` | Comp evidence (renovated vs classic effective rent) if present. Otherwise it is required, and the run is flagged when it is missing. |
 
 ### 4. Curves, not scalars; granularity
@@ -247,8 +250,8 @@ reuses the `underwriting_policy` vintage functions:
 | `collection_loss` | max(vintage floor, broker bad debt) | each `collection_loss_curve` segment (no curve counts as 0) |
 | `concessions` | max(vintage year-1 floor, broker concessions) | each `concession_schedule` row that applies in analysis year 1 (`free_months` read as months / 12); no year-1 row counts as 0% |
 | `insurance_per_unit` | $600/unit (`DEFAULT_YEAR1_INSURANCE_PER_UNIT`); waived by an explicit analyst insurance override, and the waiver is disclosed | the matched insurance line, annualized |
-| `r_and_m_per_unit` | vintage R&M per unit | the R&M bucket, annualized; a shortfall is one top-up line sized from the other R&M lines (an existing top-up line never counts toward the floor) |
-| `replacement_reserve_per_unit` | vintage reserve per unit | each `replacement_reserves` segment (none counts as 0) |
+| `r_and_m_per_unit` | vintage R&M per unit (the band excludes payroll) | R&M including turnover: the repairs & maintenance and turnover / make-ready lines, annualized (`underwriting_policy.R_AND_M_FLOOR_BASIS`, `canonical_ops.in_r_and_m_floor_basis`). Payroll is never counted, even on a line labeled as repairs, so a T12 that books turns separately is not topped up for R&M it carries. A shortfall is one top-up line sized from the other R&M lines (an existing top-up line never counts toward the floor); the guardrail record's basis names the floor basis |
+| `replacement_reserve_per_unit` | `HOUSE_REPLACEMENT_RESERVE_PER_UNIT` ($250/unit, `house:replacement_reserve`, any vintage); never the vintage economic CapEx | each `replacement_reserves` segment (none counts as 0) |
 
 Broker notes and trailing actuals are anchors a caller passes in `context`;
 they can only raise a floor. `apply_guardrails(canonical, *, mode, profile,
@@ -289,7 +292,7 @@ analyst's curves and applies only the shared floors (decision (a), below):
   `free_months` row is compared as months / 12 and keeps its type (a raised
   row carries the floor's months equivalent). With no year-1 row, one year-1
   `pct_rent` row at the floor is added.
-- Reserves: `max(analyst, vintage reserve)` per segment, never forced down.
+- Reserves: `max(analyst, house reserve)` per segment, never forced down.
 - Vacancy, insurance and R&M are as described in the table above.
 
 Its solved canonical is re-resolved in `mode="pricing"` so `assumptions`
@@ -335,8 +338,9 @@ else the canonical's value when its entry is `analyst`-sourced (an ingest
 `--sale-cost`, an override, a resolved hand-authored value), else
 `engine/backsolve_policy.DEFAULTS`. An analyst value is priced as given and
 keeps its `analyst` label; only explicit policy values and defaults are
-labeled `house:backsolve_policy`. The exit cap already followed this rule
-(the policy's, else the canonical's). A canonical with no `assumptions`
+labeled `house:backsolve_policy`. The exit cap is the policy's, else the
+analyst's, else entry-anchored and re-measured at every candidate price (§3,
+decision (e)). A canonical with no `assumptions`
 section records no provenance, so the defaults apply to it as before.
 `effective_assumptions.policy_value_sources` discloses who set each value.
 Earlier, the policy defaults replaced an analyst value (an ingest
@@ -602,6 +606,23 @@ decisions that were open with the product owner are decided and implemented:
    consistent with its own floor. A market stabilized vacancy is kept as
    resolved; the property-level vacancy anchor stays a guardrail (underwrite
    warns, pricing raises each segment below it).
+
+Three later policy decisions (UPL-85, UPL-48):
+
+5. **(e) Exit caps track entry caps.** The house exit cap is the going-in cap
+   at the price being modeled plus 50 bps, re-measured at every backsolve
+   price; only a rare, flagged steal (more than 150 bps over a known market cap
+   rate) compresses it, by at most 100 bps (§3). Previously the going-in cap
+   was measured once at the asking price, so a solved price far below the ask
+   exited at a much lower cap than it entered at.
+6. **(f) Replacement reserve vs economic CapEx.** The reserve is the house
+   lender-style $250/unit below NOI (resolver default and pricing floor); the
+   vintage economic CapEx is its own informational key that reaches the cash
+   flows only when the analyst opts in (§3). Previously the reserve and its
+   floor were the vintage economic CapEx (e.g. $1,000/unit for the 1980s).
+7. **(g) R&M floor basis.** The vintage R&M floor is compared with R&M plus
+   turnover / make-ready, never payroll (§5). Previously only the R&M bucket
+   was compared, so separately booked turns were topped up again.
 
 ## Consequences
 

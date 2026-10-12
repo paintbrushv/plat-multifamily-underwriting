@@ -81,7 +81,8 @@
       "exit_cap_rate": "analyst",
       "insurance_per_unit": "deal:t12",
       "r_and_m_per_unit": "deal:t12",
-      "replacement_reserve_per_unit": "house:vintage_2010s",
+      "replacement_reserve_per_unit": "house:replacement_reserve",
+      "economic_capex_per_unit": "house:vintage_2010s",
       "purchase_closing_cost_pct": "house:backsolve_policy",
       "sale_cost_percent": "analyst"
     },
@@ -141,12 +142,12 @@
         580
       ],
       "r_and_m_per_unit": [
-        500,
-        600
+        750,
+        850
       ],
       "replacement_reserve_per_unit": [
-        300,
-        300
+        250,
+        250
       ]
     },
     "opex_growth": {

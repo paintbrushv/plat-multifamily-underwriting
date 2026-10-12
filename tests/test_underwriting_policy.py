@@ -6,6 +6,8 @@ from engine.underwriting_policy import (
     default_other_income_per_unit_month,
     default_property_tax_reassessment_ratio,
     default_physical_vacancy_rate,
+    HOUSE_REPLACEMENT_RESERVE_PER_UNIT,
+    default_economic_capex_per_unit,
     default_r_and_m_per_unit,
     default_replacement_reserve_per_unit,
     default_turn_capex_per_unit,
@@ -22,17 +24,29 @@ from engine.underwriting_policy import (
 def test_vintage_bucket_and_cashflow_defaults_for_1980s():
     assert vintage_bucket(1984) == "1980s"
     assert default_r_and_m_per_unit(1984) == Decimal("900")
-    assert default_replacement_reserve_per_unit(1984) == Decimal("1000")
+    # Economic CapEx (sustaining capital) is the vintage band; the reserve is not.
+    assert default_economic_capex_per_unit(1984) == Decimal("1000")
     assert default_turn_capex_per_unit(1984) == Decimal("1800")
 
 
 def test_value_add_defaults_use_more_conservative_midpoints():
     assert default_r_and_m_per_unit(1984, strategy="value_add") == Decimal("1300")
-    assert default_replacement_reserve_per_unit(1984, strategy="value_add") == Decimal("1750")
+    assert default_economic_capex_per_unit(1984, strategy="value_add") == Decimal("1750")
     assert default_turn_capex_per_unit(1984, strategy="value_add") == Decimal("5750")
     assert default_physical_vacancy_rate(1984, strategy="value_add") == Decimal("0.060")
     assert default_collection_loss_rate(1984, strategy="value_add") == Decimal("0.0100")
     assert default_year1_concessions_rate(1984, strategy="value_add") == Decimal("0.0100")
+
+
+def test_replacement_reserve_is_the_lender_style_house_constant_for_every_vintage():
+    """The reserve below NOI is $250/door, never the vintage economic CapEx."""
+    assert HOUSE_REPLACEMENT_RESERVE_PER_UNIT == Decimal("250")
+    for year in (None, 1965, 1984, 1995, 2015):
+        for strategy in ("cashflow", "value_add"):
+            assert default_replacement_reserve_per_unit(year, strategy=strategy) == Decimal("250")
+    assert default_replacement_reserve_per_unit(1984, deferred=True) == Decimal("250")
+    assert default_economic_capex_per_unit(1984, deferred=True) == Decimal("2500")
+    assert default_economic_capex_per_unit(None) is None
 
 
 def test_revenue_defaults_for_1980s_cashflow():
@@ -91,6 +105,8 @@ def test_operating_profile_summary_reflects_house_policy():
     )
     assert profile["vintage_bucket"] == "1980s"
     assert profile["r_and_m_per_unit"] == 900.0
+    assert profile["replacement_reserve_per_unit"] == 250.0
+    assert profile["economic_capex_per_unit"] == 1000.0
     assert profile["economic_capex_reserve_per_unit"] == 1000.0
     assert profile["year1_insurance_per_unit"] == 950.0
     assert profile["insurance_claim_review_required"] is True

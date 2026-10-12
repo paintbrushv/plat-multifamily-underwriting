@@ -26,6 +26,8 @@ HOUSE_BACKSOLVE_POLICY = "house:backsolve_policy"
 HOUSE_PRICING_NORMALIZATION = "house:pricing_normalization"
 HOUSE_YEAR1_INSURANCE_FLOOR = "house:year1_insurance_floor"
 HOUSE_EXIT_CAP_SPREAD = "house:exit_cap_spread"
+# HOUSE_REPLACEMENT_RESERVE_PER_UNIT: the lender-style reserve below NOI.
+HOUSE_REPLACEMENT_RESERVE = "house:replacement_reserve"
 
 
 def house_vintage_source(bucket: str) -> str:
