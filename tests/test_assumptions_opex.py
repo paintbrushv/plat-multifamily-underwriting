@@ -379,8 +379,12 @@ def test_missing_core_lines_are_added_from_house_defaults(tmp_path):
     assert resolve_assumptions(deal) == deal
 
 
+_TURNOVER_LABELS = {"Turnover - Paint", "Turnover - Carpet Cleaning", "Turnover - Cleaning"}
+
+
 def test_missing_r_and_m_uses_the_vintage_framework(tmp_path):
-    t12 = _t12_without(tmp_path, _CORE_LABELS | {"Water Extraction"})
+    # No R&M and no turnover line: the T12 carries nothing on the R&M floor basis.
+    t12 = _t12_without(tmp_path, _CORE_LABELS | {"Water Extraction"} | _TURNOVER_LABELS)
     deal = _ingest(t12=t12, year_built=1984)
     row = _row(deal, "Repairs & Maintenance")
     per_unit = float(house.default_r_and_m_per_unit(1984, strategy="cashflow"))
@@ -394,6 +398,18 @@ def test_missing_r_and_m_uses_the_vintage_framework(tmp_path):
 
     unknown_vintage = _ingest(t12=t12)
     assert not [r for r in unknown_vintage["opex_table"] if r["category_name"] == "Repairs & Maintenance"]
+
+
+def test_turnover_lines_count_as_r_and_m_so_no_house_line_is_added(tmp_path):
+    """A T12 that books turns on their own lines carries R&M on the floor basis."""
+    t12 = _t12_without(tmp_path, _CORE_LABELS | {"Water Extraction"})
+    deal = _ingest(t12=t12, year_built=1984)
+    assert not [r for r in deal["opex_table"] if r["category_name"] == "Repairs & Maintenance"]
+    turnover = _row(deal, "Turnover / Make-Ready")
+    entry = _entries(deal)["r_and_m_per_unit"]
+    assert entry["source"] == "deal:t12"
+    assert entry["value"] == pytest.approx(turnover["base_value"] / UNITS)
+    assert "guardrail" not in entry  # $8,100/unit of turns is above the $900 floor
 
 
 def test_fill_never_double_counts_a_differently_named_line(ingested):

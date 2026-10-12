@@ -26,8 +26,8 @@ from engine.assumptions import DealProfile, resolve_assumptions
 from engine.assumptions.canonical_ops import (
     annual_opex_amount,
     matching_opex_rows,
-    opex_bucket_for_policy,
-    sum_opex_bucket,
+    r_and_m_floor_rows,
+    sum_r_and_m_floor_basis,
 )
 from engine.assumptions.opex import t12_opex_line_evidence
 from engine.assumptions.profile import check_deal_type
@@ -915,11 +915,10 @@ def _record_t12_opex_evidence(deal: dict[str, Any], provenance: Mapping[str, Any
     insurance_rows = matching_opex_rows(deal, "insurance")
     if insurance_rows:
         evidence["insurance_annual"] = float(annual_opex_amount(deal, insurance_rows[0]))
-    if any(
-        opex_bucket_for_policy(str(row.get("category_name", ""))) == "repairs_maintenance"
-        for row in deal.get("opex_table") or []
-    ):
-        evidence["repairs_maintenance_annual"] = float(sum_opex_bucket(deal, "repairs_maintenance"))
+    # R&M on the floor basis: repairs & maintenance plus turnover / make-ready,
+    # never payroll (engine/underwriting_policy.R_AND_M_FLOOR_BASIS).
+    if r_and_m_floor_rows(deal):
+        evidence["repairs_maintenance_annual"] = float(sum_r_and_m_floor_basis(deal))
 
 
 def _resolve_year_built(

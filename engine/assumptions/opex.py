@@ -40,6 +40,7 @@ from engine import underwriting_policy as house
 from engine.assumptions import resolver as _r
 from engine.assumptions.canonical_ops import (
     annual_opex_amount,
+    in_r_and_m_floor_basis,
     matching_opex_rows,
     opex_bucket_for_policy,
     sum_units,
@@ -261,7 +262,9 @@ def _has_core(canonical: Mapping[str, Any], core: str) -> bool:
     if core == CORE_INSURANCE:
         return bool(matching_opex_rows(canonical, "insurance"))
     if core == CORE_REPAIRS_MAINTENANCE:
-        return any(opex_bucket_for_policy(name) == "repairs_maintenance" for name in names)
+        # Turnover / make-ready lines are R&M on the floor basis: a T12 that books
+        # turns separately already carries R&M, so no house R&M line is added.
+        return any(in_r_and_m_floor_basis(name) for name in names)
     return any(
         opex_bucket_for_policy(name) == "management_fees"
         or _matches_category_map(name) == "Property Management Fee"
@@ -466,7 +469,7 @@ def _derived_v1_overrides(
         ("insurance_per_unit", _r._read_insurance,
          lambda row: bool(insurance) and row is insurance[0]),
         ("r_and_m_per_unit", _r._read_r_and_m,
-         lambda row: opex_bucket_for_policy(str(row.get("category_name", ""))) == "repairs_maintenance"),
+         lambda row: in_r_and_m_floor_basis(str(row.get("category_name", "")))),
     )
     for key, read, covers in keys:
         kinds = [(row, kind) for row, kind in touched if covers(row)]

@@ -135,7 +135,8 @@ def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
         ("concessions", "deal:t12", 0.01, ["deal:t12", "house:vintage_1980s", "house:vintage_1980s"]),
         ("insurance_per_unit", "deal:t12", 25_200.0,
          ["deal:t12", "house:year1_insurance_floor", "engine_fallback"]),
-        ("r_and_m_per_unit", "deal:t12", 19_500.0, ["deal:t12", "house:vintage_1980s", "engine_fallback"]),
+        # R&M on the floor basis: $195,000 of R&M plus $81,000 of turnover lines, over 10 units.
+        ("r_and_m_per_unit", "deal:t12", 27_600.0, ["deal:t12", "house:vintage_1980s", "engine_fallback"]),
         # The house lender-style reserve is written when the canonical carries none.
         ("replacement_reserve_per_unit", "house:replacement_reserve", 250.0,
          ["house:replacement_reserve", "engine_fallback"]),
@@ -364,7 +365,8 @@ def test_concession_and_r_and_m_overrides_write_the_fields_the_engine_reads():
         row for row in resolved["opex_table"]
         if row["category_name"] == "Repairs & Maintenance Assumption Adjustment"
     ]
-    assert [row["base_value"] for row in adjustment] == [20_000 * 10 - 195_000.0]
+    # The target is on the floor basis: R&M ($195,000) plus turnover ($81,000).
+    assert [row["base_value"] for row in adjustment] == [20_000 * 10 - 276_000.0]
     assert _entries(resolved)["r_and_m_per_unit"]["value"] == 20_000
     assert validate_schema(resolved) == []
     assert resolve_assumptions(resolved) == resolved

@@ -29,7 +29,7 @@ from engine.modules.util import dec
 from engine.assumptions.canonical_ops import (
     sum_units as _sum_units,
     find_annual_opex as _find_annual_opex,
-    sum_opex_bucket as _sum_opex_bucket,
+    sum_r_and_m_floor_basis,
     matching_opex_rows as _matching_opex_rows,
     upsert_annual_opex_by_match as _upsert_annual_opex_by_match,
     upsert_annual_opex as _upsert_annual_opex,
@@ -1232,7 +1232,8 @@ def _prepare_house_assumptions(
         keys=("replacement_reserve_per_unit",),
     )
 
-    observed_r_and_m = _sum_opex_bucket(prepared, "repairs_maintenance")
+    # R&M including turnover / make-ready, excluding payroll (the floor basis).
+    observed_r_and_m = sum_r_and_m_floor_basis(prepared)
     r_and_m_per_unit = guardrail_profile.r_and_m_per_unit()
     r_and_m_floor_annual = None
     if r_and_m_per_unit is not None and units:

@@ -84,6 +84,27 @@ def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
     return any(needle in text for needle in needles)
 
 
+# Labels that name site payroll (wages, benefits, payroll taxes).
+PAYROLL_KEYWORDS = (
+    "salary",
+    "salaries",
+    "bonus",
+    "payroll",
+    "401k",
+    "worker",
+    "employee health",
+    "benefits",
+    "temporary help",
+    "rent allowance",
+    "training/seminars",
+    "education",
+    "uniform",
+    "recruiting",
+    "placement",
+    "employee screening",
+)
+
+
 def opex_bucket_for_policy(label: str) -> str | None:
     lower = label.lower()
     if "insurance" in lower:
@@ -100,27 +121,7 @@ def opex_bucket_for_policy(label: str) -> str | None:
         return "repairs_maintenance"
     if lower.startswith("t/o ") or "make ready" in lower or "turnover" in lower:
         return "make_ready"
-    if _contains_any(
-        lower,
-        (
-            "salary",
-            "salaries",
-            "bonus",
-            "payroll",
-            "401k",
-            "worker",
-            "employee health",
-            "benefits",
-            "temporary help",
-            "rent allowance",
-            "training/seminars",
-            "education",
-            "uniform",
-            "recruiting",
-            "placement",
-            "employee screening",
-        ),
-    ):
+    if _contains_any(lower, PAYROLL_KEYWORDS):
         return "payroll"
     if _contains_any(
         lower,
@@ -219,6 +220,30 @@ def opex_bucket_for_policy(label: str) -> str | None:
     ):
         return "repairs_maintenance"
     return None
+
+
+# The R&M floor basis (engine/underwriting_policy.R_AND_M_FLOOR_BASIS): the
+# repairs & maintenance and turnover / make-ready buckets. Payroll is never in
+# it, even on a line labeled as repairs (e.g. "Repairs Salaries").
+R_AND_M_FLOOR_BUCKETS = ("repairs_maintenance", "make_ready")
+
+
+def in_r_and_m_floor_basis(label: str) -> bool:
+    """Whether an opex line counts toward the R&M floor: R&M or turnover, never payroll."""
+    lower = label.lower()
+    return opex_bucket_for_policy(label) in R_AND_M_FLOOR_BUCKETS and not _contains_any(lower, PAYROLL_KEYWORDS)
+
+
+def r_and_m_floor_rows(canonical: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        row for row in canonical.get("opex_table") or []
+        if in_r_and_m_floor_basis(str(row.get("category_name", "")))
+    ]
+
+
+def sum_r_and_m_floor_basis(canonical: dict[str, Any]) -> Decimal:
+    """Annual R&M including turnover / make-ready, excluding payroll."""
+    return sum((annual_opex_amount(canonical, row) for row in r_and_m_floor_rows(canonical)), Decimal("0"))
 
 
 def sum_opex_bucket(canonical: dict[str, Any], bucket: str) -> Decimal:

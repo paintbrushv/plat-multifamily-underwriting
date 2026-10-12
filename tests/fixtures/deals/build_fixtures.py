@@ -242,7 +242,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "collection_loss": [0.006, 0.010],
                 "exit_cap_rate": [0.0570, 0.0580],
                 "insurance_per_unit": [600, 700],
-                "r_and_m_per_unit": [700, 760],
+                "r_and_m_per_unit": [990, 1050],
                 "replacement_reserve_per_unit": [250, 250],
             },
             "opex_growth": {
@@ -363,7 +363,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "collection_loss": [0.004, 0.006],
                 "exit_cap_rate": [0.0575, 0.0575],
                 "insurance_per_unit": [540, 580],
-                "r_and_m_per_unit": [500, 600],
+                "r_and_m_per_unit": [750, 850],
                 "replacement_reserve_per_unit": [250, 250],
             },
             "opex_growth": {
@@ -525,7 +525,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "collection_loss": [0.015, 0.021],
                 "exit_cap_rate": [0.0595, 0.0605],
                 "insurance_per_unit": [680, 760],
-                "r_and_m_per_unit": [1300, 1400],
+                "r_and_m_per_unit": [1630, 1730],
                 "replacement_reserve_per_unit": [250, 250],
             },
             "opex_growth": {
@@ -548,7 +548,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "minimum_dscr": [1.0, 2.0],
                 "going_in_cap_rate": [0.050, 0.066],
             },
-            "guardrail_warnings": ["physical_vacancy", "concessions", "r_and_m_per_unit"],
+            "guardrail_warnings": ["physical_vacancy", "concessions"],
         },
     ),
     DealSpec(
@@ -676,7 +676,7 @@ DEALS: tuple[DealSpec, ...] = (
                 "collection_loss": [0.007, 0.011],
                 "exit_cap_rate": [0.0610, 0.0620],
                 "insurance_per_unit": [600, 680],
-                "r_and_m_per_unit": [1400, 1500],
+                "r_and_m_per_unit": [1710, 1810],
                 "replacement_reserve_per_unit": [250, 250],
             },
             "opex_growth": {

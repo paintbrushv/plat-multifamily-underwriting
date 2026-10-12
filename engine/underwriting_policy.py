@@ -129,9 +129,9 @@ def default_opex_growth_rate(
     return "OPEX_GROWTH_DEFAULT", OPEX_GROWTH_DEFAULT
 
 # Institutional vintage framework supplied by the user on 2026-05-08.
-# Ranges are in 2026 dollars: annual/unit R&M, economic CapEx (sustaining
-# capital, not the replacement reserve) and a rough turn-cost band, for use
-# when a deal lacks better property-specific data.
+# Ranges are in 2026 dollars: annual/unit R&M (on R_AND_M_FLOOR_BASIS),
+# economic CapEx (sustaining capital, not the replacement reserve) and a rough
+# turn-cost band, for use when a deal lacks better property-specific data.
 VINTAGE_FRAMEWORK_2026 = {
     "1960s": {
         "year_min": 1960,
@@ -380,6 +380,20 @@ VINTAGE_FRAMEWORK_2026 = {
 }
 
 
+# What the vintage R&M band (``r_and_m_low`` / ``r_and_m_high``, e.g.
+# $900-$1,700/unit for the 1980s) is compared with: the R&M floor checks the
+# deal's repairs & maintenance lines plus its turnover / make-ready lines,
+# annualized. The band excludes payroll, so site payroll (maintenance staff
+# wages, benefits, payroll taxes) is never counted toward the floor, even on a
+# line labeled as repairs. A T12 that books turns on their own lines is not
+# topped up for R&M it already carries. engine/assumptions/canonical_ops
+# (``in_r_and_m_floor_basis``) applies this; the guardrail and the resolver's
+# ``r_and_m_per_unit`` use the same basis.
+R_AND_M_FLOOR_BASIS = (
+    "repairs & maintenance plus turnover / make-ready lines, annualized; payroll excluded"
+)
+
+
 def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
     if year_built is None:
         return None
@@ -456,7 +470,11 @@ def default_r_and_m_per_unit(
     strategy: str = "cashflow",
     deferred: bool = False,
 ) -> Optional[Decimal]:
-    """Return a conservative annual/unit R&M assumption by vintage."""
+    """Return a conservative annual/unit R&M assumption by vintage.
+
+    The value is on ``R_AND_M_FLOOR_BASIS``: R&M including turnover /
+    make-ready, excluding payroll.
+    """
     bucket = vintage_bucket(year_built)
     if bucket is None:
         return None

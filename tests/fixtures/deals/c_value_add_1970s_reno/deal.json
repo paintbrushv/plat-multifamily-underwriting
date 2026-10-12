@@ -249,8 +249,8 @@
         760
       ],
       "r_and_m_per_unit": [
-        1300,
-        1400
+        1630,
+        1730
       ],
       "replacement_reserve_per_unit": [
         250,
@@ -327,8 +327,7 @@
     },
     "guardrail_warnings": [
       "physical_vacancy",
-      "concessions",
-      "r_and_m_per_unit"
+      "concessions"
     ]
   }
 }

@@ -53,8 +53,8 @@ from engine.assumptions.canonical_ops import (
     ensure_year1_concession_schedule,
     matching_opex_rows,
     annual_opex_amount,
-    opex_bucket_for_policy,
-    sum_opex_bucket,
+    r_and_m_floor_rows,
+    sum_r_and_m_floor_basis,
     sum_units,
     upsert_annual_opex,
     upsert_annual_opex_by_match,
@@ -439,18 +439,15 @@ def _write_insurance(ctx: _Context, value: Any, _cohorts: Optional[dict[str, flo
 
 
 def _r_and_m_rows(canonical: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    return [
-        row
-        for row in canonical.get("opex_table") or []
-        if opex_bucket_for_policy(str(row.get("category_name", ""))) == "repairs_maintenance"
-    ]
+    """The lines on the R&M floor basis: R&M and turnover / make-ready, never payroll."""
+    return r_and_m_floor_rows(canonical)
 
 
 def _read_r_and_m(ctx: _Context) -> _Current:
     if not _r_and_m_rows(ctx.canonical):
         return _Current(ABSENT)
     try:
-        return _Current(PRESENT, _per_unit(ctx, sum_opex_bucket(ctx.canonical, "repairs_maintenance")))
+        return _Current(PRESENT, _per_unit(ctx, sum_r_and_m_floor_basis(ctx.canonical)))
     except ValueError as exc:
         ctx.notes.setdefault("r_and_m_per_unit", []).append(str(exc))
         return _Current(PRESENT, None)
@@ -764,7 +761,9 @@ def _opex_default(field_name: str, label: str, absent_basis: str):
 
 def _r_and_m_candidates(ctx: _Context) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    evidence = _opex_evidence(ctx, "repairs_maintenance_annual", "repairs & maintenance bucket")
+    evidence = _opex_evidence(
+        ctx, "repairs_maintenance_annual", "R&M including turnover / make-ready (payroll excluded)"
+    )
     if evidence:
         out.append(evidence)
     house_candidate = _house_vintage(ctx, house.default_r_and_m_per_unit, "R&M per unit", "usd_per_unit_year")
@@ -1229,7 +1228,7 @@ def _base_specs() -> tuple[_Spec, ...]:
             write=_write_r_and_m,
             default=_opex_default(
                 "repairs_maintenance_annual",
-                "repairs & maintenance bucket",
+                "R&M including turnover / make-ready (payroll excluded)",
                 "No R&M opex lines in the canonical: the engine carries none.",
             ),
             gather=_r_and_m_candidates,

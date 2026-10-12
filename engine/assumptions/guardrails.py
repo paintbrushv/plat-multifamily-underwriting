@@ -40,7 +40,7 @@ from engine.assumptions.canonical_ops import (
     annual_opex_amount,
     concession_pct_rent,
     matching_opex_rows,
-    sum_opex_bucket,
+    sum_r_and_m_floor_basis,
     sum_units,
     upsert_annual_opex,
     upsert_annual_opex_by_match,
@@ -510,7 +510,8 @@ def house_floors(
         ),
         "r_and_m_per_unit": Floor(
             "r_and_m_per_unit", gp.r_and_m_per_unit(), gp.vintage_source,
-            "House vintage R&M per unit; a shortfall is topped up with one line.",
+            f"House vintage R&M per unit, compared with {house.R_AND_M_FLOOR_BASIS}; a shortfall is "
+            "topped up with one line.",
         ),
         "replacement_reserve_per_unit": Floor(
             "replacement_reserve_per_unit", gp.replacement_reserve_per_unit(), HOUSE_REPLACEMENT_RESERVE,
@@ -914,17 +915,19 @@ def _is_r_and_m_top_up(row: Mapping[str, Any]) -> bool:
 
 
 def _guard_r_and_m(canonical: dict[str, Any], floor: Floor, mode: str, units: int) -> list[dict[str, Any]]:
-    """The R&M bucket against the vintage floor; a shortfall is one top-up line.
+    """R&M against the vintage floor; a shortfall is one top-up line.
 
-    The bucket as found (``original``) includes a top-up line an earlier pricing
-    run added. The new top-up is sized from the other R&M lines alone, so
-    re-pricing after the analyst lowers R&M lands exactly on the floor instead
-    of keeping the stale top-up's size.
+    The floor basis is ``house.R_AND_M_FLOOR_BASIS``: the repairs & maintenance
+    and turnover / make-ready lines, never payroll. The basis as found
+    (``original``) includes a top-up line an earlier pricing run added. The new
+    top-up is sized from the other R&M lines alone, so re-pricing after the
+    analyst lowers R&M lands exactly on the floor instead of keeping the stale
+    top-up's size.
     """
     if not units:
         return []
     try:
-        observed = sum_opex_bucket(canonical, "repairs_maintenance")
+        observed = sum_r_and_m_floor_basis(canonical)
         prior_top_up = sum(
             (annual_opex_amount(canonical, row) for row in canonical.get("opex_table") or []
              if _is_r_and_m_top_up(row)),
@@ -938,7 +941,7 @@ def _guard_r_and_m(canonical: dict[str, Any], floor: Floor, mode: str, units: in
     if observed >= floor_annual:
         return []
     finding = _finding("r_and_m_per_unit", floor, float(observed / Decimal(str(units))), mode,
-                       original_annual=float(observed))
+                       original_annual=float(observed), floor_basis=house.R_AND_M_FLOOR_BASIS)
     if mode == MODE_PRICING:
         top_up = floor_annual - (observed - prior_top_up)
         upsert_annual_opex(canonical, category_name=R_AND_M_TOP_UP_CATEGORY, annual_amount=top_up)
@@ -1166,6 +1169,9 @@ def _entry_record(key: str, items: list[Mapping[str, Any]]) -> dict[str, Any]:
             else "Underwrite mode keeps the value; pricing mode would enforce the floor."
         )
     )
+    if first.get("floor_basis"):
+        # What the floor is compared with (the R&M floor: R&M plus turnover, never payroll).
+        record["basis"] += f" Floor basis: {first['floor_basis']}."
     return record
 
 

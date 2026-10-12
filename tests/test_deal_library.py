@@ -30,7 +30,7 @@ from engine.assumptions.canonical_ops import (
     annual_opex_amount,
     concession_pct_rent,
     matching_opex_rows,
-    sum_opex_bucket,
+    sum_r_and_m_floor_basis,
     sum_units,
 )
 from engine.assumptions.guardrails import GUARDRAIL_KEYS
@@ -337,7 +337,7 @@ def _below_floor_keys(canonical, deal):
     insurance = matching_opex_rows(canonical, "insurance")
     if annual_opex_amount(canonical, insurance[0]) / units < house.DEFAULT_YEAR1_INSURANCE_PER_UNIT:
         below.add("insurance_per_unit")
-    if sum_opex_bucket(canonical, "repairs_maintenance") / units < house.default_r_and_m_per_unit(
+    if sum_r_and_m_floor_basis(canonical) / units < house.default_r_and_m_per_unit(
             year, strategy=strategy):
         below.add("r_and_m_per_unit")
     reserves = [d(r["annual_amount"]) for r in canonical.get("replacement_reserves") or []] or [Decimal(0)]

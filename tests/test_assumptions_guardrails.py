@@ -25,6 +25,7 @@ from engine.assumptions import (
     resolve_assumptions,
 )
 from engine.assumptions import guardrails
+from engine.assumptions.canonical_ops import sum_r_and_m_floor_basis
 from engine.assumptions.guardrails import GuardrailProfile, enforce_floors, house_floors
 from engine.modules.util import dec
 from engine.validator import validate_deal, validate_schema
@@ -708,6 +709,67 @@ def test_insurance_override_below_the_floor_is_kept_and_disclosed(pricing_deal):
     assert dec(floored["summary"]["solved_purchase_price"]) < dec(result["summary"]["solved_purchase_price"])
 
 
+def _with_lines(deal, *lines):
+    """The conftest deal with its R&M line replaced by ``(category_name, $/unit/yr)`` lines."""
+    out = copy.deepcopy(deal)
+    out["opex_table"] = [r for r in out["opex_table"] if r["category_name"] != "R&M"] + [
+        {"category_name": name, "calculation_type": "per_unit", "base_value": per_unit,
+         "growth_rate": 0.03, "recoverable_flag": False}
+        for name, per_unit in lines
+    ]
+    return out
+
+
+def test_r_and_m_floor_counts_turnover_lines_and_never_payroll(minimal_deal_inputs):
+    """The vintage R&M band ($900-$1,700/unit for the 1980s) excludes payroll and is
+    compared with R&M including turnover / make-ready."""
+    deal = _below_floor_deal(minimal_deal_inputs)
+    # $500 R&M + $450 of turns = $950/unit: at or above the $900 floor, so no top-up.
+    turns = _with_lines(deal, ("Repairs & Maintenance", 500), ("Turnover / Make-Ready", 300),
+                        ("Make Ready - Paint", 150), ("Repairs Salaries", 4_000), ("Maintenance Payroll", 2_000))
+    assert enforce_floors(turns, mode="underwrite", profile=PROFILE, keys=("r_and_m_per_unit",)) == []
+    priced = copy.deepcopy(turns)
+    assert enforce_floors(priced, mode="pricing", profile=PROFILE, keys=("r_and_m_per_unit",)) == []
+    assert priced == turns  # not over-topped
+    resolved = resolve_assumptions(turns, deal_profile=PROFILE)
+    assert resolved["assumptions"]["entries"]["r_and_m_per_unit"]["value"] == 950.0
+    assert "guardrail" not in resolved["assumptions"]["entries"]["r_and_m_per_unit"]
+
+    # $300 R&M + $200 turns = $500/unit: payroll ($6,000/unit) is not counted, so
+    # the top-up is $400/unit, not zero.
+    short = _with_lines(deal, ("Repairs & Maintenance", 300), ("Turnover / Make-Ready", 200),
+                        ("Repairs Salaries", 4_000), ("Maintenance Payroll", 2_000))
+    [finding] = enforce_floors(short, mode="pricing", profile=PROFILE, keys=("r_and_m_per_unit",))
+    assert (finding["original"], finding["applied"], finding["top_up_annual"]) == (500.0, 900.0, 40_000.0)
+    assert finding["floor_basis"] == house.R_AND_M_FLOOR_BASIS
+    assert "turnover" in finding["floor_basis"] and "payroll excluded" in finding["floor_basis"]
+    top_up = next(r for r in short["opex_table"] if r["category_name"] == guardrails.R_AND_M_TOP_UP_CATEGORY)
+    assert top_up["base_value"] == 40_000.0
+    floor, _ = house_floors(short, PROFILE)
+    assert "turnover" in floor["r_and_m_per_unit"].basis and "payroll excluded" in floor["r_and_m_per_unit"].basis
+    # The entry's guardrail record says what the floor was compared with.
+    unshorted = _with_lines(deal, ("Repairs & Maintenance", 300), ("Turnover / Make-Ready", 200),
+                            ("Repairs Salaries", 4_000))
+    record = resolve_assumptions(unshorted, deal_profile=PROFILE)["assumptions"]["entries"][
+        "r_and_m_per_unit"]["guardrail"]
+    assert (record["action"], record["original"]) == ("warned", 500.0)
+    assert f"Floor basis: {house.R_AND_M_FLOOR_BASIS}." in record["basis"]
+
+
+def test_backsolve_does_not_over_top_a_t12_that_books_turns_separately(minimal_deal_inputs):
+    deal = _below_floor_deal(minimal_deal_inputs)
+    deal["opex_table"] = [r for r in deal["opex_table"] if r["calculation_type"] != "percent_egr"]
+    deal = _with_lines(deal, ("Repairs & Maintenance", 600), ("Turnover / Make-Ready", 350),
+                       ("Repairs Salaries", 3_000))
+    result = _solve(resolve_assumptions(deal, deal_profile=PROFILE))
+    summary = result["summary"]["policy_summary"]
+    assert summary["observed_repairs_maintenance_annual"] == 95_000.0  # payroll excluded
+    assert summary["repairs_maintenance_top_up_annual"] == 0.0
+    assert "r_and_m_per_unit" not in {f["key"] for f in summary["guardrails"]["findings"]}
+    assert not [r for r in result["case"]["opex_table"]
+                if r["category_name"] == guardrails.R_AND_M_TOP_UP_CATEGORY]
+
+
 def _r_and_m_rows(canonical):
     return [r for r in canonical["opex_table"]
             if r["category_name"] in ("R&M", guardrails.R_AND_M_TOP_UP_CATEGORY)]
@@ -723,7 +785,7 @@ def test_r_and_m_floor_ignores_its_own_top_up_line(minimal_deal_inputs):
     findings = enforce_floors(priced, mode="pricing", profile=PROFILE, keys=("r_and_m_per_unit",))
     top_ups = [r for r in priced["opex_table"] if r["category_name"] == guardrails.R_AND_M_TOP_UP_CATEGORY]
     assert len(top_ups) == 1 and top_ups[0]["base_value"] == 30_000.0  # ($900 - $600) x 100 units
-    assert backsolve._sum_opex_bucket(priced, "repairs_maintenance") == Decimal("90000")
+    assert sum_r_and_m_floor_basis(priced) == Decimal("90000")
     [finding] = findings
     assert finding["original"] == 750.0  # the bucket as found: $600 + the old $150 top-up
     assert finding["top_up_annual"] == 30_000.0 and finding["applied_annual"] == 90_000.0
@@ -748,7 +810,7 @@ def test_repricing_after_lowering_r_and_m_tops_up_to_the_floor_exactly(pricing_d
     rows = _r_and_m_rows(case)
     assert [r["category_name"] for r in rows] == ["R&M", guardrails.R_AND_M_TOP_UP_CATEGORY]
     units = backsolve._sum_units(case)
-    assert backsolve._sum_opex_bucket(case, "repairs_maintenance") / units == Decimal("900")
+    assert sum_r_and_m_floor_basis(case) / units == Decimal("900")
     summary = result["summary"]["policy_summary"]
     assert summary["repairs_maintenance_top_up_annual"] == 30_000.0
     entry = case["assumptions"]["entries"]["r_and_m_per_unit"]
