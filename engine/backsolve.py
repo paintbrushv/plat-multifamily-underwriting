@@ -1673,7 +1673,12 @@ def _evaluate_case(
     *,
     last_renovation_month: str | None = None,
 ) -> tuple[dict[str, Any], Decimal]:
-    """Run the engine on ``case`` and return its cash-on-cash on ``coc_basis``."""
+    """Run the engine on ``case`` and return its cash-on-cash on ``coc_basis``.
+
+    The results carry the exit-cap sensitivity grid at the candidate price
+    (only the reversion is recomputed per point, so it is cheap); the solved
+    candidate's grid is the summary's.
+    """
     results = run_underwriting(case)
     if coc_basis == "stabilized_year":
         coc = _stabilized_coc(case, results, last_renovation_month=last_renovation_month)["cash_on_cash"]
@@ -2114,6 +2119,9 @@ def backsolve_price(
         policy_summary=policy_summary,
         analyst_keys=analyst_keys,
     )
+    # The exit-cap sensitivity grid at the solved price: offsets around the
+    # solved case's exit cap, each pinned (never re-anchored to a price).
+    solved_grid = solved_results.get("exit_cap_sensitivity")
     solved_by_year = solved_results["cashflow"]["by_year"]
     basis_y1 = solved_results["metrics"]["coc"]
     year1_persisted = float(solved_coc)
@@ -2215,6 +2223,7 @@ def backsolve_price(
                 if exit_cap_mode == EXIT_CAP_MODE_ANCHORED
                 else {"mode": exit_cap_mode, "exit_cap_rate": float(values["exit_cap_rate"])}
             ),
+            "exit_cap_sensitivity": solved_grid,
             "policy_summary": policy_summary,
         }
     summary.update(base, status=status, target_coc_pct=float(target * 100),
@@ -2240,6 +2249,16 @@ def _capital_plan_cli_lines(plan: Any) -> list[str]:
         f"{'n/a' if reserve is None else f'${float(reserve):,.0f}/unit/yr'}; binds: "
         f"{plan.get('binding_year_1') or 'n/a'}",
     ]
+
+
+def _exit_cap_grid_cli_lines(grid: Any) -> list[str]:
+    """Levered IRR across the exit-cap sensitivity grid, for the CLI summary."""
+    if not isinstance(grid, dict) or not grid.get("points"):
+        return []
+    cells = ", ".join(
+        f"{p['offset_bps']:+d} bps {_pct(p['exit_cap_rate'])}: {_pct(p['levered_irr'])}" for p in grid["points"]
+    )
+    return [f"  Exit cap grid:    levered IRR by exit cap ({cells})"]
 
 
 def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
@@ -2281,6 +2300,7 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
         *([f"  Loan sizing:      {loan_sizing.SHORT_LABELS.get(sizing.get('basis'), sizing.get('basis'))}, "
            f"{sizing.get('sizing_method')} ({sizing.get('source')})"] if sizing.get("basis") else []),
         f"  Exit cap:         {exit_line}",
+        *_exit_cap_grid_cli_lines(summary.get("exit_cap_sensitivity")),
         *_capital_plan_cli_lines(summary.get("capital_plan")),
         f"  Floors enforced:  {enforced}",
         f"  Summary:          {summary_path}",

@@ -38,7 +38,9 @@ results into curves the engine reads:
     (``house:exit_cap_spread``, review_required; ``exit_cap.py``). The
     exit-year ``market_cap_rate`` (submarket, else MSA) only enters through the
     rare steal test (going-in more than ``HOUSE_STEAL_THRESHOLD`` above market:
-    compress toward market + spread, at most ``HOUSE_MAX_EXIT_COMPRESSION``)
+    compress toward market + spread by an amount that scales with the excess
+    over the threshold, up to ``HOUSE_MAX_EXIT_COMPRESSION`` at
+    ``HOUSE_STEAL_FULL_COMPRESSION_EXCESS``)
     and is otherwise a candidate; it is the value only when there is no price
     to anchor to. Else the engine default. The OM rate is a candidate. The
     market reference is kept on the entry's ``detail.market``, so a

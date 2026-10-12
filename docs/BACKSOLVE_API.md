@@ -79,21 +79,37 @@ cap priced at each candidate price is, in order:
    `HOUSE_EXIT_CAP_SPREAD` (50 bps). The steal exception applies when the
    resolver recorded a market cap rate (`detail.market` on the canonical's
    `exit_cap_rate` entry): a going-in cap more than `HOUSE_STEAL_THRESHOLD`
-   (150 bps) above it compresses the exit toward market + spread, at most
-   `HOUSE_MAX_EXIT_COMPRESSION` (100 bps) below going-in + spread. Without a
-   market rate there is never compression. A candidate whose going-in cap is
+   (150 bps) above it compresses the exit toward market + spread, by
+   min(1, (excess - 150 bps) / (350 bps - 150 bps)) x
+   `HOUSE_MAX_EXIT_COMPRESSION` (100 bps), where excess = going-in - market
+   and 350 bps is `HOUSE_STEAL_FULL_COMPRESSION_EXCESS`: 0 at the threshold,
+   growing linearly to 100 bps, capped beyond, and never below market +
+   spread. Without a market rate there is never compression. A candidate whose going-in cap is
    outside `HOUSE_EXIT_CAP_GOING_IN_MAX` (an extreme bracket price) uses the
    market rate, else the canonical's exit cap.
 
 `summary.exit_cap_calculation` discloses the solved exit cap: for
 `entry_anchored`, `{mode, rule, purchase_price, year1_noi, going_in_cap_rate,
-spread, anchored_exit_cap_rate, market_cap_rate, steal, compression,
-exit_cap_rate, market}` (also kept in the solved case's
+spread, anchored_exit_cap_rate, market_cap_rate, excess_over_market, steal,
+steal_scale, compression, exit_cap_rate, market}` (also kept in the solved case's
 `metadata.property_summary.exit_cap_calculation`); otherwise `{mode,
 exit_cap_rate}`. `effective_assumptions.exit_cap_mode` names the mode. The
 solved case's `exit_cap_rate` entry is the resolver's own default at the solved
 price (`house:exit_cap_spread`, no override), so re-resolving it changes
 nothing. The CLI summary prints the exit cap and how it was set.
+
+### Exit-cap sensitivity grid
+
+`summary.exit_cap_sensitivity` (also `results.exit_cap_sensitivity`) reports
+the solved case at `HOUSE_EXIT_CAP_SENSITIVITY_OFFSETS_BPS` (-50, -25, 0, +25,
++50, +75, +100, +150 bps) around the solved exit cap: `{base_exit_cap_rate,
+offsets_bps, rule, purchase_price, exit_month, forward_noi,
+cash_on_cash_year_1, points}`, each point `{offset_bps, exit_cap_rate,
+exit_value, sale_costs, net_sale_proceeds, unlevered_irr, levered_irr,
+unlevered_em, levered_em, is_base}`. Each point pins its exit cap at the solved
+price: an entry-anchored exit cap is not re-measured per point. The 0 bps point
+is the solved case; year-1 cash-on-cash does not move with the exit cap and is
+shown once. The CLI prints levered IRR across the grid.
 
 Floors compare annual dollars: opex lines are annualized from their
 `calculation_type` first, and a floor replaces the analyst's matching line

@@ -4,8 +4,10 @@ Unless the analyst (or an explicit backsolve policy) sets it, the exit cap is
 the going-in cap at the price being modeled (year-1 NOI / purchase price) plus
 HOUSE_EXIT_CAP_SPREAD, re-measured at every backsolve candidate price. Only a
 "screaming steal" (a market cap rate is known and the going-in cap is more than
-HOUSE_STEAL_THRESHOLD above it) compresses the exit, by at most
-HOUSE_MAX_EXIT_COMPRESSION, and the entry is flagged.
+HOUSE_STEAL_THRESHOLD above it) compresses the exit. The compression scales
+with the excess over the threshold, linearly from 0 at the threshold to
+HOUSE_MAX_EXIT_COMPRESSION at HOUSE_STEAL_FULL_COMPRESSION_EXCESS, capped there,
+and the entry is flagged.
 
 Synthetic deals only (tests/fixtures/deals).
 """
@@ -70,25 +72,53 @@ def test_house_constants():
     assert house.HOUSE_EXIT_CAP_SPREAD == Decimal("0.0050")
     assert house.HOUSE_STEAL_THRESHOLD == Decimal("0.0150")
     assert house.HOUSE_MAX_EXIT_COMPRESSION == Decimal("0.0100")
+    assert house.HOUSE_STEAL_FULL_COMPRESSION_EXCESS == Decimal("0.0350")  # threshold + 200 bps
     assert house.HOUSE_EXIT_CAP_GOING_IN_MAX == Decimal("0.25")
 
 
-@pytest.mark.parametrize("going_in, market, expected, steal", [
-    ("0.09", None, "0.095", False),        # no market data: never compressed
-    ("0.06", "0.065", "0.065", False),     # paying above market: still entry + spread
-    ("0.07", "0.058", "0.075", False),     # 120 bps over market: under the threshold
-    ("0.07", "0.055", "0.075", False),     # exactly 150 bps: not "more than"
-    # A steal is more than 150 bps over market, so moving all the way to market +
-    # spread would always compress more than 100 bps: the cap binds.
-    ("0.08", "0.055", "0.075", True),      # 250 bps over: compression capped at 100 bps
-    ("0.072", "0.0565", "0.067", True),    # 155 bps over: capped at 100 bps too
+@pytest.mark.parametrize("going_in, market, expected, steal, compression", [
+    ("0.09", None, "0.095", False, "0"),           # no market data: never compressed
+    ("0.06", "0.065", "0.065", False, "0"),        # paying above market: still entry + spread
+    ("0.07", "0.058", "0.075", False, "0"),        # 120 bps over market: under the threshold
+    ("0.07", "0.055", "0.075", False, "0"),        # exactly 150 bps: not "more than", no compression
+    # Over the threshold the compression grows linearly with (excess - 150 bps),
+    # reaching 100 bps at 350 bps of excess.
+    ("0.0702", "0.055", "0.0751", True, "0.0001"),  # 152 bps over: 2/200 of 100 bps = 1 bp
+    ("0.08", "0.055", "0.080", True, "0.005"),      # 250 bps over (mid-range): half, 50 bps
+    ("0.09", "0.055", "0.085", True, "0.010"),      # 350 bps over (full scale): 100 bps
+    ("0.11", "0.055", "0.105", True, "0.010"),      # 550 bps over (beyond): capped at 100 bps
 ])
-def test_house_exit_cap_rate(going_in, market, expected, steal):
+def test_house_exit_cap_rate(going_in, market, expected, steal, compression):
     out = house.house_exit_cap_rate(Decimal(going_in), market_cap_rate=Decimal(market) if market else None)
     assert out["exit_cap_rate"] == Decimal(expected)
     assert out["steal"] is steal
+    assert out["compression"] == Decimal(compression)
     assert out["anchored"] == Decimal(going_in) + house.HOUSE_EXIT_CAP_SPREAD
     assert Decimal("0") <= out["compression"] <= house.HOUSE_MAX_EXIT_COMPRESSION
+    if market is not None:
+        assert out["excess_over_market"] == Decimal(going_in) - Decimal(market)
+        # The existing guard: a compressed exit is never below market + spread
+        # (so never below market).
+        if steal:
+            assert out["exit_cap_rate"] >= Decimal(market) + house.HOUSE_EXIT_CAP_SPREAD
+
+
+def test_steal_compression_is_continuous_and_monotone_in_the_excess():
+    market = Decimal("0.05")
+    threshold = house.HOUSE_STEAL_THRESHOLD
+    previous = None
+    for bps in range(0, 701, 5):
+        excess = Decimal(bps) / Decimal(10_000)
+        out = house.house_exit_cap_rate(market + excess, market_cap_rate=market)
+        if excess <= threshold:
+            assert out["compression"] == 0 and not out["steal"]
+        if previous is not None:
+            assert out["compression"] >= previous  # never falls as the discount grows
+            assert out["compression"] - previous <= Decimal("0.00026")  # no jump (5 bps step: 2.5 bps max)
+        previous = out["compression"]
+    # Just above the threshold the compression is tiny, not a 100 bps jump.
+    near = house.house_exit_cap_rate(market + threshold + Decimal("0.0001"), market_cap_rate=market)
+    assert Decimal("0") < near["compression"] <= Decimal("0.00005")
 
 
 # ── the resolver ─────────────────────────────────────────────────────────
@@ -125,20 +155,26 @@ def test_no_compression_without_market_data_even_for_a_cheap_price():
     assert not any(c["source"].startswith("market:") for c in entry["candidates"])
 
 
-def test_steal_compresses_at_most_100_bps_and_is_flagged():
+def test_steal_compression_scales_with_the_discount_and_is_flagged():
     going_in = _entry(_no_market())["detail"]["going_in_cap_rate"]
-    market = round(going_in - 0.025, 6)  # going-in 250 bps over market
+    market = round(going_in - 0.025, 6)  # going-in 250 bps over market: halfway to full scale
     canonical = _with_market(market)
     entry = _entry(canonical)
 
     assert entry["source"] == "house:exit_cap_spread"
     assert entry["detail"]["steal"] is True
     assert entry["detail"]["market"]["rate"] == pytest.approx(market)
-    # market + spread would be 200 bps below entry + spread: capped at 100 bps.
-    assert entry["value"] == pytest.approx(going_in + SPREAD - 0.01, abs=1e-6)
-    assert entry["detail"]["compression"] == pytest.approx(0.01, abs=1e-9)
+    # (250 - 150) / (350 - 150) of 100 bps = 50 bps.
+    assert entry["value"] == pytest.approx(going_in + SPREAD - 0.005, abs=1e-6)
+    assert entry["detail"]["compression"] == pytest.approx(0.005, abs=1e-6)
+    assert entry["detail"]["excess_over_market"] == pytest.approx(0.025, abs=1e-6)
+    assert entry["detail"]["steal_scale"] == pytest.approx(0.5, abs=1e-4)
     assert entry["review_required"] is True
     assert f"Steal: going-in {going_in:.2%} vs market {market:.2%}" in entry["basis"]
+    # The disclosure states the excess, the scaled compression and the formula.
+    assert "250 bps above it" in entry["basis"]
+    assert "compression 50 bps" in entry["basis"]
+    assert "min(1, (excess - 150 bps) / (350 bps - 150 bps)) x 100 bps" in entry["basis"]
     assert any(c["source"] == "market:synthetic" for c in entry["candidates"])
     # Idempotent without the registry: the market reference is kept on the entry.
     again = resolve_assumptions(canonical)

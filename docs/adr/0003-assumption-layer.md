@@ -192,7 +192,7 @@ How each key combines sources:
 | `immediate_capex` | Bucket 1, total dollars at close (`capital_plan.immediate_capex.amount`). PCA immediate needs (`deal:pca`) > analyst > `house:deferred_capex_placeholder` when `deal_profile.deferred_maintenance` is set (one year of the vintage economic CapEx band high end per unit, `HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS`; review_required, and the validator warns `DEFERRED_CAPEX_PLACEHOLDER`: commission a PCA, lenders escrow its immediate repairs at 125%) > `house:deferred_capex` ($0, review_required; with the flag and an unknown vintage the validator warns `DEFERRED_CAPEX_UNBUDGETED`). Funded with equity at close (`funding: "equity_at_close"`, default) or a lender holdback (`"lender_holdback"`); never in NOI. It is separate from the renovation budget. |
 | `recurring_capex_per_unit` | Bucket 2, year-1 $/unit/year (`capital_plan.recurring_capex.per_unit_annual`), below NOI. PCA (`deal:pca`) > analyst > `house:recurring_capex_vintage` (the vintage economic CapEx band: low end for a stabilized deal, midpoint for value-add, high end when `deal_profile.deferred_maintenance` is true) > the $250 reserve when the vintage is unknown (`house:replacement_reserve`, review_required). A PCA outranks an analyst value already in the canonical at a first resolution (the analyst value is kept as a candidate); an explicit override or later edit still wins and shows the PCA as its default. Built before 2000 with no PCA: `review_required` stays on (even under an override), the validator warns `CAPEX_PCA_MISSING` and the ingest gate adds the intake flag `capex_pca_missing_pre_2000_review`. The retired `economic_capex_per_unit` key is accepted as an alias, and its old opt-in `capex_schedule` row is migrated here (removed from the schedule, so it is charged once). |
 | `recurring_capex_growth` | Bucket 2 growth (`capital_plan.recurring_capex.growth_rate`): `HOUSE_RECURRING_CAPEX_GROWTH` = `OPEX_GROWTH_REPAIRS_MAINTENANCE` (3%), `house:opex_growth_table`, applied from analysis year 2 like opex. |
-| `exit_cap_rate` | Exit caps track entry caps. Analyst, else entry-anchored: the going-in cap rate at the price being modeled (engine year-1 NOI / purchase price; trailing T12 NOI only when the engine cannot run the canonical) plus `HOUSE_EXIT_CAP_SPREAD` (50 bps), `house:exit_cap_spread`, review_required. It is re-measured whenever the price changes: backsolve recomputes it at every candidate price unless the analyst or an explicit policy set it. Steal exception, which is rare: only when a submarket or MSA `market_cap_rate` (the exit-year value) is available and the going-in cap exceeds it by more than `HOUSE_STEAL_THRESHOLD` (150 bps) does the exit compress toward market + spread, never more than `HOUSE_MAX_EXIT_COMPRESSION` (100 bps) below going-in + spread; the basis says "Steal: going-in X vs market Y". Without market data there is never compression, and a going-in cap at or below market still exits at entry + spread. `HOUSE_EXIT_CAP_GOING_IN_MAX` (25%) guards the going-in cap. Only when there is no usable price to anchor to: the market cap rate, else the OM's exit cap, else the engine default. Every source is a candidate, and the entry's `detail` records the calculation and the market reference (`detail.market`), so a re-resolution without market data applies the same steal test. |
+| `exit_cap_rate` | Exit caps track entry caps. Analyst, else entry-anchored: the going-in cap rate at the price being modeled (engine year-1 NOI / purchase price; trailing T12 NOI only when the engine cannot run the canonical) plus `HOUSE_EXIT_CAP_SPREAD` (50 bps), `house:exit_cap_spread`, review_required. It is re-measured whenever the price changes: backsolve recomputes it at every candidate price unless the analyst or an explicit policy set it. Steal exception, which is rare: only when a submarket or MSA `market_cap_rate` (the exit-year value) is available and the going-in cap exceeds it by more than `HOUSE_STEAL_THRESHOLD` (150 bps) does the exit compress toward market + spread, by an amount that scales with the discount: with excess = going-in - market, compression = min(1, (excess - 150 bps) / (`HOUSE_STEAL_FULL_COMPRESSION_EXCESS` 350 bps - 150 bps)) x `HOUSE_MAX_EXIT_COMPRESSION` (100 bps), 0 at the threshold and capped at 100 bps from 350 bps of excess, never below market + spread; the basis says "Steal: going-in X vs market Y", the excess, the compression and the formula, and `detail` records `excess_over_market` and `steal_scale`. Without market data there is never compression, and a going-in cap at or below market still exits at entry + spread. `HOUSE_EXIT_CAP_GOING_IN_MAX` (25%) guards the going-in cap. Only when there is no usable price to anchor to: the market cap rate, else the OM's exit cap, else the engine default. Every source is a candidate, and the entry's `detail` records the calculation and the market reference (`detail.market`), so a re-resolution without market data applies the same steal test. |
 | `loan_sizing_noi_basis` | The cash flow agency loan sizing and DSCR use (top-level `loan_sizing_noi_basis`, categorical). Analyst, else `HOUSE_LOAN_SIZING_NOI_BASIS` = `ncf_after_capex_charge` (`house:loan_sizing_noi_basis`, review_required, never written): NOI less the below-NOI capex charge, max(recurring capex, lender reserve), as agency lenders size on NOI less replacement reserves. `ncf_after_lender_reserve` deducts the lender reserve only; `noi_before_capex` is NOI. The engine reports `metrics.dscr` on it with the NOI-based DSCR beside it (`metrics.dscr.noi_before_capex`); backsolve sizes every candidate price on it (an explicit policy `loan_sizing_noi_basis` wins over the canonical's). |
 | `value_add.renovation_premium` | Comp evidence (renovated vs classic effective rent) if present. Otherwise it is required, and the run is flagged when it is missing. |
 
@@ -632,7 +632,8 @@ completed (f):
 5. **(e) Exit caps track entry caps.** The house exit cap is the going-in cap
    at the price being modeled plus 50 bps, re-measured at every backsolve
    price; only a rare, flagged steal (more than 150 bps over a known market cap
-   rate) compresses it, by at most 100 bps (§3). Previously the going-in cap
+   rate) compresses it, by at most 100 bps (§3; scaled with the discount since
+   decision j). Previously the going-in cap
    was measured once at the asking price, so a solved price far below the ask
    exited at a much lower cap than it entered at.
 6. **(f) Replacement reserve vs economic CapEx.** The reserve is the house
@@ -799,6 +800,32 @@ completed (f):
    nothing changes. With a going-in cap below the debt constant (negative
    leverage) a smaller loan raises cash-on-cash, so a DSCR-bound solve can
    price higher.
+12. **(l) Steal compression scales with the discount.** The flat 100 bps steal
+    compression jumped from 0 to 100 bps as the going-in cap crossed 150 bps
+    over market. It now grows linearly with the excess over
+    `HOUSE_STEAL_THRESHOLD`: 0 at 150 bps, the full `HOUSE_MAX_EXIT_COMPRESSION`
+    (100 bps) at `HOUSE_STEAL_FULL_COMPRESSION_EXCESS` (350 bps), capped
+    beyond. The existing guard stays: a compressed exit is never below
+    market + spread, so never below the market cap rate. It may still sit
+    below the going-in cap (by up to 50 bps at full scale), which is the point
+    of a steal; the entry stays flagged for review and its basis states the
+    excess, the compression and the formula.
+13. **(m) Exit-cap sensitivity grid.** Stress cases and sensitivities test at
+    numerous exit caps. Every engine run reports the base case at
+    `HOUSE_EXIT_CAP_SENSITIVITY_OFFSETS_BPS` (-50, -25, 0, +25, +50, +75,
+    +100, +150 bps) around the exit cap it ran with, whoever set it
+    (`results.exit_cap_sensitivity`): exit value, sale costs, net sale
+    proceeds, unlevered and levered IRR and equity multiples per point;
+    year-1 cash-on-cash does not move with the exit cap and is shown once.
+    Each point pins its exit cap (base + offset) and is never re-anchored to
+    a price, so a stress point does not drift with a re-measured going-in
+    cap. The exit cap only changes the reversion, so each point reuses the
+    base cash flows and recomputes the sale and the returns with the same
+    helpers as the base metrics (the 0 bps point is the base case). The
+    workbook has an `Exit_Cap_Sensitivity` sheet, and the backsolve summary
+    (`summary.exit_cap_sensitivity`) and CLI report the grid at the solved
+    price. The scenario, tornado and portfolio stress runs already pin the
+    exit cap they set (they run the engine without re-resolving).
 
 Three decisions on deferred maintenance and PCA evidence:
 

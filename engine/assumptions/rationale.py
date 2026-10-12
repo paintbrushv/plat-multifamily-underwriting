@@ -94,7 +94,8 @@ SOURCE_RATIONALES: dict[str, str] = {
         "plus a fixed spread, recomputed whenever the price changes. The asset will be older at sale and "
         "today's pricing may not hold, so the exit is underwritten at a higher cap rate (a lower value) than "
         "the entry. Market cap rates only test for the rare steal, where the going-in cap sits well above "
-        "market; then the exit is compressed by a capped amount and flagged for review."
+        "market; then the exit is compressed by an amount that grows with the size of the discount, up to a "
+        "cap, and flagged for review."
     ),
     "house:opex_growth_table": (
         "Each expense category grows at a named house rate set at or above long-run inflation, with "
