@@ -53,9 +53,15 @@ Assumption layer (ADR 0003):
       --assumption-overrides data/assumption_overrides.json
 
     The overrides file is a JSON object {key: value | {"value": v, "note": "..."}}
-    keyed by assumption key (rent_growth, collection_loss, physical_vacancy, ...).
-    Values a --partial-json patch supplies for an assumption are recorded as
-    analyst overrides, and the assumptions are re-resolved after the merge.
+    keyed by assumption key (rent_growth, collection_loss, physical_vacancy, ...),
+    or an edited assumptions sheet: the <output>.assumptions.json this CLI
+    writes, or an .xlsx carrying the "Assumptions" tab
+    (runs/assumptions_sheet.py export). Values a --partial-json patch supplies
+    for an assumption are recorded as analyst overrides, and the assumptions
+    are re-resolved after the merge.
+
+    Every run that resolves assumptions also writes the assumptions sheet
+    <output stem>.assumptions.json next to the output JSON.
 
     Market data (rent-growth forecast, stabilized vacancy, concession rate,
     market cap rate) comes from engine.market_data.default_registry(); pass
@@ -80,6 +86,12 @@ from engine.assumptions import (
     normalize_overrides,
     overrides_from_patch,
     resolve_assumptions,
+)
+from engine.assumptions.sheet import (
+    has_assumptions,
+    load_assumption_overrides,
+    sheet_path_for,
+    write_assumptions_json,
 )
 from engine.ingest.broker_om_snapshot import stable_property_tax_source_locator
 from engine.ingest.ingestion_pipeline import (
@@ -266,9 +278,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Resolve assumptions without market data. By default the market-data "
                         "registry (engine.market_data.default_registry) is used; missing feeder "
                         "data falls through to deal evidence and house policy.")
-    p.add_argument("--assumption-overrides", type=Path, default=None, metavar="PATH.json",
-                   help="JSON object of analyst assumption overrides: "
-                        '{key: value | {"value": v, "note": "..."}}.')
+    p.add_argument("--assumption-overrides", type=Path, default=None, metavar="PATH",
+                   help="Analyst assumption overrides: a JSON object "
+                        '{key: value | {"value": v, "note": "..."}}, an edited '
+                        "<output>.assumptions.json sheet, or an .xlsx with an edited "
+                        '"Assumptions" tab.')
 
     # Validation
     p.add_argument("--validate", action="store_true",
@@ -298,8 +312,8 @@ def main() -> int:
             print(f"Error: Assumption overrides not found: {args.assumption_overrides}", file=sys.stderr)
             return 1
         try:
-            assumption_overrides = _load_json(args.assumption_overrides)
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            assumption_overrides = load_assumption_overrides(args.assumption_overrides)
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
             print(f"Error: failed to load assumption overrides: {exc}", file=sys.stderr)
             return 1
 
@@ -472,6 +486,9 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         json.dump(result, f, indent=2)
+    sheet_path = None
+    if has_assumptions(result):
+        sheet_path = write_assumptions_json(result, sheet_path_for(out))
 
     # Summary
     print(f"\nIngestion complete:")
@@ -545,6 +562,8 @@ def main() -> int:
         print(f"  OM parsed (confidence: {confidence})")
 
     print(f"\nOutput: {out}")
+    if sheet_path is not None:
+        print(f"Assumptions sheet: {sheet_path}")
 
     # Optional validation
     if args.validate:

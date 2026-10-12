@@ -22,6 +22,7 @@ pytest
 | `engine/api.py` | Framework-free JSON request handlers (`handle_run_deal`, portfolio, refi-vs-sell). |
 | `engine/mcp_server.py` | Installed `plat.underwriting.mcp/1` stdio adapter for validation, small summary metrics, and feasibility. |
 | `runs/ingest_deal.py` | Canonical intake CLI: documents or agent-authored JSON -> validated deal JSON. |
+| `engine/assumptions/`, `runs/assumptions_sheet.py` | Assumption layer (ADR 0003): resolved assumptions with provenance, and the editable assumptions sheet (JSON and Excel). |
 
 Quick start — run the intake CLI on the synthetic fixtures:
 
@@ -30,6 +31,26 @@ python runs/ingest_deal.py --rent-roll tests/fixtures/sample_rent_roll.csv \
   --t12 tests/fixtures/sample_t12.csv --start 2026-05 --end 2031-04 \
   --property-id "Sample Deal" --output output/sample.json --validate
 ```
+
+### Assumptions sheet
+
+Ingest resolves every underwriting assumption with its source, basis and
+default (ADR 0003), and writes the sheet next to the output:
+`output/sample.assumptions.json` for the command above. Inspect or edit it in
+JSON or Excel, then re-resolve:
+
+```bash
+python runs/assumptions_sheet.py export output/sample.json --xlsx output/sample.assumptions.xlsx
+# edit the Override / Note columns of the "Assumptions" tab (or a row's value in the JSON)
+python runs/assumptions_sheet.py apply output/sample.json output/sample.assumptions.xlsx \
+  --output output/sample.reresolved.json
+```
+
+Each edited row becomes an analyst override. The entry keeps its
+`default_value`, records the override, and shows the delta. The same edited
+file also works as `runs/ingest_deal.py --assumption-overrides <file.json|file.xlsx>`.
+Underwriting workbooks written by `engine.excel_output` carry the same
+"Assumptions" tab.
 
 For the optional MCP adapter, install `plat-multifamily-underwriting[mcp]`
 and run `python -m engine.mcp_server` from any working directory. It exposes
@@ -62,7 +83,7 @@ engine/          deterministic underwriting modules + canonical schema
 engine/schemas/  deal_schema_v0_1.json (canonical deal format)
 engine/ingest/   rent roll / T12 / OM parsers
 tests/           synthetic fixtures only
-runs/            ingest_deal.py intake CLI
+runs/            ingest_deal.py intake CLI, assumptions_sheet.py export/apply
 docs/            specs, module docs, tax regime schedules
 ```
 

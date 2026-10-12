@@ -152,6 +152,7 @@ def handle_run_deal(request: Dict[str, Any]) -> Dict[str, Any]:
             "metrics": {...},
             "cashflow_summary": {...},
             "scenario_comparison": {...},  # if scenarios=true
+            "assumptions_sheet": {...},    # assumptions.json payload, if inputs carry assumptions
             "elapsed_seconds": 0.5,
             "error": "..."  # if status=error
         }
@@ -268,6 +269,12 @@ def handle_run_deal(request: Dict[str, Any]) -> Dict[str, Any]:
 
         if options.get("include_cashflow"):
             response["cashflow"] = results.get("cashflow")
+
+        # ADR 0003 §8: the assumptions sheet (the assumptions.json payload)
+        # travels with the run when the canonical carries an assumptions section.
+        from engine.assumptions.sheet import assumptions_document, has_assumptions
+        if has_assumptions(inputs):
+            response["assumptions_sheet"] = assumptions_document(inputs)
 
         # Persist to Cosmos by default (skip with no_persist option)
         if not options.get("no_persist"):

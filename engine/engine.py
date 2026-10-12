@@ -1237,3 +1237,9 @@ def run_from_files(inputs_path: Path, outputs_path: Path, validation_path: Path)
 
     outputs = run_underwriting(inputs)
     outputs_path.write_text(json.dumps(outputs, indent=2), encoding="utf-8")
+
+    # ADR 0003 §8: every run writes its assumptions sheet next to the outputs.
+    from engine.assumptions.sheet import has_assumptions, sheet_path_for, write_assumptions_json
+
+    if has_assumptions(inputs):
+        write_assumptions_json(inputs, sheet_path_for(outputs_path))
