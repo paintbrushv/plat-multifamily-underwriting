@@ -665,6 +665,10 @@ def _opex_default(field_name: str, label: str, absent_basis: str):
             evidence = _opex_evidence(ctx, field_name, label)
             if evidence:
                 return _choice_from(evidence, ctx)
+            # ── ADR 0003 slice 5 hook: core line added from house defaults ──
+            filled = _opex_slice().filled_core_candidate(ctx, field_name)
+            if filled:
+                return _choice_from(filled, ctx)
         return _fallback(0.0, absent_basis)
 
     return default
@@ -789,6 +793,13 @@ def _fee_spec(name: str, section: str, field_name: str, unit: str, *, ingest_fil
         gather=_policy_candidates(name, 0.0, engine_basis),
         patch_paths=((section, field_name),),
     )
+
+
+def _opex_slice():
+    """ADR 0003 slice 5: per-line opex entries live in engine/assumptions/opex.py."""
+    from engine.assumptions import opex
+
+    return opex
 
 
 # ── ADR 0003 §3 precedence (used only to disclose where it would differ) ─
@@ -1073,7 +1084,9 @@ def normalize_overrides(overrides: Optional[Mapping[str, Any]]) -> dict[str, dic
         return {}
     if not isinstance(overrides, Mapping):
         raise AssumptionOverrideError("assumption overrides must be an object keyed by assumption key")
-    unknown = sorted(set(overrides) - set(ASSUMPTION_KEYS))
+    # ── ADR 0003 slice 5 hook: per-line opex growth keys (opex.<slug>.growth) ──
+    opex_keys = _opex_slice().check_override_keys(overrides)
+    unknown = sorted(set(overrides) - set(ASSUMPTION_KEYS) - opex_keys)
     if unknown:
         raise AssumptionOverrideError(
             f"unknown assumption keys {unknown}; known keys: {list(ASSUMPTION_KEYS)}"
@@ -1109,6 +1122,8 @@ def overrides_from_patch(
         if current.cohort_overrides:
             override["cohort_overrides"] = dict(current.cohort_overrides)
         out[spec.key] = override
+    # ── ADR 0003 slice 5 hook: growth rates a patched opex_table carries ──
+    out.update(_opex_slice().overrides_from_patch(patch, ctx, note))
     return out
 
 
@@ -1316,16 +1331,23 @@ def resolve_assumptions(
     prior_entries = prior_section.get("entries") if isinstance(prior_section.get("entries"), Mapping) else {}
 
     specs = _specs_for(profile)
-    inapplicable = sorted(set(explicit) - {spec.key for spec in specs})
+    opex_slice = _opex_slice()
+    inapplicable = sorted(
+        key for key in set(explicit) - {spec.key for spec in specs} if not opex_slice.is_opex_key(key)
+    )
     if inapplicable:
         raise AssumptionOverrideError(
             f"assumption keys {inapplicable} do not apply to deal_type {profile.deal_type!r}"
         )
 
+    # ── ADR 0003 slice 5 hook: add missing core opex lines before the v1 keys read them ──
+    opex_slice.prepare_opex_table(ctx)
     entries: dict[str, Any] = {}
     for spec in specs:
         entry = _resolve_key(spec, ctx, prior_entries.get(spec.key), explicit.get(spec.key))
         entries[spec.key] = entry.to_dict()
+    # ── ADR 0003 slice 5 hook: opex.<slug>.base / opex.<slug>.growth per opex line ──
+    entries.update(opex_slice.resolve_opex_entries(ctx, prior_entries, explicit))
 
     out["deal_profile"] = profile.to_dict()
     out["assumptions"] = {

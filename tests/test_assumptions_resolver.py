@@ -85,6 +85,11 @@ def _sources(entry):
     return [candidate["source"] for candidate in entry["candidates"]]
 
 
+def _v1_keys(entries):
+    """Entry keys other than the per-line opex keys (ADR 0003 slice 5)."""
+    return {key for key in entries if not key.startswith("opex.")}
+
+
 # ── provenance and candidates ────────────────────────────────────────────
 
 
@@ -95,7 +100,7 @@ def full_deal():
 
 def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
     entries = _entries(full_deal)
-    assert set(entries) == STABILIZED_KEYS
+    assert _v1_keys(entries) == STABILIZED_KEYS
     assert full_deal["assumptions"]["resolver_version"] == "plat.assumptions/1"
     assert full_deal["assumptions"]["mode"] == "underwrite"
     for key, entry in entries.items():
@@ -222,7 +227,7 @@ def test_value_add_profile_uses_value_add_house_values_and_adds_turn_cost():
         "submarket": {"name": "Synthetic North"},
         "year_built": 1984,
     }
-    assert set(entries) == STABILIZED_KEYS | {"turn_cost_per_unit"}
+    assert _v1_keys(entries) == STABILIZED_KEYS | {"turn_cost_per_unit"}
     # Slice 4: T12 bad debt wins; value_add stabilizes over 24 months to a higher LTL floor.
     assert entries["collection_loss"]["value"] == pytest.approx(0.015)
     assert entries["collection_loss"]["source"] == "deal:t12"

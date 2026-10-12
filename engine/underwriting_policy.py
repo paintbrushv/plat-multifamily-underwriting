@@ -27,6 +27,101 @@ DEFAULT_YEAR1_INSURANCE_PER_UNIT = Decimal("600")
 HIGH_INSURANCE_REVIEW_THRESHOLD_PER_UNIT = Decimal("900")
 DEFAULT_PROPERTY_TAX_REASSESSMENT_RATIO = Decimal("1.00")
 
+# ── Opex growth by category (ADR 0003 §6) ────────────────────────────────
+# HOUSE ASSUMPTIONS TO BE REVIEWED, NOT MARKET DATA. Long-run nominal annual
+# growth per canonical T12 opex category (the names engine/ingest/t12_parser.py
+# emits). They are set at or above long-run CPI on purpose: overstating
+# expense growth is the conservative error. The assumption resolver
+# (engine/assumptions/opex.py) writes a rate into an ingested opex_table row
+# only when the row carries no growth_rate; an analyst rate always wins.
+# Replace a constant with market data once a provider supplies an opex trend.
+#
+# Wage growth: on-site payroll, benefits and payroll taxes.
+OPEX_GROWTH_PAYROLL = Decimal("0.035")
+# Labor and materials for repairs, turns and contracted site services.
+OPEX_GROWTH_REPAIRS_MAINTENANCE = Decimal("0.030")
+OPEX_GROWTH_TURNOVER_MAKE_READY = Decimal("0.030")
+OPEX_GROWTH_CONTRACT_SERVICES = Decimal("0.030")
+OPEX_GROWTH_LANDSCAPING_GROUNDS = Decimal("0.030")
+OPEX_GROWTH_SECURITY = Decimal("0.030")
+# Discretionary, largely fixed-price lines.
+OPEX_GROWTH_MARKETING_ADVERTISING = Decimal("0.025")
+OPEX_GROWTH_ADMINISTRATIVE = Decimal("0.025")
+# Utilities: a blended rate for a combined line, and per sub-category. Municipal
+# water/sewer and hauling contracts have run above CPI.
+OPEX_GROWTH_UTILITIES = Decimal("0.035")
+OPEX_GROWTH_WATER_SEWER = Decimal("0.040")
+OPEX_GROWTH_ELECTRICITY = Decimal("0.030")
+OPEX_GROWTH_FUEL_GAS_OIL = Decimal("0.030")
+OPEX_GROWTH_TRASH = Decimal("0.035")
+# Property insurance: a house trend above CPI for a hardening market.
+OPEX_GROWTH_INSURANCE = Decimal("0.050")
+OPEX_GROWTH_OTHER_OPERATING = Decimal("0.030")
+OPEX_GROWTH_FRANCHISE_FEE = Decimal("0.030")
+# Reimbursement credits booked inside opex are held flat: growing an offset
+# would understate net expense.
+OPEX_GROWTH_REIMBURSEMENTS = Decimal("0")
+# A management fee entered in dollars tracks revenue; a fee entered as a
+# percent of revenue (percent_egr / percent_rent) already grows with revenue,
+# so any percent-of-revenue row gets no growth (the engine would otherwise
+# compound the percentage itself).
+OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED = Decimal("0.030")
+OPEX_GROWTH_PERCENT_OF_REVENUE = Decimal("0")
+# Any category the table does not name.
+OPEX_GROWTH_DEFAULT = Decimal("0.030")
+# Real estate taxes have no house growth rate: engine/property_tax.py owns them
+# (it resets the year-1 tax to purchase price x assessment ratio x millage and
+# keeps the row's own growth_rate). A house rate here would stack on that.
+OPEX_GROWTH_REAL_ESTATE_TAXES: Optional[Decimal] = None
+
+# Management fee for an ingested deal whose T12 carries none (percent of EGR).
+DEFAULT_MANAGEMENT_FEE_PCT_EGR = Decimal("0.030")
+
+# Canonical T12 category -> (constant name, rate). None defers to another module.
+OPEX_GROWTH_TABLE: dict[str, tuple[str, Optional[Decimal]]] = {
+    "Payroll": ("OPEX_GROWTH_PAYROLL", OPEX_GROWTH_PAYROLL),
+    "Repairs & Maintenance": ("OPEX_GROWTH_REPAIRS_MAINTENANCE", OPEX_GROWTH_REPAIRS_MAINTENANCE),
+    "Turnover / Make-Ready": ("OPEX_GROWTH_TURNOVER_MAKE_READY", OPEX_GROWTH_TURNOVER_MAKE_READY),
+    "Contract Services": ("OPEX_GROWTH_CONTRACT_SERVICES", OPEX_GROWTH_CONTRACT_SERVICES),
+    "Landscaping / Grounds": ("OPEX_GROWTH_LANDSCAPING_GROUNDS", OPEX_GROWTH_LANDSCAPING_GROUNDS),
+    "Security": ("OPEX_GROWTH_SECURITY", OPEX_GROWTH_SECURITY),
+    "Marketing / Advertising": ("OPEX_GROWTH_MARKETING_ADVERTISING", OPEX_GROWTH_MARKETING_ADVERTISING),
+    "Administrative": ("OPEX_GROWTH_ADMINISTRATIVE", OPEX_GROWTH_ADMINISTRATIVE),
+    "Utilities": ("OPEX_GROWTH_UTILITIES", OPEX_GROWTH_UTILITIES),
+    "Water & Sewer": ("OPEX_GROWTH_WATER_SEWER", OPEX_GROWTH_WATER_SEWER),
+    "Electricity": ("OPEX_GROWTH_ELECTRICITY", OPEX_GROWTH_ELECTRICITY),
+    "Fuel (Gas & Oil)": ("OPEX_GROWTH_FUEL_GAS_OIL", OPEX_GROWTH_FUEL_GAS_OIL),
+    "Trash": ("OPEX_GROWTH_TRASH", OPEX_GROWTH_TRASH),
+    "Insurance": ("OPEX_GROWTH_INSURANCE", OPEX_GROWTH_INSURANCE),
+    "Other Operating Expenses": ("OPEX_GROWTH_OTHER_OPERATING", OPEX_GROWTH_OTHER_OPERATING),
+    "Franchise Fee": ("OPEX_GROWTH_FRANCHISE_FEE", OPEX_GROWTH_FRANCHISE_FEE),
+    "Reimbursements": ("OPEX_GROWTH_REIMBURSEMENTS", OPEX_GROWTH_REIMBURSEMENTS),
+    "Property Management Fee": (
+        "OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED",
+        OPEX_GROWTH_PROPERTY_MANAGEMENT_FEE_FIXED,
+    ),
+    "Real Estate Taxes": ("OPEX_GROWTH_REAL_ESTATE_TAXES", OPEX_GROWTH_REAL_ESTATE_TAXES),
+}
+PERCENT_OF_REVENUE_CALCULATION_TYPES = frozenset({"percent_egr", "percent_rent"})
+
+
+def default_opex_growth_rate(
+    category: Optional[str],
+    *,
+    calculation_type: str = "fixed_annual",
+) -> tuple[str, Optional[Decimal]]:
+    """House growth for a canonical opex category: ``(constant name, rate)``.
+
+    Percent-of-revenue rows never grow. An unknown category gets
+    ``OPEX_GROWTH_DEFAULT``. Real estate taxes return ``None``: the
+    property-tax module owns them.
+    """
+    if calculation_type in PERCENT_OF_REVENUE_CALCULATION_TYPES:
+        return "OPEX_GROWTH_PERCENT_OF_REVENUE", OPEX_GROWTH_PERCENT_OF_REVENUE
+    if category in OPEX_GROWTH_TABLE:
+        return OPEX_GROWTH_TABLE[category]
+    return "OPEX_GROWTH_DEFAULT", OPEX_GROWTH_DEFAULT
+
 # Institutional vintage framework supplied by the user on 2026-05-08.
 # Ranges are in 2026 dollars and represent annual/unit reserve floors plus a
 # rough turn-cost band for use when a deal lacks better property-specific data.

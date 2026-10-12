@@ -62,6 +62,9 @@ class AssumptionEntry:
     override: Optional[dict[str, Any]] = None
     review_required: bool = False
     cohort_overrides: Optional[dict[str, Any]] = None
+    # Display-only facts about the canonical field (e.g. an opex line's
+    # calculation_type and per-unit amount). The resolver never reads it.
+    detail: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not is_valid_source(self.source):
@@ -86,6 +89,8 @@ class AssumptionEntry:
         }
         if self.cohort_overrides:
             out["cohort_overrides"] = deepcopy(self.cohort_overrides)
+        if self.detail:
+            out["detail"] = deepcopy(self.detail)
         return out
 
     @classmethod
@@ -102,4 +107,5 @@ class AssumptionEntry:
             override=deepcopy(data.get("override")),
             review_required=bool(data.get("review_required", False)),
             cohort_overrides=deepcopy(data.get("cohort_overrides")) or None,
+            detail=deepcopy(data.get("detail")) or None,
         )
