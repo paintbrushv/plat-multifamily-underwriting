@@ -86,6 +86,41 @@
           "items": { "type": "string" },
           "description": "V1.2 — sanity flags surfaced by intake (e.g. rent_roll_parser sanity flags such as target_monthly_rent_missing_for_cohort_<id>). Non-blocking; analyst review surface."
         },
+        "ingest_gate": {
+          "type": "object",
+          "description": "Document-ingestion gate. BLOCKED fails validation until every blocker is resolved (a T12 whose parsed opex or income does not tie to the statement totals). Policy inputs the analyst omitted resolve to disclosed defaults listed in assumed_defaults; they warn for review and never block.",
+          "required": ["status", "blockers"],
+          "properties": {
+            "status": { "type": "string", "enum": ["PASS", "BLOCKED"] },
+            "blockers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["code", "message"],
+                "properties": {
+                  "code": { "type": "string", "minLength": 1 },
+                  "message": { "type": "string" }
+                }
+              }
+            },
+            "assumed_defaults": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["field", "value", "source"],
+                "properties": {
+                  "field": { "type": "string", "minLength": 1 },
+                  "value": { "type": "number" },
+                  "source": { "type": "string", "minLength": 1 },
+                  "basis": { "type": "string" },
+                  "review_required": { "type": "boolean" }
+                }
+              }
+            },
+            "t12_reconciliation": { "type": "object" },
+            "t12_other_income": { "type": "array", "items": { "type": "object" } }
+          }
+        },
         "purchase_assumptions_source": {
           "type": "string",
           "enum": ["om_haiku_extraction", "cli_flags", "analyst_override"],

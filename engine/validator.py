@@ -528,6 +528,40 @@ def _check_program_id_namespace_uniqueness(inputs: Dict[str, Any]) -> List[Valid
     return issues
 
 
+def _check_ingest_gate(inputs: Dict[str, Any]) -> List[ValidationIssue]:
+    """A BLOCKED ingest gate fails validation, one ERROR per blocker.
+
+    Policy defaults assumed for omitted inputs never block: each one is a
+    WARNING so the analyst reviews it.
+    """
+    gate = ((inputs.get("metadata") or {}).get("ingest_gate") or {})
+    issues = [
+        ValidationIssue(
+            severity="WARNING",
+            code="ASSUMED_DEFAULT",
+            message=(
+                f"{assumed.get('field')} assumed at {assumed.get('value')} "
+                f"({assumed.get('source')}): {assumed.get('basis')}"
+            ),
+            path="/metadata/ingest_gate/assumed_defaults",
+        )
+        for assumed in gate.get("assumed_defaults") or []
+    ]
+    if gate.get("status") != "BLOCKED":
+        return issues
+    blockers = gate.get("blockers") or [{"code": "unspecified", "message": "ingest gate is BLOCKED"}]
+    issues.extend(
+        ValidationIssue(
+            severity="ERROR",
+            code="INGEST_BLOCKED",
+            message=f"{blocker.get('code')}: {blocker.get('message')}",
+            path="/metadata/ingest_gate",
+        )
+        for blocker in blockers
+    )
+    return issues
+
+
 def _check_required_revenue_quality_bridge(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     property_summary = ((inputs.get("metadata") or {}).get("property_summary") or {})
     material = property_summary.get("material_ancillary_income") or {}
@@ -1512,6 +1546,7 @@ def validate_deal(
     issues.extend(_check_unit_cohorts_uniqueness(inputs))
     issues.extend(_check_program_id_namespace_uniqueness(inputs))
     issues.extend(_check_required_revenue_quality_bridge(inputs))
+    issues.extend(_check_ingest_gate(inputs))
     issues.extend(_check_renovation_programs(inputs, month_ids))
     issues.extend(_check_growth_bounds(inputs))
     issues.extend(_check_vacancy_bounds(inputs))

@@ -314,6 +314,26 @@ class TestBuildDealWithOm:
             )
         assert result["metadata"].get("om_extraction_confidence") == "high"
 
+    def test_om_year_built_drives_assumed_collection_loss(self):
+        with patch("engine.ingest.ingestion_pipeline.parse_om", return_value=_sample_om()):
+            result = build_deal_from_documents(
+                property_id="Cedar Ridge",
+                rent_roll_path=ROLL,
+                t12_path=T12,
+                analysis_start="2026-05",
+                analysis_end="2031-04",
+                om_path="fake_om.pdf",
+            )
+        assumed = {
+            entry["field"]: entry
+            for entry in result["metadata"]["ingest_gate"]["assumed_defaults"]
+        }
+        loss = assumed["collection_loss_curve.loss_rate"]
+        assert loss["source"] == "house_vintage_framework"
+        assert loss["value"] == pytest.approx(0.0075)
+        assert "OM property_summary.year_built" in loss["basis"]
+        assert result["collection_loss_curve"][0]["loss_rate"] == pytest.approx(0.0075)
+
     def test_cli_flags_override_om(self):
         """CLI purchase_price should override OM extraction."""
         with patch("engine.ingest.ingestion_pipeline.parse_om", return_value=_sample_om()):

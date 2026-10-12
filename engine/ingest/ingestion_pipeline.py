@@ -16,11 +16,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from engine.ingest.broker_om_snapshot import parse_broker_snapshot_from_om
-from engine.ingest.om_parser import parse_om  # noqa: E402 — lazy-safe, no heavy imports
+from engine.ingest.om_parser import _normalize_year_built, parse_om  # noqa: E402 — lazy-safe, no heavy imports
 from engine.ingest.property_tax_migration import (
     migrate_legacy_property_tax_policy,
 )
 from engine.property_tax import build_property_tax_policy
+from engine.underwriting_policy import default_collection_loss_rate, vintage_bucket
 
 
 _KNOWN_PROPERTY_TAX_PRODUCERS = frozenset(
@@ -170,9 +171,9 @@ def build_deal_from_documents(
     t12_path: str | Path,
     analysis_start: str,
     analysis_end: str,
-    rent_growth_rate: float = 0.03,
+    rent_growth_rate: float | None = None,
     vacancy_rate_override: float | None = None,
-    collection_loss_rate: float = 0.005,
+    collection_loss_rate: float | None = None,
     analyst: str = "",
     om_path: str | Path | None = None,
     om_source_locator: str | None = None,
@@ -193,6 +194,8 @@ def build_deal_from_documents(
     acq_fee_pct: float = 0.01,
     am_fee_pct: float = 0.015,
     disposition_fee_pct: float = 0.01,
+    scan_sidecar_workbooks: bool = False,
+    year_built: int | None = None,
 ) -> dict[str, Any]:
     """Build a canonical deal JSON from a rent roll, T12, and optional OM.
 
@@ -206,9 +209,14 @@ def build_deal_from_documents(
         t12_path: Path to T12 CSV/Excel
         analysis_start: Analysis start month "YYYY-MM"
         analysis_end: Analysis end month "YYYY-MM"
-        rent_growth_rate: Annual rent growth assumption (default 3%)
+        rent_growth_rate: Annual rent growth assumption. When omitted, the
+            engine fallback (3%) is used and recorded in
+            ``metadata.ingest_gate.assumed_defaults`` for analyst review.
         vacancy_rate_override: Override physical_vacancy_rate from rent roll
-        collection_loss_rate: Collection loss rate (default 0.5%)
+        collection_loss_rate: Collection loss rate. When omitted, the house
+            vintage-framework floor for the deal's year built is used (0.5%
+            engine fallback when year built is unknown) and recorded in
+            ``metadata.ingest_gate.assumed_defaults`` for analyst review.
         analyst: Analyst name for metadata
         om_path: Optional path to OM PDF or text file
         om_source_locator: Stable original-document locator for OM tax evidence.
@@ -228,23 +236,50 @@ def build_deal_from_documents(
         acq_fee_pct: Acquisition fee percent (default 1%)
         am_fee_pct: Asset management fee percent (default 1.5%)
         disposition_fee_pct: Disposition fee percent (default 1%)
+        scan_sidecar_workbooks: Opt in to reading sibling workbooks in the rent
+            roll's folder for bed/bath labels. Off by default: the scan opens
+            every workbook in the folder.
+        year_built: Subject year built. Drives the house vintage default for
+            an omitted collection loss rate. When omitted, an OM-extracted
+            ``year_built`` is used if available.
 
     Returns:
-        Canonical deal inputs dict (schema_version 0.1)
+        Canonical deal inputs dict (schema_version 0.1). ``metadata.ingest_gate``
+        carries the T12 reconciliation, any blockers, and the policy defaults
+        assumed for omitted inputs; a BLOCKED gate fails validation, assumed
+        defaults only warn.
     """
     from engine.modules.time_grid import TimeGrid
-    from engine.ingest.t12_parser import parse_t12
+    from engine.ingest.t12_parser import parse_t12_statement
     from engine.ingest.rent_roll_parser import parse_rent_roll
 
     tg = TimeGrid.build(analysis_start, analysis_end)
-    roll = parse_rent_roll(rent_roll_path)
-    opex_table = parse_t12(t12_path)
+    roll = parse_rent_roll(rent_roll_path, scan_sidecar_workbooks=scan_sidecar_workbooks)
+    statement = parse_t12_statement(t12_path)
+    opex_table = statement["opex_table"]
+
+    gate_blockers: list[dict[str, str]] = []
+    reconciliation = statement["reconciliation"]
+    for side in ("opex", "income"):
+        entry = reconciliation[side]
+        if entry["status"] == "BLOCKED":
+            gate_blockers.append({
+                "code": f"t12_{side}_does_not_reconcile",
+                "message": (
+                    f"Parsed T12 {side} {entry['parsed_total']:,.2f} vs statement total "
+                    f"{entry['statement_total']:,.2f} ({entry['variance_pct']:.2%} variance, "
+                    f"tolerance {reconciliation['tolerance']:.2%})."
+                ),
+            })
 
     unit_cohorts = roll["unit_cohorts"]
     vacancy_rate = vacancy_rate_override if vacancy_rate_override is not None else roll["physical_vacancy_rate"]
     market_rents = roll.get("market_rent_by_cohort", {})
     start = tg.month_ids[0]
     end = tg.month_ids[-1]
+    revenue_programs, program_adoption_curve, other_income = _build_t12_income_programs(
+        statement["income_lines"], start, end
+    )
 
     # Ensure analyst is non-empty (schema requires minLength: 1)
     analyst_name = analyst if analyst else "Analyst"
@@ -262,8 +297,17 @@ def build_deal_from_documents(
         "analyst": analyst_name,
         "purpose": "Document Ingestion",
     }
+    if reconciliation["status"] == "UNVERIFIED":
+        intake_sanity_flags.append("t12_totals_not_found_reconciliation_unverified")
     if intake_sanity_flags:
         metadata["intake_sanity_flags"] = intake_sanity_flags
+    metadata["ingest_gate"] = {
+        "status": "BLOCKED" if gate_blockers else "PASS",
+        "blockers": gate_blockers,
+        "assumed_defaults": [],
+        "t12_reconciliation": reconciliation,
+        "t12_other_income": other_income,
+    }
 
     deal: dict[str, Any] = {
         "schema_version": "0.1",
@@ -277,14 +321,15 @@ def build_deal_from_documents(
         "loss_to_lease": _build_cohort_curve(unit_cohorts, "ltl_percent", 0.0, start, end),
         "physical_vacancy_curve": _build_cohort_curve(unit_cohorts, "vacancy_rate", vacancy_rate, start, end),
         "collection_loss_curve": [
-            {"applies_to": "ALL", "start_period": start, "end_period": end, "loss_rate": collection_loss_rate}
+            # loss_rate is resolved after the OM merge (year_built may come from the OM).
+            {"applies_to": "ALL", "start_period": start, "end_period": end, "loss_rate": None}
         ],
-        "revenue_programs": [],
-        "program_adoption_curve": [],
+        "revenue_programs": revenue_programs,
+        "program_adoption_curve": program_adoption_curve,
         "opex_table": opex_table,
         "growth_assumptions": {
             "growth_type": "annual_compound",
-            "annual_growth_rate": rent_growth_rate,
+            "annual_growth_rate": None,  # resolved after the OM merge
         },
     }
 
@@ -391,6 +436,61 @@ def build_deal_from_documents(
                 "om_extraction_unavailable"
             )
 
+    # Policy inputs the analyst omitted resolve to disclosed house defaults.
+    # They never block the gate; each is recorded for review instead.
+    assumed_defaults = deal["metadata"]["ingest_gate"]["assumed_defaults"]
+    if rent_growth_rate is None:
+        rent_growth_rate = _DEFAULT_RENT_GROWTH_RATE
+        assumed_defaults.append({
+            "field": "growth_assumptions.annual_growth_rate",
+            "value": rent_growth_rate,
+            "source": "engine_fallback",
+            "basis": (
+                "No market or house rent-growth assumption was available; "
+                f"engine fallback of {rent_growth_rate:.2%} annual compound applied."
+            ),
+            "review_required": True,
+        })
+    if collection_loss_rate is None:
+        resolved_year_built, year_built_origin = _resolve_year_built(
+            year_built, deal["metadata"]
+        )
+        house_rate = default_collection_loss_rate(resolved_year_built, strategy="cashflow")
+        if house_rate is not None:
+            bucket = vintage_bucket(resolved_year_built)
+            collection_loss_rate = float(house_rate)
+            assumed_defaults.append({
+                "field": "collection_loss_curve.loss_rate",
+                "value": collection_loss_rate,
+                "source": "house_vintage_framework",
+                "basis": (
+                    f"Year built {resolved_year_built} ({year_built_origin}) maps to the "
+                    f"{bucket} vintage bucket; house collection-loss floor "
+                    f"{collection_loss_rate:.2%} (VINTAGE_FRAMEWORK_2026, cashflow strategy)."
+                ),
+                "review_required": True,
+            })
+            deal["metadata"].setdefault("year_built", resolved_year_built)
+        else:
+            collection_loss_rate = _DEFAULT_COLLECTION_LOSS_RATE
+            assumed_defaults.append({
+                "field": "collection_loss_curve.loss_rate",
+                "value": collection_loss_rate,
+                "source": "engine_fallback",
+                "basis": (
+                    "Year built unknown, so the house vintage framework could not be "
+                    f"applied; engine fallback of {collection_loss_rate:.2%} applied."
+                ),
+                "review_required": True,
+            })
+    deal["growth_assumptions"]["annual_growth_rate"] = rent_growth_rate
+    deal["collection_loss_curve"][0]["loss_rate"] = collection_loss_rate
+    for assumed in assumed_defaults:
+        short_field = assumed["field"].rsplit(".", 1)[-1]
+        deal["metadata"].setdefault("intake_sanity_flags", []).append(
+            f"assumed_default_{short_field}"
+        )
+
     # Build purchase_assumptions from CLI flags
     if purchase_price is not None and "purchase_assumptions" not in deal:
         commitment = purchase_price * ltv if ltv else 0.0
@@ -438,6 +538,81 @@ def build_deal_from_documents(
         }
 
     return deal
+
+
+_DEFAULT_RENT_GROWTH_RATE = 0.03
+_DEFAULT_COLLECTION_LOSS_RATE = 0.005
+
+
+def _resolve_year_built(
+    explicit: int | None,
+    metadata: Mapping[str, Any],
+) -> tuple[int | None, str | None]:
+    """Return (year_built, origin): the explicit input first, then the OM extraction."""
+    property_summary = metadata.get("property_summary") or {}
+    for candidate, origin in (
+        (explicit, "analyst input"),
+        (metadata.get("year_built"), "OM metadata.year_built"),
+        (property_summary.get("year_built"), "OM property_summary.year_built"),
+    ):
+        if candidate in (None, ""):
+            continue
+        try:
+            normalized = _normalize_year_built(int(candidate))
+        except (TypeError, ValueError):
+            continue
+        if normalized is not None:
+            return normalized, origin
+    return None, None
+
+T12_PROGRAM_PREFIX = "t12_"
+_T12_INCOME_PROGRAMS = {
+    "recovery": ("t12_utility_reimbursements", "T12 utility reimbursements", "recovery"),
+    "other": ("t12_other_income", "T12 other income", "asset-based"),
+}
+
+
+def _build_t12_income_programs(
+    income_lines: list[dict[str, Any]],
+    start: str,
+    end: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Carry T12 non-rent income into revenue programs.
+
+    Rent lines are modeled from the rent roll and skipped. Reimbursement and
+    other-income lines are summed into one flat monthly ($/asset) program per
+    kind at their trailing-12 run rate. Returns (programs, adoption curve,
+    per-line provenance).
+    """
+    programs: list[dict[str, Any]] = []
+    adoption: list[dict[str, Any]] = []
+    provenance: list[dict[str, Any]] = []
+    for kind, (program_id, program_name, program_type) in _T12_INCOME_PROGRAMS.items():
+        lines = [line for line in income_lines if line["kind"] == kind]
+        annual = round(sum(line["annual_amount"] for line in lines), 2)
+        included = annual > 0
+        provenance.extend(
+            {**line, "program_id": program_id if included else None} for line in lines
+        )
+        if not included:
+            continue
+        programs.append({
+            "program_id": program_id,
+            "program_name": program_name,
+            "program_type": program_type,
+            "pricing_type": "$/asset",
+            "price_value": round(annual / 12, 2),
+            "eligible_units": "ALL",
+            "start_period": start,
+            "end_period": end,
+        })
+        adoption.append({
+            "program_id": program_id,
+            "start_period": start,
+            "end_period": end,
+            "adoption_rate": 1.0,
+        })
+    return programs, adoption, provenance
 
 
 def _build_market_rent_curve(
