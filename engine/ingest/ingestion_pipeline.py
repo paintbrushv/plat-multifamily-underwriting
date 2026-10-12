@@ -412,6 +412,9 @@ def build_deal_from_documents(
                 ),
             })
 
+    rent_roll_reconciliation = roll.get("reconciliation") or {"status": "UNVERIFIED"}
+    gate_blockers.extend(_rent_roll_gate_blockers(rent_roll_reconciliation))
+
     unit_cohorts = roll["unit_cohorts"]
     # The rent-roll vacancy rate is deal evidence (ingest_gate.evidence); the
     # resolver builds the vacancy curve from it, and an explicit
@@ -431,7 +434,7 @@ def build_deal_from_documents(
     # to deal.metadata.intake_sanity_flags so downstream consumers
     # (deal-intake agent, intake punchlist) can see them without
     # re-parsing source documents.
-    intake_sanity_flags: list[str] = list(roll.get("blockers", []))
+    intake_sanity_flags: list[str] = list(roll.get("blockers", [])) + list(roll.get("flags", []))
     metadata: dict[str, Any] = {
         "deal_id": property_id,
         "run_id": "ingested",
@@ -441,6 +444,8 @@ def build_deal_from_documents(
     }
     if reconciliation["status"] == "UNVERIFIED":
         intake_sanity_flags.append("t12_totals_not_found_reconciliation_unverified")
+    if rent_roll_reconciliation.get("status") == "UNVERIFIED":
+        intake_sanity_flags.append("rent_roll_summary_not_found_reconciliation_unverified")
     if intake_sanity_flags:
         metadata["intake_sanity_flags"] = intake_sanity_flags
     metadata["ingest_gate"] = {
@@ -448,6 +453,7 @@ def build_deal_from_documents(
         "blockers": gate_blockers,
         "assumed_defaults": [],
         "t12_reconciliation": reconciliation,
+        "rent_roll_reconciliation": rent_roll_reconciliation,
         "t12_other_income": other_income,
         "evidence": {
             "rent_roll": _rent_roll_evidence(roll, unit_cohorts, market_rents),
@@ -768,6 +774,35 @@ _T12_BAD_DEBT_PATTERNS = ("BAD DEBT", "WRITE OFF", "WRITE-OFF", "WRITEOFF", "COL
 _T12_CONCESSION_PATTERNS = ("CONCESSION",)
 
 
+_RENT_ROLL_CHECK_LABELS = {
+    "units": ("rent_roll_units_do_not_reconcile", "units"),
+    "vacant_units": ("rent_roll_vacancy_does_not_reconcile", "vacant units"),
+    "market_rent_total": ("rent_roll_market_rent_does_not_reconcile", "monthly market rent"),
+    "rent_charges_total": ("rent_roll_rent_charges_do_not_reconcile", "monthly rent charges"),
+}
+
+
+def _rent_roll_gate_blockers(reconciliation: Mapping[str, Any]) -> list[dict[str, str]]:
+    """One blocker per rent-roll check that does not tie to the export's own summary."""
+    blockers: list[dict[str, str]] = []
+    for check, (code, label) in _RENT_ROLL_CHECK_LABELS.items():
+        entry = reconciliation.get(check)
+        if not isinstance(entry, Mapping) or entry.get("status") != "BLOCKED":
+            continue
+        if check in {"units", "vacant_units"}:
+            message = f"Parsed {entry['parsed']} {label} vs the export summary's {entry['export']}"
+            if entry.get("non_revenue_units"):
+                message += f" (+ up to {entry['non_revenue_units']} non-revenue units)"
+            message += " (must match exactly)."
+        else:
+            message = (
+                f"Parsed {label} {entry['parsed']:,.2f} vs the export summary's {entry['export']:,.2f} "
+                f"({entry['variance_pct']:.2%} variance, tolerance {reconciliation['tolerance']:.2%})."
+            )
+        blockers.append({"code": code, "message": message})
+    return blockers
+
+
 def _t12_rent_evidence(income_lines: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """GPR, bad debt and concessions from the T12 income section, in absolute dollars."""
     totals: dict[str, float] = {}
@@ -795,6 +830,9 @@ def _rent_roll_evidence(
 ) -> dict[str, Any]:
     """Current physical vacancy and unit-weighted loss to lease from the rent roll."""
     evidence: dict[str, Any] = {"physical_vacancy_rate": roll["physical_vacancy_rate"]}
+    for key in ("layout", "pre_leased_vacant_units", "bed_bath_inference"):
+        if roll.get(key):
+            evidence[key] = roll[key]
     market_total = Decimal("0")
     gap_total = Decimal("0")
     for cohort in unit_cohorts:

@@ -88,7 +88,7 @@
         },
         "ingest_gate": {
           "type": "object",
-          "description": "Document-ingestion gate. BLOCKED fails validation until every blocker is resolved (a T12 whose parsed opex or income does not tie to the statement totals). Policy inputs the analyst omitted resolve to disclosed defaults listed in assumed_defaults; they warn for review and never block.",
+          "description": "Document-ingestion gate. BLOCKED fails validation until every blocker is resolved (a T12 whose parsed opex or income does not tie to the statement totals, or a rent roll whose parsed units, vacant units or market rent do not tie to the export summary). Policy inputs the analyst omitted resolve to disclosed defaults listed in assumed_defaults; they warn for review and never block.",
           "required": ["status", "blockers"],
           "properties": {
             "status": { "type": "string", "enum": ["PASS", "BLOCKED"] },
@@ -118,6 +118,7 @@
               }
             },
             "t12_reconciliation": { "type": "object" },
+            "rent_roll_reconciliation": { "type": "object" },
             "t12_other_income": { "type": "array", "items": { "type": "object" } },
             "evidence": {
               "type": "object",
