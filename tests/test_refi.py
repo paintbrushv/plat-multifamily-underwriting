@@ -6,7 +6,8 @@ Tests cover:
 - Dynamic LTV-based loan sizing
 - Refi proceeds (cash out) and shortfall computation
 - Debt service transition (bridge stops, perm starts)
-- Trailing NOI calculation with short history
+- Forward NOI window (the 12 months from the refi month, annualized near the
+  end of the analysis); the trailing window is an explicit opt-in
 - Debt constant computation
 - Full engine integration with refi_event
 - Backward compatibility (no refi_event = unchanged behavior)
@@ -229,67 +230,195 @@ class TestRefiProceeds(unittest.TestCase):
         self.assertAlmostEqual(costs, commitment * 0.01, places=0)
 
 
-class TestTrailingNOI(unittest.TestCase):
-    """Test trailing NOI computation for different scenarios."""
+def _make_ramp_cashflow(time_grid, noi_for_index):
+    """Helper: monthly cashflow whose NOI is ``noi_for_index(i)``."""
+    return [
+        {
+            "month": m,
+            "net_operating_income": noi_for_index(i),
+            "leveraged_cash_flow": noi_for_index(i) * 0.6,
+            "unleveraged_cash_flow": noi_for_index(i),
+        }
+        for i, m in enumerate(time_grid.month_ids)
+    ]
 
-    def test_uses_trailing_12_months(self):
-        """Default: uses 12 months of trailing NOI."""
+
+DSCR_REFI = {
+    "trigger_month": "2027-01",
+    "sizing_method": "dscr",
+    "target_dscr": 1.25,
+    "perm_loan_terms": {"rate": 0.055, "amort_years": 30},
+}
+
+
+def _dscr_loan(cash_flow, dscr="1.25", rate="0.055", amort=30):
+    constant = _annual_debt_constant(Decimal(rate), amort)
+    raw = Decimal(str(cash_flow)) / (Decimal(dscr) * constant)
+    return float((raw / 1000).quantize(Decimal("1")) * 1000)
+
+
+class TestTrailingNOI(unittest.TestCase):
+    """The NOI window: forward by default, trailing only on request."""
+
+    def test_uses_forward_12_months(self):
+        """Default: uses the 12 months starting at the refi month."""
         time_grid = TimeGrid.build("2025-01", "2028-12")
         cashflow = _make_cashflow_by_month(time_grid, monthly_noi=50000)
         debt = _make_debt_by_month(time_grid, balance=5000000)
 
-        refi_event = {
-            "trigger_month": "2027-01",
-            "sizing_method": "dscr",
-            "target_dscr": 1.25,
-            "perm_loan_terms": {"rate": 0.055, "amort_years": 30},
-        }
-        result = size_refi_loan(refi_event, cashflow, debt)
-        # Stabilized NOI = 12 × $50K = $600K
+        result = size_refi_loan(DSCR_REFI, cashflow, debt)
+        # Stabilized NOI = 12 × $50K = $600K (2027-01 through 2027-12)
         self.assertAlmostEqual(float(result["stabilized_noi"]), 600000, places=0)
+        self.assertEqual(
+            result["noi_window"],
+            {"start": "2027-01", "end": "2027-12", "months": 12, "forward": True},
+        )
 
-    def test_annualizes_short_history(self):
-        """When less than 12 months before trigger, annualizes available data."""
+    def test_trailing_opt_in_annualizes_short_history(self):
+        """noi_window=trailing: less than 12 months before trigger is annualized."""
         time_grid = TimeGrid.build("2026-06", "2028-12")
         cashflow = _make_cashflow_by_month(time_grid, monthly_noi=50000)
         debt = _make_debt_by_month(time_grid, balance=5000000)
 
-        refi_event = {
-            "trigger_month": "2027-01",  # Only 7 months of history
-            "sizing_method": "dscr",
-            "target_dscr": 1.25,
-            "perm_loan_terms": {"rate": 0.055, "amort_years": 30},
-        }
+        refi_event = {**DSCR_REFI, "noi_window": "trailing"}  # Only 7 months of history
         result = size_refi_loan(refi_event, cashflow, debt)
         # 7 months × $50K = $350K → annualized = $350K × 12/7 = $600K
         self.assertAlmostEqual(float(result["stabilized_noi"]), 600000, places=0)
+        self.assertEqual(
+            result["noi_window"],
+            {"start": "2026-06", "end": "2026-12", "months": 7, "forward": False},
+        )
 
     def test_custom_noi_months(self):
-        """noi_months parameter controls trailing window."""
+        """noi_months sets the trailing window when noi_window=trailing."""
         time_grid = TimeGrid.build("2025-01", "2028-12")
-        # Ramp NOI: first 12 months = $30K, then $60K
-        cashflow = []
-        for i, m in enumerate(time_grid.month_ids):
-            noi = 30000 if i < 12 else 60000
-            cashflow.append({
-                "month": m,
-                "net_operating_income": noi,
-                "leveraged_cash_flow": noi * 0.6,
-                "unleveraged_cash_flow": noi,
-            })
+        # Ramp NOI: $30K in year 1, $60K in year 2, $90K after
+        cashflow = _make_ramp_cashflow(
+            time_grid, lambda i: 30000 if i < 12 else 60000 if i < 24 else 90000
+        )
         debt = _make_debt_by_month(time_grid, balance=5000000)
 
-        # 6-month trailing window at month 24 → all $60K months
+        # 6-month trailing window at 2026-10 → 2026-04..2026-09, all $60K months
         refi_event = {
-            "trigger_month": "2027-01",
-            "sizing_method": "dscr",
-            "target_dscr": 1.25,
+            **DSCR_REFI,
+            "trigger_month": "2026-10",
+            "noi_window": "trailing",
             "noi_months": 6,
-            "perm_loan_terms": {"rate": 0.055, "amort_years": 30},
         }
         result = size_refi_loan(refi_event, cashflow, debt)
         # 6 months × $60K = $360K → annualized = $720K
         self.assertAlmostEqual(float(result["stabilized_noi"]), 720000, places=0)
+
+        # The house default ignores noi_months: forward 2026-10..2027-09
+        # = 3 × $60K + 9 × $90K = $990K
+        forward = size_refi_loan({**refi_event, "noi_window": "forward"}, cashflow, debt)
+        self.assertAlmostEqual(float(forward["stabilized_noi"]), 990000, places=0)
+        default = {k: v for k, v in refi_event.items() if k != "noi_window"}
+        self.assertEqual(
+            size_refi_loan(default, cashflow, debt)["stabilized_noi"],
+            forward["stabilized_noi"],
+        )
+
+
+class TestForwardNOIWindow(unittest.TestCase):
+    """A stabilized refi sizes on forward NOI (product-owner decision)."""
+
+    def setUp(self):
+        self.time_grid = TimeGrid.build("2025-01", "2028-12")
+        self.debt = _make_debt_by_month(self.time_grid, balance=5000000)
+
+    def test_forward_window_is_used(self):
+        """NOI before the refi month does not enter the sizing NOI."""
+        # $40K a month before the refi (2027-01), $50K from it
+        cashflow = _make_ramp_cashflow(self.time_grid, lambda i: 40000 if i < 24 else 50000)
+        result = size_refi_loan(DSCR_REFI, cashflow, self.debt)
+        self.assertEqual(result["noi_used"], 600000.0)
+        self.assertEqual(result["stabilized_noi"], 600000.0)
+        self.assertEqual(result["sized_commitment"], _dscr_loan(600000))
+        self.assertEqual(result["noi_window"]["start"], "2027-01")
+        self.assertEqual(result["noi_window"]["end"], "2027-12")
+        self.assertTrue(result["noi_window"]["forward"])
+
+    def test_rising_noi_sizes_a_larger_forward_loan(self):
+        """DSCR-bound with NOI growing: the forward loan exceeds the trailing one."""
+        # NOI grows 1% a month
+        cashflow = _make_ramp_cashflow(self.time_grid, lambda i: 40000 * 1.01 ** i)
+        forward = size_refi_loan(DSCR_REFI, cashflow, self.debt)
+        trailing = size_refi_loan({**DSCR_REFI, "noi_window": "trailing"}, cashflow, self.debt)
+
+        forward_noi = sum(40000 * 1.01 ** i for i in range(24, 36))
+        trailing_noi = sum(40000 * 1.01 ** i for i in range(12, 24))
+        self.assertAlmostEqual(forward["noi_used"], forward_noi, delta=0.01)
+        self.assertAlmostEqual(trailing["noi_used"], trailing_noi, delta=0.01)
+        self.assertGreater(forward["sized_commitment"], trailing["sized_commitment"])
+        self.assertEqual(forward["sized_commitment"], _dscr_loan(round(forward_noi, 2)))
+
+    def test_window_is_annualized_near_the_analysis_end(self):
+        """Fewer than 12 months left: the forward window is annualized."""
+        # The analysis ends 2028-12: a 2028-07 refi has 6 forward months
+        cashflow = _make_ramp_cashflow(self.time_grid, lambda i: 50000 if i < 42 else 55000)
+        refi_event = {**DSCR_REFI, "trigger_month": "2028-07"}
+        result = size_refi_loan(refi_event, cashflow, self.debt)
+        # 6 × $55K = $330K → annualized $660K
+        self.assertEqual(result["noi_used"], 660000.0)
+        self.assertEqual(
+            result["noi_window"],
+            {"start": "2028-07", "end": "2028-12", "months": 6, "forward": True},
+        )
+        self.assertEqual(result["sized_commitment"], _dscr_loan(660000))
+
+    def test_deduction_and_noi_windows_match(self):
+        """NOI and the below-NOI deduction cover the same months."""
+        for trigger in ("2027-01", "2028-07"):
+            cashflow = _make_ramp_cashflow(self.time_grid, lambda i: 50000 + 500 * i)
+            for row in cashflow:
+                row["replacement_reserves"] = 7500.0
+            result = size_refi_loan({**DSCR_REFI, "trigger_month": trigger}, cashflow, self.debt)
+            window = result["noi_window"]
+            self.assertEqual([window["start"], window["end"]], result["deduction_window"])
+            self.assertEqual(result["below_noi_deduction"], 90000.0)
+            self.assertAlmostEqual(
+                result["sizing_cash_flow"], result["noi_used"] - 90000.0, places=2
+            )
+
+    def test_ltv_values_the_property_on_forward_noi(self):
+        """An LTV-sized refi values the property on the same forward NOI."""
+        cashflow = _make_ramp_cashflow(self.time_grid, lambda i: 40000 if i < 24 else 50000)
+        for row in cashflow:
+            row["replacement_reserves"] = 7500.0
+        refi_event = {
+            "trigger_month": "2027-01",
+            "sizing_method": "ltv",
+            "target_ltv": 0.70,
+            "exit_cap_for_ltv": 0.05,
+            "perm_loan_terms": {"rate": 0.055, "amort_years": 30},
+        }
+        result = size_refi_loan(refi_event, cashflow, self.debt)
+        # Forward NOI $600K / 5% = $12M × 70% = $8.4M (the trailing $480K would give $6.72M)
+        self.assertEqual(result["sized_commitment"], 8400000.0)
+        self.assertEqual(result["noi_used"], 600000.0)
+        self.assertEqual(result["below_noi_deduction"], 0.0)
+        self.assertEqual(result["sizing_noi_basis"], "noi_before_capex")
+        self.assertEqual(
+            result["noi_window"],
+            {"start": "2027-01", "end": "2027-12", "months": 12, "forward": True},
+        )
+
+    def test_unknown_noi_window_raises(self):
+        cashflow = _make_cashflow_by_month(self.time_grid)
+        with self.assertRaises(ValueError):
+            size_refi_loan({**DSCR_REFI, "noi_window": "sideways"}, cashflow, self.debt)
+
+    def test_schema_accepts_the_window_and_defaults_to_forward(self):
+        import json
+        from pathlib import Path
+
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "engine/schemas/deal_schema_v0_1.json").read_text()
+        )
+        prop = schema["$defs"]["refi_event"]["properties"]["noi_window"]
+        self.assertEqual(prop["enum"], ["forward", "trailing"])
+        self.assertEqual(prop["default"], "forward")
 
 
 class TestDebtServiceTransition(unittest.TestCase):
@@ -494,6 +623,13 @@ class TestEngineIntegration(unittest.TestCase):
         self.assertIn("bridge_payoff", refi)
         self.assertIn("stabilized_noi", refi)
         self.assertGreater(float(refi["sized_commitment"]), 0)
+        self.assertEqual(
+            refi["noi_window"],
+            {"start": "2027-01", "end": "2027-12", "months": 12, "forward": True},
+        )
+        self.assertEqual(
+            [refi["noi_window"]["start"], refi["noi_window"]["end"]], refi["deduction_window"]
+        )
 
     def test_refi_cashflow_has_no_gap(self):
         """After refi, leveraged CF should be non-zero in operating months."""

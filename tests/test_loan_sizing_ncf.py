@@ -321,11 +321,12 @@ def test_refi_loan_falls_when_the_capex_charge_rises():
     light = size_refi_loan(REFI, _refi_rows(2_500.0), _debt_rows())
     heavy = size_refi_loan(REFI, _refi_rows(7_500.0), _debt_rows())
     assert heavy["sized_commitment"] < light["sized_commitment"]
-    # The forward year's charge (12 months from the refi date) comes off the trailing NOI.
+    # The forward year's charge (12 months from the refi date) comes off the same year's NOI.
     assert heavy["below_noi_deduction"] == 90_000.0
     assert heavy["sizing_cash_flow"] == 510_000.0
     assert heavy["sized_commitment"] == _expected_refi_loan(510_000)
     assert heavy["deduction_window"] == ["2027-01", "2027-12"]
+    assert heavy["noi_window"] == {"start": "2027-01", "end": "2027-12", "months": 12, "forward": True}
     assert heavy["stabilized_noi"] == 600_000.0  # NOI itself is unchanged
 
 
