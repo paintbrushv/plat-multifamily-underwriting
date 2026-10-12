@@ -832,12 +832,20 @@ def test_pre_2000_vintage_without_a_pca_is_flagged_for_capex_review(minimal_deal
 
 
 def test_deferred_maintenance_without_an_immediate_budget_is_flagged():
-    deal = _ingest(year_built=2005, deferred_maintenance=True)
+    # Unknown vintage: no band to size the house placeholder, so nothing is budgeted.
+    deal = _ingest(deferred_maintenance=True)
     assert deal["deal_profile"]["deferred_maintenance"] is True
     assert [w.path for w in _capex_warnings(deal, "DEFERRED_CAPEX_UNBUDGETED")] == ["/capital_plan/immediate_capex"]
     assert _entries(deal)["immediate_capex"]["review_required"] is True
+    # With a vintage, the house placeholder budgets one year of the band high end
+    # and is flagged for a PCA (tests/test_deferred_maintenance_policy.py).
+    placeholder = _ingest(year_built=2005, deferred_maintenance=True)
+    assert _capex_warnings(placeholder, "DEFERRED_CAPEX_UNBUDGETED") == []
+    assert [w.path for w in _capex_warnings(placeholder, "DEFERRED_CAPEX_PLACEHOLDER")] == [
+        "/capital_plan/immediate_capex"]
     budgeted = _ingest(year_built=2005, deferred_maintenance=True, immediate_capex=300_000)
     assert _capex_warnings(budgeted, "DEFERRED_CAPEX_UNBUDGETED") == []
+    assert _capex_warnings(budgeted, "DEFERRED_CAPEX_PLACEHOLDER") == []
     assert validate_deal(budgeted).status == "PASS"
 
 

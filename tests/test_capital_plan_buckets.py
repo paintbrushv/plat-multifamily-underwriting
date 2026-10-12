@@ -193,7 +193,7 @@ def _pricing(canonical, profile):
     return canonical, findings
 
 
-def test_pricing_floor_raises_unsourced_values_and_waives_analyst_and_pca(minimal_deal_inputs):
+def test_pricing_floor_raises_unsourced_and_pca_values_and_waives_analyst(minimal_deal_inputs):
     profile = GuardrailProfile(strategy="cashflow", year_built=1984)  # floor $1,000
     # No provenance: raised to the floor (max(value, floor)).
     bare = _with_plan(minimal_deal_inputs, recurring_capex={"per_unit_annual": 400.0})
@@ -216,13 +216,16 @@ def test_pricing_floor_raises_unsourced_values_and_waives_analyst_and_pca(minima
     assert not [i for i in validate_deal(analyst).issues
                 if i.code == "GUARDRAIL_BELOW_FLOOR" and "recurring_capex" in i.path]
 
-    # PCA evidence below the floor: kept and disclosed too.
+    # PCA evidence below the floor: warned in underwrite, raised to the floor in
+    # pricing and disclosed (a lender PCA understates economic capex).
     pca = copy.deepcopy(deal)
     pca["capital_plan"] = {"pca": {"recurring_capex_per_unit": 600.0}}
     pca = resolve_assumptions(pca)
-    _, findings = _pricing(copy.deepcopy(pca), profile)
-    assert [f["action"] for f in findings] == ["floor_waived_by_deal_evidence"]
-    assert pca["assumptions"]["entries"]["recurring_capex_per_unit"]["guardrail"]["waived_by"].startswith("the PCA")
+    raised, findings = _pricing(copy.deepcopy(pca), profile)
+    assert [(f["action"], f["applied"]) for f in findings] == [("floor_applied_over_deal_evidence", 1_000.0)]
+    assert raised["capital_plan"]["recurring_capex"]["per_unit_annual"] == 1_000.0
+    record = pca["assumptions"]["entries"]["recurring_capex_per_unit"]["guardrail"]
+    assert record["action"] == "warned" and record["evidence"].startswith("the PCA")
 
 
 # ── backsolve: buckets 1 and 2 move the price ────────────────────────────
@@ -366,7 +369,7 @@ def test_the_register_shows_the_three_buckets_with_their_rationale():
                 "replacement_reserve_per_unit"):
         assert rows[key]["group"] == "Capital/Capex"
         assert rows[key]["why"]["rationale_known"], key
-    assert rows["recurring_capex_per_unit"]["guardrail"]["state"] == "waived"
+    assert rows["recurring_capex_per_unit"]["guardrail"]["state"] == "warned"  # PCA below the band
     for source in ("deal:pca", "house:recurring_capex_vintage", "house:deferred_capex", "house:replacement_reserve"):
         assert rationale_for(source)["known"], source
     html = render_register_html(canonical)
