@@ -58,6 +58,29 @@ class TestMcpAdapter(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(result["blocked_by"], "validation")
 
+    def test_assumption_register_is_bounded_and_refuses_without_assumptions(self):
+        entry = {
+            "value": 0.0625, "unit": "decimal", "source": "analyst", "basis": "synthetic",
+            "as_of": None, "confidence": "high", "default_value": 0.06, "review_required": False,
+            "override": {"value": 0.0625, "note": "IC view", "edited_by": "Analyst A"},
+            "candidates": [{"source": "analyst", "value": 0.0625,
+                            "default": {"source": "house:exit_cap_spread", "basis": "spread"}}],
+        }
+        inputs = {"metadata": {"deal_id": "Synthetic MCP"},
+                  "assumptions": {"entries": {"exit_cap_rate": entry}}}
+        with patch.object(mcp_server, "run_underwriting") as run:
+            result = mcp_server.assumption_register(inputs, filter="edited")
+        run.assert_not_called()
+        self.assertEqual(result["adapter_contract"], "plat.underwriting.mcp/1")
+        self.assertEqual(result["status"], "success")
+        row = result["rows"][0]
+        self.assertEqual(row["user_edit"]["edited_by"], "Analyst A")
+        self.assertEqual(row["default"]["source"], "house:exit_cap_spread")
+        self.assertNotIn("candidates", row)
+        self.assertEqual(row["candidate_count"], 1)
+        self.assertEqual(mcp_server.assumption_register({})["status"], "refused")
+        self.assertEqual(mcp_server.assumption_register(inputs, filter="nope")["error"]["code"], "BAD_FILTER")
+
 
 if __name__ == "__main__":
     unittest.main()

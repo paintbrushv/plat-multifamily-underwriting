@@ -85,6 +85,29 @@ def run_deal_summary(inputs: dict, include_renovation_summary: bool = True) -> d
     return summary
 
 
+@mcp.tool()
+def assumption_register(inputs: dict, filter: str = "all", include_candidates: bool = False) -> dict:
+    """List a resolved deal's assumptions: value, default and its source, why
+    that is the default, the user's edits and review or guardrail flags.
+
+    Filter is one of all, edited, review, house, deal, market, guardrail.
+    Candidates are left out unless asked for, to keep the response small.
+    Reads the canonical only; nothing is run or written.
+    """
+    from engine.assumptions.register import FILTERS, build_register
+    from engine.assumptions.sheet import has_assumptions
+
+    if filter not in FILTERS:
+        return {**_identity(), "status": "refused", "error": {
+            "code": "BAD_FILTER", "message": f"filter must be one of {list(FILTERS)}"}}
+    if not has_assumptions(inputs):
+        return {**_identity(), "status": "refused", "error": {
+            "code": "NO_ASSUMPTIONS",
+            "message": "inputs carry no assumptions section; resolve or ingest the deal first"}}
+    register = build_register(inputs, include_candidates=include_candidates, filter=filter)
+    return {**_identity(), "status": "success", **register}
+
+
 def _ltv(inputs: dict) -> Decimal | None:
     try:
         purchase = Decimal(str(inputs["purchase_assumptions"]["purchase_price"]))

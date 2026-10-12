@@ -24,6 +24,9 @@ Steps:
          results.json     the engine results
          assumptions.json the assumptions sheet (when the canonical has an
                           assumptions section)
+         assumptions.html the assumption register: every assumption, its
+                          default and why, and the user's edits (same
+                          condition)
          underwriting.xlsx with --xlsx: the underwriting workbook, including
                           the "Assumptions" tab
     5. Print the key metrics.
@@ -49,9 +52,11 @@ from engine.assumptions import (  # noqa: E402
     UnsupportedDealTypeError,
     resolve_assumptions,
 )
+from engine.assumptions.register_html import write_register_html  # noqa: E402
 from engine.assumptions.sheet import (  # noqa: E402
     has_assumptions,
     load_assumption_overrides,
+    stamp_overrides,
     write_assumptions_json,
 )
 from engine.ingest.ingestion_pipeline import sync_ingest_gate_assumptions  # noqa: E402
@@ -64,6 +69,7 @@ CANONICAL_NAME = "canonical.json"
 VALIDATION_NAME = "validation.json"
 RESULTS_NAME = "results.json"
 ASSUMPTIONS_NAME = "assumptions.json"
+REGISTER_NAME = "assumptions.html"
 WORKBOOK_NAME = "underwriting.xlsx"
 
 
@@ -117,6 +123,7 @@ def _apply_overrides(canonical: dict[str, Any], path: Path, *, no_market_data: b
 
         market = default_registry()
     try:
+        overrides = stamp_overrides(overrides, canonical)  # keeps recorded edit metadata
         resolved = resolve_assumptions(canonical, overrides=overrides, market=market)
     except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
         raise BadInput(f"failed to apply assumption overrides: {exc}") from None
@@ -205,6 +212,7 @@ def run(args: argparse.Namespace) -> int:
     print(f"Results: {_write_json(out_dir / RESULTS_NAME, results)}")
     if has_assumptions(canonical):
         print(f"Assumptions sheet: {write_assumptions_json(canonical, out_dir / ASSUMPTIONS_NAME)}")
+        print(f"Assumption register: {write_register_html(canonical, out_dir / REGISTER_NAME)}")
     if args.xlsx:
         from engine.excel_output import write_results_to_workbook
 

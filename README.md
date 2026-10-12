@@ -19,11 +19,11 @@ pytest
 | `engine/ingest/` | Rent roll, T12, and OM parsers -> canonical deal JSON. Refuses to invent missing values. |
 | `engine/validator.py` | Schema v0.1 conformance + reference integrity + cohort-overlap gates. |
 | `engine/property_tax.py`, `engine/tax_regimes.py` | Millage-based property tax projection with per-regime statute citations. |
-| `engine/api.py` | Framework-free JSON request handlers (`handle_run_deal`, portfolio, refi-vs-sell). |
-| `engine/mcp_server.py` | Installed `plat.underwriting.mcp/1` stdio adapter for validation, small summary metrics, and feasibility. |
+| `engine/api.py` | Framework-free JSON request handlers (`handle_run_deal`, `handle_assumption_register`, portfolio, refi-vs-sell). |
+| `engine/mcp_server.py` | Installed `plat.underwriting.mcp/1` stdio adapter for validation, small summary metrics, feasibility, and the assumption register. |
 | `runs/ingest_deal.py` | Canonical intake CLI: documents or agent-authored JSON -> validated deal JSON. |
 | `runs/run_deal.py` | Run CLI: canonical deal JSON -> validation, engine results, assumptions sheet, workbook, key metrics. |
-| `engine/assumptions/`, `runs/assumptions_sheet.py` | Assumption layer (ADR 0003): resolved assumptions with provenance, and the editable assumptions sheet (JSON and Excel). |
+| `engine/assumptions/`, `runs/assumptions_sheet.py` | Assumption layer (ADR 0003): resolved assumptions with provenance, the editable assumptions sheet (JSON and Excel), and the assumption register (`assumptions.html`). |
 
 Quick start — run the intake CLI on the synthetic fixtures:
 
@@ -52,6 +52,46 @@ Each edited row becomes an analyst override. The entry keeps its
 file also works as `runs/ingest_deal.py --assumption-overrides <file.json|file.xlsx>`.
 Underwriting workbooks written by `engine.excel_output` carry the same
 "Assumptions" tab.
+
+### Assumption register
+
+The assumption register is the place to see every assumption the deal is
+underwritten on, the house default behind it, why that is the default, and
+what the analyst changed. Ingest, `run_deal.py` and `assumptions_sheet.py
+apply` write it next to their outputs as `assumptions.html` (one
+self-contained page: no network, works offline, prints cleanly, follows the
+system light or dark theme), and `assumptions_sheet.py html <canonical.json>
+[-o out.html]` writes it for any resolved canonical.
+
+How to read it:
+
+- The header shows the deal profile (deal type, MSA, submarket, vintage) and
+  counts: assumptions from deal evidence, from market data, house defaults,
+  engine fallbacks, user edits, rows needing review and guardrail flags.
+- Chips filter the table: All, Edited by user, Needs review, House defaults,
+  Deal evidence, Market, Guardrail flags.
+- The table is grouped (Revenue, Vacancy & Credit, Opex, Capital/Capex, Exit,
+  Debt/Fees, Profile/Other). Each row shows the value the model uses (vectors
+  and curves compactly, such as `start 8.0% → 6.5% over 24 mo`), the default
+  and its source, **why this default** (a plain-English policy rationale for
+  that source plus how the value was computed), the user's edit (value, note,
+  who and when, and the change from the default) and its flags. "Candidates
+  considered" expands to every value the resolver weighed.
+- Highlighted rows were edited by the user. "Needs review" marks house
+  defaults and engine fallbacks; a guardrail flag means a value sits below a
+  house floor (warned when underwriting, raised when pricing).
+
+How to edit: the page is read-only. Change a value in the "Assumptions" tab of
+the workbook or in `assumptions.json` (see above) and apply it; the register
+is rewritten with the edit. The same tab carries the register's Group,
+Default Source, Why This Default, Edited By / At and Flags columns, sorted by
+group, with edited rows highlighted. To record who made an edit, pass
+`--editor NAME` to `apply`, with `--edit-date YYYY-MM-DD` or `--stamp-date`
+(today) for the date; an override file may also carry `edited_by` and
+`edited_at` itself. Nothing else reads the clock, so the same canonical always
+produces the same page. The register is also available as JSON from
+`engine.api.handle_assumption_register` and the MCP tool
+`assumption_register`.
 
 ## Underwrite a deal end to end
 
@@ -134,8 +174,8 @@ the registry has no data for them.
 
 `run_deal.py` validates (exit 1 with the report on any ERROR), runs the
 engine and writes `canonical.json`, `validation.json`, `results.json`,
-`assumptions.json` and, with `--xlsx`, `underwriting.xlsx` (with the
-Assumptions tab). It prints NOI year 1, unlevered and levered IRR, equity
+`assumptions.json`, `assumptions.html` (the assumption register) and, with
+`--xlsx`, `underwriting.xlsx` (with the Assumptions tab). It prints NOI year 1, unlevered and levered IRR, equity
 multiples, minimum DSCR and exit value. It can also apply overrides itself:
 `--assumption-overrides output/overrides.json [--no-market-data]`. Exit codes:
 0 ok, 1 validation failure, 2 bad input.
