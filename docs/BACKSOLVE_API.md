@@ -36,6 +36,32 @@ The result discloses resolved fees, benchmark, tax policy, inferred vintage,
 and the house adjustments actually applied. Defaults are model assumptions,
 not observed property facts or a claim of universal industry practice.
 
+### Analyst values win over policy defaults
+
+The policy defaults never silently replace an analyst's value. For each
+pricing-policy field (`sale_cost_percent`, `acquisition_fee_pct`,
+`asset_management_fee_pct`, `disposition_fee_pct`,
+`annual_partnership_expenses`, `partnership_closing_costs`,
+`purchase_closing_cost_pct`, `loan_closing_costs`), the value priced is:
+
+1. an explicit policy value (a key in `policy`, `--policy-json`, or a CLI flag
+   that was given), labeled `house:backsolve_policy`;
+2. else the canonical's analyst value: its `assumptions` entry has
+   `source: "analyst"` (for example an ingest `--sale-cost`, an
+   `--assumption-overrides` or sheet edit, or a value already in a hand-authored
+   canonical that was resolved). It is priced as given and keeps its `analyst`
+   label;
+3. else `engine.backsolve_policy.DEFAULTS`, labeled `house:backsolve_policy`.
+
+The exit cap follows the same rule: the policy's `exit_cap_rate` when given,
+else the canonical's. A canonical with no `assumptions` section records no
+provenance, so its values are not treated as analyst values and the defaults
+apply; run it through the resolver (ingest, or `resolve_assumptions`) first to
+have them honored. `effective_assumptions.policy_value_sources` says who set
+each value: `explicit_policy`, `canonical_analyst`, `policy_default`, or (exit
+cap only) `canonical`. A deal whose canonical carries no analyst value for
+these fields prices exactly as before.
+
 Floors compare annual dollars: opex lines are annualized from their
 `calculation_type` first, and a floor replaces the analyst's matching line
 rather than being added beside it. Concessions are read as `pct_rent` or
@@ -115,8 +141,9 @@ an `override` that pins the priced value). Only `assumptions` and
 `deal_profile` change; every priced number is unchanged.
 
 Values the pricing sets outside the floors are labeled by who set them, never
-as analyst edits: fees, closing costs, sale cost and a policy exit cap carry
-`source: "house:backsolve_policy"`; inputs the house box-score rebase rebuilt
+as analyst edits: fees, closing costs, sale cost and an exit cap the policy
+set (an explicit policy value or a default, never an analyst value the
+canonical carries) carry `source: "house:backsolve_policy"`; inputs the house box-score rebase rebuilt
 (and an opex line pricing preparation set, such as a revenue-quality bridge
 paired expense) carry `house:pricing_normalization`; a value a floor raised
 carries the floor's source; the real estate tax line reassessed at the
@@ -192,10 +219,16 @@ arbitrary non-monotonic model. The search stays inside the supplied bounds.
 
 The CLI requires `--policy-version`, `--benchmark-5yr-treasury`,
 `--benchmark-as-of`, and `--benchmark-source`. `--policy-json` supplies explicit
-policy overrides; its version must match the selected version. An infeasible
+policy overrides; its version must match the selected version. A fee flag
+(`--sale-cost-percent`, `--acquisition-fee-pct`, ...) is an explicit policy
+value only when given; omitted, the canonical's analyst value is priced, else
+the policy default. An infeasible
 or exhausted search writes its status and exits with code 2 so a caller cannot
 treat it as a completed solve. Exit code 0 requires a converged boundary or a
-feasible supplied ceiling.
+feasible supplied ceiling. Every run prints a concise summary to stdout:
+status, solved price, cash-on-cash basis and target, achieved cash-on-cash,
+levered IRR, minimum DSCR, the number of house floors enforced, and the paths
+of `backsolve_summary.json` and the other artifacts written.
 
 The engine MCP tool `backsolve_deal_price` returns the same summary and
 assumptions, excluding large cashflow arrays. The Platworks tool

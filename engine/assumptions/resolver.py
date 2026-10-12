@@ -1467,6 +1467,16 @@ def _context(canonical: dict[str, Any], profile: DealProfile, mode: str, market:
     )
 
 
+def default_provenance(default: _Choice) -> dict[str, Any]:
+    """Where an overridden entry's default came from (kept on its analyst candidate)."""
+    return {
+        "source": default.source,
+        "basis": default.basis,
+        "as_of": default.as_of,
+        "confidence": default.confidence,
+    }
+
+
 def _same_current(current: _Current, prior: Mapping[str, Any]) -> bool:
     return _same(current.value, prior.get("value")) and _same(
         current.cohort_overrides or None, prior.get("cohort_overrides") or None
@@ -1514,7 +1524,14 @@ def _resolve_key(
             f"Analyst override ({override.get('note') or 'analyst override'}); the resolver default is "
             f"{_fmt(default.value, spec.unit)} from {default.source}."
         )
-        candidates = [_candidate(SOURCE_ANALYST, value, override.get("note") or "analyst override")] + candidates
+        # The analyst candidate records the default's provenance, so a later
+        # re-resolution without market data can clear the override back to it.
+        candidates = [
+            _candidate(
+                SOURCE_ANALYST, value, override.get("note") or "analyst override",
+                default=default_provenance(default),
+            )
+        ] + candidates
     else:
         value, cohorts = default.value, None
         source, confidence, as_of = default.source, default.confidence, default.as_of

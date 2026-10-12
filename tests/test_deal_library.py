@@ -38,6 +38,7 @@ from engine.assumptions.registry import is_valid_source, requires_review
 from engine.assumptions.sheet import assumptions_document, write_assumptions_json
 from engine.backsolve import backsolve_price
 from engine.engine import run_underwriting
+from engine.market_data import MarketDataRegistry, SyntheticProvider
 from engine.validator import validate_deal
 from runs import assumptions_sheet
 from tests import deal_library as dl
@@ -504,6 +505,67 @@ def test_stabilized_deals_keep_the_year1_basis_and_their_price():
     assert "capex_funding" not in default["results"]
 
 
+STABILIZED = "a_stabilized_1990s"
+
+
+def _solve_a(canonical, **policy_values):
+    config = BACKSOLVE[STABILIZED]
+    policy = {"version": "plat.backsolve-policy/1", "strategy": "cashflow", **policy_values}
+    result = backsolve_price(copy.deepcopy(canonical), target_coc=config["target_coc"], policy=policy,
+                             benchmark=BENCHMARK, min_price="1000000.00", max_price=config["max_price"])
+    assert result["status"] == "converged"
+    return result
+
+
+@lru_cache(maxsize=None)
+def _baseline_a() -> str:
+    return json.dumps(_solve_a(_canonical(STABILIZED)))
+
+
+def test_backsolve_prices_the_analysts_sale_cost_unless_the_policy_sets_one():
+    """Defaults never silently override the analyst: an ingest --sale-cost of 3%
+    is priced as 3% and stays labeled analyst, not the policy's 2%."""
+    baseline = json.loads(_baseline_a())
+    canonical = resolve_assumptions(_canonical(STABILIZED), overrides={"sale_cost_percent": 0.03})
+    result = _solve_a(canonical)
+    case, sources = result["case"], result["effective_assumptions"]["policy_value_sources"]
+    assert case["exit_assumptions"]["sale_cost_percent"] == 0.03
+    assert sources["sale_cost_percent"] == "canonical_analyst"
+    assert result["effective_assumptions"]["policy"]["sale_cost_percent"] == "0.03"
+    entry = _entries(case)["sale_cost_percent"]
+    assert (entry["source"], entry["value"]) == ("analyst", 0.03)
+    # The sale cost does not move a cash-on-cash price; it lowers the levered IRR.
+    assert result["summary"]["solved_purchase_price"] == baseline["summary"]["solved_purchase_price"]
+    assert result["summary"]["levered_irr"] < baseline["summary"]["levered_irr"]
+    assert resolve_assumptions(case, mode="pricing") == case
+
+    # An explicit policy value is a policy override: it wins and is labeled as the policy's.
+    explicit = _solve_a(canonical, sale_cost_percent="0.025")
+    assert explicit["case"]["exit_assumptions"]["sale_cost_percent"] == 0.025
+    assert explicit["effective_assumptions"]["policy_value_sources"]["sale_cost_percent"] == "explicit_policy"
+    entry = _entries(explicit["case"])["sale_cost_percent"]
+    assert entry["source"] == "house:backsolve_policy"
+    assert "explicit policy value" in entry["basis"]
+
+
+def test_backsolve_keeps_analyst_fees_and_defaults_the_rest():
+    """The same rule for every PRICING_POLICY_KEYS fee: an analyst value is priced,
+    a value the canonical leaves to a default takes the policy default."""
+    baseline = json.loads(_baseline_a())
+    assert baseline["effective_assumptions"]["policy_value_sources"]["acquisition_fee_pct"] == "policy_default"
+    canonical = resolve_assumptions(_canonical(STABILIZED), overrides={"acquisition_fee_pct": 0.005})
+    result = _solve_a(canonical)
+    assert result["case"]["fund_assumptions"]["acquisition_fee_pct"] == 0.005
+    assert result["effective_assumptions"]["policy_value_sources"]["acquisition_fee_pct"] == "canonical_analyst"
+    assert _entries(result["case"])["acquisition_fee_pct"]["source"] == "analyst"
+    # A lower acquisition fee lowers the equity basis, so the target is met at a higher price.
+    assert result["summary"]["solved_purchase_price"] > baseline["summary"]["solved_purchase_price"]
+    # Keys the canonical leaves to defaults are priced at, and labeled as, the policy default.
+    for key in ("asset_management_fee_pct", "disposition_fee_pct", "loan_closing_costs"):
+        assert result["effective_assumptions"]["policy_value_sources"][key] == "policy_default", key
+        assert _entries(result["case"])[key]["source"] == "house:backsolve_policy", key
+
+
 # ── assumptions sheet ────────────────────────────────────────────────────
 
 
@@ -548,6 +610,71 @@ def test_sheet_override_round_trip_moves_the_result_the_expected_way(slug, tmp_p
     assert year1(results) < year1(baseline)
     assert results["metrics"]["irr"]["unlevered_irr"] < baseline["metrics"]["irr"]["unlevered_irr"]
     assert results["metrics"]["irr"]["levered_irr"] < baseline["metrics"]["irr"]["levered_irr"]
+
+
+CLEARED_KEYS = ("exit_cap_rate", "rent_growth")
+RESTORED_FIELDS = ("value", "source", "as_of", "confidence", "default_value", "override", "review_required")
+
+
+def _assert_restored(before, after):
+    for key in CLEARED_KEYS:
+        for field in RESTORED_FIELDS:
+            assert _entries(after)[key][field] == _entries(before)[key][field], (key, field)
+    assert after["exit_assumptions"]["exit_cap_rate"] == before["exit_assumptions"]["exit_cap_rate"]
+    assert after["growth_assumptions"] == before["growth_assumptions"]
+
+
+@pytest.mark.parametrize("registry", ["none", "empty", "deal"])
+def test_clearing_an_override_restores_the_market_default(registry):
+    slug = "a_stabilized_1990s"
+    before = _canonical(slug)
+    assert all(_entries(before)[k]["source"] == "market:synthetic" for k in CLEARED_KEYS)
+    overridden = resolve_assumptions(before, overrides={"exit_cap_rate": 0.06, "rent_growth": 0.02})
+    assert all(_entries(overridden)[k]["source"] == "analyst" for k in CLEARED_KEYS)
+    # Re-resolving while the override stands keeps the market default as the default.
+    kept = resolve_assumptions(overridden)
+    for key in CLEARED_KEYS:
+        assert _entries(kept)[key]["default_value"] == _entries(before)[key]["default_value"], key
+        assert "from market:synthetic" in _entries(kept)[key]["basis"], key
+
+    # No registry, one without data for the deal (e.g. no feeder files), or the deal's own.
+    market = {
+        "none": None,
+        "empty": MarketDataRegistry([SyntheticProvider({})]),
+        "deal": dl.synthetic_registry(_deal(slug)),
+    }[registry]
+    for start in (overridden, kept):
+        cleared = resolve_assumptions(start, overrides={k: None for k in CLEARED_KEYS}, market=market)
+        _assert_restored(before, cleared)
+        # Stable: a later re-resolution without market data changes nothing.
+        _assert_restored(before, resolve_assumptions(cleared))
+
+
+@pytest.mark.parametrize("flags", [["--no-market-data"], []], ids=["no_market_data", "default_registry"])
+def test_sheet_apply_clear_restores_the_market_default(flags, tmp_path, monkeypatch):
+    import engine.market_data
+
+    slug = "a_stabilized_1990s"
+    before = _canonical(slug)
+    calls = []
+
+    def registry(*_args, **_kwargs):
+        calls.append(1)
+        return dl.synthetic_registry(_deal(slug))
+
+    monkeypatch.setattr(engine.market_data, "default_registry", registry)
+    paths = {name: tmp_path / f"{name}.json" for name in ("deal", "set", "overridden", "clear", "cleared")}
+    paths["deal"].write_text(json.dumps(before), encoding="utf-8")
+    paths["set"].write_text(json.dumps({"exit_cap_rate": 0.06, "rent_growth": 0.02}), encoding="utf-8")
+    paths["clear"].write_text(json.dumps({k: None for k in CLEARED_KEYS}), encoding="utf-8")
+    apply = lambda src, sheet, out: assumptions_sheet.main(  # noqa: E731
+        ["apply", str(paths[src]), str(paths[sheet]), "-o", str(paths[out]), *flags]
+    )
+    assert apply("deal", "set", "overridden") == 0
+    assert _entries(json.loads(paths["overridden"].read_text()))["exit_cap_rate"]["value"] == 0.06
+    assert apply("overridden", "clear", "cleared") == 0
+    _assert_restored(before, json.loads(paths["cleared"].read_text()))
+    assert len(calls) == (0 if flags else 2)  # the registry is the default, as in ingest
 
 
 # ── determinism and goldens ──────────────────────────────────────────────

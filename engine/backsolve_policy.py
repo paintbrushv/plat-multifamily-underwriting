@@ -73,7 +73,13 @@ def validate_benchmark(benchmark):
     return {"rate": str(rate), "as_of": as_of, "source": source.strip()}
 
 
-def resolve_policy(policy, canonical):
+def resolve_policy(policy, canonical, analyst_values=None):
+    """The policy values backsolve prices with.
+
+    Precedence per field: an explicit policy value, else an analyst value the
+    canonical carries (``analyst_values``, keyed like ``DEFAULTS``), else
+    ``DEFAULTS``. The exit cap is the policy's, else the canonical's.
+    """
     allowed = set(DEFAULTS) | {"version", "strategy", "year_built", "exit_cap_rate", "coc_basis"}
     if not isinstance(policy, dict) or policy.get("version") != POLICY_VERSION:
         raise BacksolveInputError(f"policy.version must be {POLICY_VERSION}")
@@ -87,7 +93,13 @@ def resolve_policy(policy, canonical):
     coc_basis = policy.get("coc_basis", DEFAULT_COC_BASIS[policy["strategy"]])
     if coc_basis not in COC_BASES:
         raise BacksolveInputError(f"policy.coc_basis must be one of {', '.join(COC_BASES)}")
-    values = {**DEFAULTS, **{k: v for k, v in policy.items() if k in DEFAULTS}}
+    analyst = {}
+    for name, value in (analyst_values or {}).items():
+        if name not in DEFAULTS or name in policy:
+            continue
+        analyst[name] = decimal_value(value, f"canonical analyst value {name}",
+                                      rate=name in RATE_FIELDS, cents=name not in RATE_FIELDS)
+    values = {**DEFAULTS, **analyst, **{k: v for k, v in policy.items() if k in DEFAULTS}}
     values["exit_cap_rate"] = policy.get("exit_cap_rate", (canonical.get("exit_assumptions") or {}).get("exit_cap_rate"))
     for name, value in values.items():
         if name == "insurance_per_unit_override" and value is None:
@@ -96,6 +108,25 @@ def resolve_policy(policy, canonical):
                                      positive=name == "exit_cap_rate", rate=name in RATE_FIELDS,
                                      cents=name not in RATE_FIELDS)
     return {**values, "strategy": policy["strategy"], "year_built": year, "coc_basis": coc_basis}
+
+
+VALUE_SOURCE_POLICY = "explicit_policy"
+VALUE_SOURCE_ANALYST = "canonical_analyst"
+VALUE_SOURCE_DEFAULT = "policy_default"
+VALUE_SOURCE_CANONICAL = "canonical"
+
+
+def policy_value_sources(policy, analyst_values=None):
+    """Who set each priced policy value (disclosed in ``effective_assumptions``)."""
+    analyst = analyst_values or {}
+    sources = {
+        name: VALUE_SOURCE_POLICY if name in policy
+        else VALUE_SOURCE_ANALYST if name in analyst
+        else VALUE_SOURCE_DEFAULT
+        for name in DEFAULTS
+    }
+    sources["exit_cap_rate"] = VALUE_SOURCE_POLICY if "exit_cap_rate" in policy else VALUE_SOURCE_CANONICAL
+    return sources
 
 
 def describe_policy(values):

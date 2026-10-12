@@ -545,7 +545,14 @@ def _assert_pricing_labels(result, original):
     entries = case["assumptions"]["entries"]
     overrides = result["summary"]["policy_summary"]["policy_overrides"]
     assert _shown_as_analyst_edits(case, original) == set()
+    sources = result["effective_assumptions"]["policy_value_sources"]
+    before = original["assumptions"]["entries"]
     for key in backsolve.PRICING_POLICY_KEYS:
+        if sources[key] == "canonical_analyst":
+            # An analyst value the canonical carries is priced as given and keeps its label.
+            assert before[key]["source"] == entries[key]["source"] == "analyst", key
+            assert entries[key]["value"] == before[key]["value"], key
+            continue
         assert entries[key]["source"] == "house:backsolve_policy", key
         assert entries[key]["override"] == {"value": entries[key]["value"], "note": guardrails.PRICING_POLICY_NOTE}
     assert not [o for o in overrides if "normalization" in o]
@@ -574,11 +581,17 @@ def test_backsolve_labels_what_its_pricing_policy_and_floors_set(pricing_deal):
     result = _solve(pricing_deal)
     entries, raised = _assert_pricing_labels(result, pricing_deal)
     case = result["case"]
-    # The policy's explicit exit cap, fees and closing costs.
+    # The policy's explicit exit cap is labeled as the policy's.
     assert entries["exit_cap_rate"]["source"] == "house:backsolve_policy"
     assert "explicit policy value" in entries["exit_cap_rate"]["basis"]
+    # The canonical's analyst fees and closing costs are priced as given, not
+    # replaced by engine/backsolve_policy.DEFAULTS (asset management 1.0%, not 1.5%).
     assert entries["annual_partnership_expenses"]["value"] == case["fund_assumptions"]["annual_partnership_expenses"]
-    assert "DEFAULTS['acquisition_fee_pct']" in entries["acquisition_fee_pct"]["basis"]
+    assert case["fund_assumptions"]["asset_management_fee_pct"] == 0.01
+    assert entries["acquisition_fee_pct"]["source"] == "analyst"
+    # A fee the canonical leaves to the engine fallback takes the policy default.
+    assert entries["loan_closing_costs"]["source"] == "house:backsolve_policy"
+    assert "DEFAULTS['loan_closing_costs']" in entries["loan_closing_costs"]["basis"]
     # Collection loss is floored per segment, not flattened: the 0.2% year-1
     # segment is raised to 0.75% and the 2% segment is kept.
     assert entries["collection_loss"]["source"] == "house:vintage_1980s"
@@ -652,8 +665,10 @@ def test_library_backsolve_cases_carry_pricing_labels(slug, strategy, target, ma
     assert entries["opex.real_estate_taxes.base"]["source"] == "house:property_tax_module"
     # The exit cap came from the canonical, not the policy: its label is unchanged.
     assert entries["exit_cap_rate"]["source"] != "house:backsolve_policy"
-    # sale_cost_percent was an ingest input the policy matched: the basis says so.
-    assert "matches the canonical's 2.00% (analyst)" in entries["sale_cost_percent"]["basis"]
+    # sale_cost_percent was an ingest (analyst) input: it is priced as given and keeps its label.
+    assert result["effective_assumptions"]["policy_value_sources"]["sale_cost_percent"] == "canonical_analyst"
+    assert entries["sale_cost_percent"]["source"] == "analyst"
+    assert result["case"]["exit_assumptions"]["sale_cost_percent"] == before["sale_cost_percent"]["value"]
 
 
 def test_insurance_override_below_the_floor_is_kept_and_disclosed(pricing_deal):

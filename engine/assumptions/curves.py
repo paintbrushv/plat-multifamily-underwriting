@@ -66,6 +66,7 @@ from engine import underwriting_policy as house
 from engine.assumptions.canonical_ops import ensure_year1_concession_schedule
 from engine.assumptions.registry import (
     MARKET_PREFIX,
+    SOURCE_ANALYST,
     SOURCE_DEAL_RENT_ROLL,
     SOURCE_DEAL_T12,
     house_vintage_source,
@@ -249,31 +250,101 @@ def carry_market_default(
     """Keep a market-informed default when re-resolving without market data.
 
     Re-resolving (``--partial-json``, overrides) without a registry must not
-    silently revert market-derived values to house defaults.
+    silently revert market-derived values to house defaults. With a registry
+    that has data for the key, the default is re-derived from it (this
+    returns ``default`` unchanged); a registry with no data for the key (for
+    example the default registry without feeder files) counts as none.
+
+    An overridden prior entry keeps its market-informed ``default_value`` too,
+    with the default's provenance recorded on its analyst candidate, so
+    clearing the override (``{key: None}``) restores the pre-override value
+    and source, not the house fallback.
     """
-    if ctx.market is not None or not isinstance(prior, Mapping) or prior.get("override"):
+    if not isinstance(prior, Mapping):
         return default, candidates
-    source = str(prior.get("source", ""))
-    used_market = source.startswith(MARKET_PREFIX) or any(
-        str(c.get("source", "")).startswith(MARKET_PREFIX)
-        for c in prior.get("candidates") or []
-        if isinstance(c, Mapping)
-    )
+    if any(str(c.get("source", "")).startswith(MARKET_PREFIX) for c in candidates):
+        return default, candidates  # re-queried: the registry has data for this key
+    prior_candidates = [c for c in prior.get("candidates") or [] if isinstance(c, Mapping)]
+    market_seen = [c for c in prior_candidates if str(c.get("source", "")).startswith(MARKET_PREFIX)]
+    used_market = str(prior.get("source", "")).startswith(MARKET_PREFIX) or bool(market_seen)
     if not used_market or current.state != PRESENT:
         return default, candidates
     if not _same(current.value, prior.get("value")):
         return default, candidates
+    if prior.get("override"):
+        return _carry_overridden_default(prior, prior_candidates, market_seen, default, candidates)
     basis = str(prior.get("basis", ""))
     if _KEPT_NOTE not in basis:
         basis = f"{basis} {_KEPT_NOTE}".strip()
     kept = _Choice(
-        source=source,
+        source=str(prior.get("source", "")),
         value=deepcopy(prior.get("default_value")),
         basis=basis,
         as_of=prior.get("as_of"),
         confidence=prior.get("confidence"),
     )
-    return kept, deepcopy(list(prior.get("candidates") or []))
+    return kept, deepcopy(prior_candidates)
+
+
+# "...; the resolver default is <value> from <source>." (resolver._resolve_key)
+_OVERRIDE_DEFAULT_SOURCE = re.compile(
+    r"the resolver default is .*? from "
+    r"(analyst|engine_fallback|deal:[a-z0-9_]+|market:[A-Za-z0-9_.\-]+|house:[a-z0-9_]+)\."
+)
+
+
+def _recorded_default(prior: Mapping[str, Any], prior_candidates: list[Mapping[str, Any]]) -> Optional[dict]:
+    """The default provenance an overridden entry recorded, else parsed from its basis."""
+    for candidate in prior_candidates:
+        record = candidate.get("default")
+        if candidate.get("source") == SOURCE_ANALYST and isinstance(record, Mapping) and record.get("source"):
+            return dict(record)
+    match = _OVERRIDE_DEFAULT_SOURCE.search(str(prior.get("basis", "")))
+    if match is None:
+        return None
+    source = match.group(1)
+    selected = next(
+        (c for c in prior_candidates if c.get("source") == source and "(selected)" in str(c.get("basis", ""))),
+        None,
+    )
+    return {
+        "source": source,
+        "basis": f"Resolver default from {source}.",
+        "as_of": selected.get("as_of") if selected else None,
+        "confidence": selected.get("confidence") if selected else None,
+    }
+
+
+def _carry_overridden_default(
+    prior: Mapping[str, Any],
+    prior_candidates: list[Mapping[str, Any]],
+    market_seen: list[Mapping[str, Any]],
+    default: _Choice,
+    candidates: list[dict[str, Any]],
+) -> tuple[_Choice, list[dict[str, Any]]]:
+    """An overridden entry's market-informed default, kept from its last resolution.
+
+    The market candidates recorded then are still valid provenance; the
+    other candidates are gathered afresh.
+    """
+    recorded_value = prior.get("default_value")
+    if _same(recorded_value, default.value):
+        return default, candidates
+    record = _recorded_default(prior, prior_candidates)
+    if record is None:
+        return default, candidates
+    basis = str(record.get("basis") or "")
+    if _KEPT_NOTE not in basis:
+        basis = f"{basis} {_KEPT_NOTE}".strip()
+    kept = _Choice(
+        source=str(record["source"]),
+        value=deepcopy(recorded_value),
+        basis=basis,
+        as_of=record.get("as_of"),
+        confidence=record.get("confidence"),
+    )
+    fresh = [c for c in candidates if not str(c.get("source", "")).startswith(MARKET_PREFIX)]
+    return kept, fresh + [deepcopy(dict(c)) for c in market_seen]
 
 
 # ── months ───────────────────────────────────────────────────────────────

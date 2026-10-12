@@ -87,6 +87,13 @@ python runs/ingest_deal.py --property-id SYN-A \
   one. A null `exit_cap_rate` is an unresolved placeholder: validation warns
   (`EXIT_CAP_RATE_PLACEHOLDER`) and the engine refuses to run it.
 - Add `--no-market-data` to resolve from deal evidence and house policy only.
+  Without feeder data or a user file (see [Market data](#market-data)), the
+  rows market data would fill use house fallbacks: rent growth and
+  stabilized vacancy here, and concessions or the exit cap when the deal has
+  no T12 evidence or analyst value for them. Their source is `house:*` and
+  the sheet flags them for review (`review_required: true`).
+- `--validate` prints the validation report and exits 1 when it fails
+  (warnings alone exit 0); the output JSON is still written so you can fix it.
 
 **2. Review** `output/deal.assumptions.json` (one row per assumption: value,
 unit, source, basis, default, override, delta, guardrail). Rows sourced from
@@ -109,6 +116,22 @@ python runs/assumptions_sheet.py apply output/deal.json output/overrides.json \
 python runs/run_deal.py output/deal.v2.json --output-dir output/deal_run --xlsx
 ```
 
+An overridden row keeps its `default_value`. To drop an override, blank its
+Override cell (or set the key to `null` in the overrides file) and apply
+again: the row returns to its full default, market data included, with its
+source:
+
+```bash
+echo '{"rent_growth": null}' > output/clear.json
+python runs/assumptions_sheet.py apply output/deal.v2.json output/clear.json \
+  --output output/deal.v3.json --no-market-data
+```
+
+`apply` re-resolves with the market-data registry
+(`engine.market_data.default_registry()`), like ingest; `--no-market-data`
+skips it. Either way, market values already in the canonical are kept when
+the registry has no data for them.
+
 `run_deal.py` validates (exit 1 with the report on any ERROR), runs the
 engine and writes `canonical.json`, `validation.json`, `results.json`,
 `assumptions.json` and, with `--xlsx`, `underwriting.xlsx` (with the
@@ -128,7 +151,13 @@ python -m engine.backsolve --canonical-json output/deal.json \
 ```
 
 It writes `backsolve_summary.json`, the priced canonical, its results and
-`assumptions.json` into the output folder.
+`assumptions.json` into the output folder, and prints the status, solved
+price, cash-on-cash basis and target, achieved cash-on-cash, levered IRR,
+minimum DSCR, the number of floors enforced and those paths. It exits 2 when
+the search is infeasible or exhausted. Fees, closing costs and the sale cost
+are the canonical's analyst values when it has them (the ingest `--sale-cost`,
+an override), else the policy defaults; a flag such as `--sale-cost-percent`
+overrides both (see `docs/BACKSOLVE_API.md`).
 
 ### Market data
 
@@ -141,6 +170,52 @@ them. Neither feeder ships data, and this repository never holds licensed data.
 | `PLAT_SUPPLY_DEMAND_ROOT` | plat-supply-demand forecast parquet (default: sibling `../plat-supply-demand`). |
 | `PLAT_MARKET_DATA_PROVIDERS` | Provider order, comma-separated, e.g. `user_file,plat_market_study_agent,plat_supply_demand`. Default: configured user/paid providers, then the two feeders. |
 | `PLAT_MARKET_DATA_USER_FILE` | An analyst's own CSV/JSON of observations (`user_file` provider). |
+
+Without feeder data or a user file, the resolver uses house fallbacks and the
+assumptions sheet flags those rows for review (`house:*` source,
+`review_required: true`).
+
+**Feed your own market data** with the `user_file` provider: point
+`PLAT_MARKET_DATA_USER_FILE` at a JSON (or CSV) file of observations. Each
+observation has a `metric` (see `engine/market_data/README.md`), a `value`
+(a decimal rate, or an object keyed by quarter such as `"2027Q3"` for a
+series), a `geo` (any of `cbsa_code`, `metro_slug`, `submarket`,
+`star_tier`; every field set must match the deal profile), and optional
+`as_of` and `confidence` (`high`, `medium`, `low`; default `medium`). A
+minimal file for the walkthrough deal:
+
+```json
+{
+  "observations": [
+    {"metric": "rent_growth_long_run", "geo": {"metro_slug": "larkspur_sx"}, "value": 0.028, "as_of": "2026-09-30"},
+    {"metric": "vacancy_stabilized", "geo": {"metro_slug": "larkspur_sx", "submarket": "Larkspur North"},
+     "value": 0.055, "as_of": "2026-09-30", "confidence": "high"},
+    {"metric": "market_cap_rate", "geo": {"metro_slug": "larkspur_sx"}, "value": 0.0585, "as_of": "2026-09-30"}
+  ]
+}
+```
+
+Save it as `output/my_market.json` and re-run step 1 with it (drop
+`--exit-cap` to let the market cap rate fill the exit):
+
+```bash
+PLAT_MARKET_DATA_USER_FILE=output/my_market.json python runs/ingest_deal.py --property-id SYN-A \
+  --rent-roll $D/rent_roll.csv --t12 $D/t12.csv --start 2026-11 --end 2031-10 \
+  --purchase-price 33120000 --ltv 0.60 --rate 0.0575 --amort 30 --io-months 24 \
+  --millage 20 --assessment-ratio 0.7 \
+  --deal-type stabilized --year-built 1994 --asset-class B --star-tier 3 \
+  --msa "Larkspur Synthetic MSA" --metro-slug larkspur_sx --submarket "Larkspur North" \
+  --output output/deal_mkt.json --validate
+```
+
+The rent growth, physical vacancy and exit cap rows now show
+`market:user_file`, with the file's `as_of` and confidence. Once configured,
+`user_file` comes first in the default provider order. For each metric the
+first provider with data wins, and every provider's observation is kept as a
+candidate. Set `PLAT_MARKET_DATA_PROVIDERS` to choose the order or the subset:
+`PLAT_MARKET_DATA_PROVIDERS=user_file` uses only your file, and
+`plat_market_study_agent,user_file` prefers the feeder and falls back to your
+file.
 
 Parquet reading needs `pip install -e ".[market]"`; without it the feeder
 providers report unavailable. Paid sources plug in through the placeholder

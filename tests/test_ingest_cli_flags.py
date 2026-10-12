@@ -40,7 +40,8 @@ def test_validation_output_shows_missing_millage_for_a_priced_deal(monkeypatch, 
     code, _deal, out, _err = _run_ingest(
         monkeypatch, capsys, tmp_path, *PRICED, "--exit-cap", "0.06", "--validate",
     )
-    assert code == 0
+    assert code == 1  # a failed validation exits non-zero; the output is still written
+    assert (tmp_path / "deal.json").is_file()
     assert "Validation: FAIL" in out
     assert "ERROR [PROPERTY_TAX_MILLAGE_MISSING]" in out
     assert "Fix: pass --millage" in out
@@ -60,6 +61,7 @@ def test_millage_flag_builds_the_analyst_property_tax_policy(monkeypatch, capsys
     }
     assert "property tax 22.5 mills per $1,000" in out
     assert "Validation: PASS" in out
+    assert "WARN [" in out  # warnings alone keep exit 0
 
 
 def test_assessment_ratio_is_an_analyst_override(monkeypatch, capsys, tmp_path):
