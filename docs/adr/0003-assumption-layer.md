@@ -122,6 +122,7 @@ key:
 | `house:replacement_reserve` | `HOUSE_REPLACEMENT_RESERVE_PER_UNIT`: the lender-style $250/unit annual replacement reserve below NOI, the floor of the capex charge; also recurring capex when the vintage is unknown |
 | `house:recurring_capex_vintage` | `default_recurring_capex_per_unit`: the vintage economic CapEx band (low end stabilized, midpoint value-add, high end with deferred maintenance) |
 | `house:deferred_capex` | `HOUSE_IMMEDIATE_CAPEX_DEFAULT`: nothing budgeted at close without PCA or analyst evidence |
+| `house:deferred_capex_placeholder` | `default_deferred_capex_placeholder_per_unit`: deferred maintenance flagged with no PCA and no analyst figure, one year of the vintage economic CapEx band high end per unit at close (review_required) |
 | `house:opex_growth_table` | The house per-category opex growth table (also the 3% real estate tax growth and the recurring capex growth, `HOUSE_RECURRING_CAPEX_GROWTH` = the R&M rate) |
 | `house:property_tax_module` | `engine/property_tax.py`: the real estate tax line reassessed at the purchase price |
 | `house:management_fee_pct_egr` | The house management fee as a percent of EGR |
@@ -184,9 +185,9 @@ How each key combines sources:
 | `other_income` | T12 run-rate programs (UPL-42), else the house per-unit default. |
 | `opex.<category>.base` | T12 line (normalized to annual dollars), else the house per-unit default for the category. |
 | `opex.<category>.growth` | House per-category growth table (§6), unless a provider supplies a market trend. |
-| `insurance_per_unit`, `r_and_m_per_unit`, `turn_cost_per_unit` | Deal evidence (annualized), else house vintage defaults. Floors are guardrails (§5). `r_and_m_per_unit` is on the R&M floor basis: repairs & maintenance plus turnover / make-ready lines, never payroll (§5). |
+| `insurance_per_unit`, `r_and_m_per_unit`, `turn_cost_per_unit` | Deal evidence (annualized), else house vintage defaults (R&M: the band high end with deferred maintenance, §5). Floors are guardrails (§5). `r_and_m_per_unit` is on the R&M floor basis: repairs & maintenance plus turnover / make-ready lines, never payroll (§5). |
 | `replacement_reserve_per_unit` | Bucket 3. Analyst, else `HOUSE_REPLACEMENT_RESERVE_PER_UNIT` ($250/unit/year, `house:replacement_reserve`, review_required): the lender-style annual reserve below NOI, the same for every vintage. It is a floor, not an addition: the engine charges max(recurring capex, reserve) below NOI. It is also the pricing floor for reserves (§5). |
-| `immediate_capex` | Bucket 1, total dollars at close (`capital_plan.immediate_capex.amount`). PCA immediate needs (`deal:pca`) > analyst > `house:deferred_capex` ($0, review_required; also flagged when `deal_profile.deferred_maintenance` is set). Funded with equity at close (`funding: "equity_at_close"`, default) or a lender holdback (`"lender_holdback"`); never in NOI. It is separate from the renovation budget. |
+| `immediate_capex` | Bucket 1, total dollars at close (`capital_plan.immediate_capex.amount`). PCA immediate needs (`deal:pca`) > analyst > `house:deferred_capex_placeholder` when `deal_profile.deferred_maintenance` is set (one year of the vintage economic CapEx band high end per unit, `HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS`; review_required, and the validator warns `DEFERRED_CAPEX_PLACEHOLDER`: commission a PCA, lenders escrow its immediate repairs at 125%) > `house:deferred_capex` ($0, review_required; with the flag and an unknown vintage the validator warns `DEFERRED_CAPEX_UNBUDGETED`). Funded with equity at close (`funding: "equity_at_close"`, default) or a lender holdback (`"lender_holdback"`); never in NOI. It is separate from the renovation budget. |
 | `recurring_capex_per_unit` | Bucket 2, year-1 $/unit/year (`capital_plan.recurring_capex.per_unit_annual`), below NOI. PCA (`deal:pca`) > analyst > `house:recurring_capex_vintage` (the vintage economic CapEx band: low end for a stabilized deal, midpoint for value-add, high end when `deal_profile.deferred_maintenance` is true) > the $250 reserve when the vintage is unknown (`house:replacement_reserve`, review_required). A PCA outranks an analyst value already in the canonical at a first resolution (the analyst value is kept as a candidate); an explicit override or later edit still wins and shows the PCA as its default. Built before 2000 with no PCA: `review_required` stays on (even under an override), the validator warns `CAPEX_PCA_MISSING` and the ingest gate adds the intake flag `capex_pca_missing_pre_2000_review`. The retired `economic_capex_per_unit` key is accepted as an alias, and its old opt-in `capex_schedule` row is migrated here (removed from the schedule, so it is charged once). |
 | `recurring_capex_growth` | Bucket 2 growth (`capital_plan.recurring_capex.growth_rate`): `HOUSE_RECURRING_CAPEX_GROWTH` = `OPEX_GROWTH_REPAIRS_MAINTENANCE` (3%), `house:opex_growth_table`, applied from analysis year 2 like opex. |
 | `exit_cap_rate` | Exit caps track entry caps. Analyst, else entry-anchored: the going-in cap rate at the price being modeled (engine year-1 NOI / purchase price; trailing T12 NOI only when the engine cannot run the canonical) plus `HOUSE_EXIT_CAP_SPREAD` (50 bps), `house:exit_cap_spread`, review_required. It is re-measured whenever the price changes: backsolve recomputes it at every candidate price unless the analyst or an explicit policy set it. Steal exception, which is rare: only when a submarket or MSA `market_cap_rate` (the exit-year value) is available and the going-in cap exceeds it by more than `HOUSE_STEAL_THRESHOLD` (150 bps) does the exit compress toward market + spread, never more than `HOUSE_MAX_EXIT_COMPRESSION` (100 bps) below going-in + spread; the basis says "Steal: going-in X vs market Y". Without market data there is never compression, and a going-in cap at or below market still exits at entry + spread. `HOUSE_EXIT_CAP_GOING_IN_MAX` (25%) guards the going-in cap. Only when there is no usable price to anchor to: the market cap rate, else the OM's exit cap, else the engine default. Every source is a candidate, and the entry's `detail` records the calculation and the market reference (`detail.market`), so a re-resolution without market data applies the same steal test. |
@@ -257,7 +258,7 @@ reuses the `underwriting_policy` vintage functions:
 | `insurance_per_unit` | $600/unit (`DEFAULT_YEAR1_INSURANCE_PER_UNIT`); waived by an explicit analyst insurance override, and the waiver is disclosed | the matched insurance line, annualized |
 | `r_and_m_per_unit` | vintage R&M per unit (the band excludes payroll) | R&M including turnover: the repairs & maintenance and turnover / make-ready lines, annualized (`underwriting_policy.R_AND_M_FLOOR_BASIS`, `canonical_ops.in_r_and_m_floor_basis`). Payroll is never counted, even on a line labeled as repairs, so a T12 that books turns separately is not topped up for R&M it carries. A shortfall is one top-up line sized from the other R&M lines (an existing top-up line never counts toward the floor); the guardrail record's basis names the floor basis |
 | `replacement_reserve_per_unit` | `HOUSE_REPLACEMENT_RESERVE_PER_UNIT` ($250/unit, `house:replacement_reserve`, any vintage) | each `replacement_reserves` segment (none counts as 0) |
-| `recurring_capex_per_unit` | The vintage band pick for the deal (`house:recurring_capex_vintage`; none when the vintage is unknown). An analyst or PCA figure below it is kept and disclosed (`floor_waived_by_analyst_override` / `floor_waived_by_deal_evidence`, with `waived_by`), as the insurance override is; any other value below it is warned (underwrite) or raised (pricing); a hold with none gets the floor in pricing | `capital_plan.recurring_capex.per_unit_annual` (none counts as 0) |
+| `recurring_capex_per_unit` | The vintage band pick for the deal (`house:recurring_capex_vintage`; none when the vintage is unknown). An analyst figure below it is kept and disclosed (`floor_waived_by_analyst_override`, with `waived_by`), as the insurance override is. A PCA figure below it is warned in underwrite (the record names the `evidence`) and raised to the floor in pricing, `max(PCA, floor)`, disclosed as `floor_applied_over_deal_evidence` (decision (i)). Any other value below it is warned (underwrite) or raised (pricing); a hold with none gets the floor in pricing | `capital_plan.recurring_capex.per_unit_annual` (none counts as 0) |
 
 Broker notes and trailing actuals are anchors a caller passes in `context`;
 they can only raise a floor. `apply_guardrails(canonical, *, mode, profile,
@@ -299,9 +300,13 @@ analyst's curves and applies only the shared floors (decision (a), below):
   row carries the floor's months equivalent). With no year-1 row, one year-1
   `pct_rent` row at the floor is added.
 - Reserves: `max(analyst, house reserve)` per segment, never forced down.
-- Recurring capex: `max(value, vintage band)`; an analyst or PCA figure below
-  the band is priced as given and disclosed in `policy_overrides` (the
-  insurance waiver convention). The reserve floor never stacks on it.
+- Recurring capex: `max(value, vintage band)`; an analyst figure below the
+  band is priced as given and disclosed in `policy_overrides` (the insurance
+  waiver convention). A PCA figure below the band is raised to it and
+  disclosed: `{input: "recurring_capex_per_unit", action:
+  "floor_applied_over_deal_evidence", floor, floor_source, evidence, original,
+  applied}`; the entry is pinned at the floor like an enforced one. The
+  reserve floor never stacks on it.
 - Vacancy, insurance and R&M are as described in the table above.
 
 Its solved canonical is re-resolved in `mode="pricing"` so `assumptions`
@@ -665,6 +670,75 @@ completed (f):
    (§5). The register shows the three buckets side by side
    (`build_register()["capital_plan"]` and a panel in `assumptions.html`).
    This lowers prices, most for older value-add deals.
+
+Three decisions on deferred maintenance and PCA evidence:
+
+9. **(i) Deferred maintenance minimums, a placeholder at close, and the band
+   floor over a PCA.** `deal_profile.deferred_maintenance` used to move only
+   recurring capex to the high end of the vintage band. Now:
+   1. It raises the house floors and defaults for physical vacancy, collection
+      loss, year-1 concessions and R&M (including turnover, excluding
+      payroll), expressed against the vintage bands so the step scales with
+      vintage (`engine/underwriting_policy.py`, "Deferred maintenance
+      minimums"). "Floor" below is the minimum the same deal carries without
+      the flag (the value-add floors already sit above the stabilized ones):
+
+      | Metric | House minimum, 1980s stabilized, no flag | Deferred maintenance minimum (1980s stabilized) | Rule |
+      |---|---|---|---|
+      | Physical vacancy floor | 5.00% (stabilized default 5.75%, the typical midpoint) | 7.00% | max(`physical_vacancy_typical_high`, floor + 100 bp) |
+      | Collection loss floor | 0.75% (default with no T12 bad debt: 1.00%) | 2.25% (also the default) | max(midpoint of the `bad_debt` typical band, floor + 50 bp) |
+      | Year-1 concessions floor | 0.75% | 1.50% | max(midpoint of the `concessions` typical band, floor + 50 bp) |
+      | R&M incl. turnover, ex payroll | $900/unit (band low end) | $1,700/unit | `r_and_m_high` |
+      | Recurring capex | $1,000/unit (band low end) | $2,500/unit | `economic_capex_high` (unchanged) |
+      | Economic vacancy (sum of the above + LTL 1.00%) | 7.50% | 11.75% (typical band 8%-14%) | disclosed by `deferred_maintenance_economic_vacancy`, never floored as a sum |
+
+      The steps are `DEFERRED_MAINTENANCE_VACANCY_STEP` (100 bp),
+      `DEFERRED_MAINTENANCE_COLLECTION_LOSS_STEP` and
+      `DEFERRED_MAINTENANCE_CONCESSIONS_STEP` (50 bp each). For every vintage
+      the deferred components sum to an economic vacancy inside the vintage
+      economic-vacancy typical band and above the agency 5% minimum
+      (`AGENCY_MIN_ECONOMIC_VACANCY`). The resolver, the guardrails (both
+      modes) and backsolve's revenue floors read the flag. Sources: Fannie Mae
+      Multifamily Guide Part II 203.01 (underwritten vacancy, concessions and
+      bad debt at least the greater of the trailing 3-month collections gap and
+      5% of GPR); Freddie Mac Guide ch. 17, 17.2(k) (vacancy and collection
+      loss not less than 5%, adjusted upward when conditions require) and the
+      Freddie SBL update of 2024-06-28 (an economic-vacancy allowance on top of
+      physical vacancy for concessions or a delinquency or eviction history);
+      Freddie Mac Guide ch. 62 (the PCA inspects at least half the down units
+      and costs making them rent-ready); RealPage concessions report of
+      2026-01-23 (Class C: 19.1% of units offering concessions, 10.5% average
+      discount, the highest share of any class); NAA Income/Expense IQ 2024
+      data, published 2025-12-22 (national R&M $1,098/unit, turnover cost
+      +17.5% year on year). No public RealPage or Yardi Matrix series gives
+      Class C bad debt as a percent of rent, so the collection-loss point is
+      house judgment on the vintage band.
+   2. With the flag and no PCA immediate-needs figure or analyst budget,
+      immediate capex at close is a placeholder: one year
+      (`HOUSE_DEFERRED_CAPEX_PLACEHOLDER_YEARS`) of the vintage
+      `economic_capex_high` per unit, funded with equity at close
+      (`house:deferred_capex_placeholder`, review_required). The validator
+      warns `DEFERRED_CAPEX_PLACEHOLDER`, recommending a PCA; lenders escrow
+      PCA immediate repairs at 125% of the estimate
+      (`LENDER_PCA_REPAIR_ESCROW_FACTOR`; Fannie Mae Multifamily Guide 405.02
+      completion/repair escrow guidance, Freddie Mac SBL priority repair
+      escrow guidance). Without the flag nothing is budgeted
+      (`house:deferred_capex`, $0).
+   3. A PCA recurring capex below the vintage band pick is warned in
+      underwrite (kept, with the evidence on the guardrail record) and, in
+      pricing, raised to the band pick the house default uses,
+      `max(PCA, floor)`, and disclosed as `floor_applied_over_deal_evidence`.
+      A lender PCA sizes a lender replacement reserve for building systems
+      and components over the loan term (Fannie Mae Guide 406.01; Freddie
+      Mac SBL reserves of $200 / $250 / $300 per unit by needs rating),
+      excluding routine items and discretionary upgrades, so on older stock
+      it understates economic capex. This replaces the
+      `floor_waived_by_deal_evidence` waiver, which is retired (still read
+      from older canonicals). An analyst figure below the floor keeps the
+      waiver.
+
+   This lowers prices for flagged deals and for deals whose PCA recurring
+   capex is below the band (library deal d: $1,500 raised to $1,750/unit).
 
 ## Consequences
 

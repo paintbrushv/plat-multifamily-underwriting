@@ -141,7 +141,10 @@ python runs/ingest_deal.py --property-id SYN-A \
      with equity at close (`--immediate-capex-funding lender_holdback` for a
      holdback). It raises the total equity basis, so it lowers cash-on-cash,
      IRR and the backsolve price; it never enters NOI. The value-add
-     renovation budget stays its own budget.
+     renovation budget stays its own budget. With `--deferred-maintenance` and
+     no PCA or analyst figure, the house budgets a placeholder of one year of
+     the vintage capex band high end per unit, flagged for review
+     (`DEFERRED_CAPEX_PLACEHOLDER`: commission a PCA).
   2. **Recurring capex by vintage** (`capital_plan.recurring_capex`): $/unit a
      year below NOI, grown at the R&M rate (3%). The default is the vintage
      economic CapEx band: the low end for a stabilized deal, the midpoint for
@@ -153,9 +156,16 @@ python runs/ingest_deal.py --property-id SYN-A \
   Precedence is PCA > analyst > house: `--pca pca.json`
   (`{"immediate_capex", "recurring_capex_per_unit", "as_of", "reference"}`)
   beats `--immediate-capex` / `--recurring-capex-per-unit`. A deal built
-  before 2000 without a PCA is flagged for review (`CAPEX_PCA_MISSING`). NOI,
-  the going-in cap rate, exit value and DSCR are before capex; cash flow,
-  cash-on-cash, IRR and the equity multiple are after it.
+  before 2000 without a PCA is flagged for review (`CAPEX_PCA_MISSING`). A PCA
+  recurring capex below the vintage band is warned at ingest and raised to the
+  band in backsolve pricing. NOI, the going-in cap rate, exit value and DSCR
+  are before capex; cash flow, cash-on-cash, IRR and the equity multiple are
+  after it.
+- `--deferred-maintenance` also raises the house minimums for physical
+  vacancy, collection loss, year-1 concessions and R&M to the upper part of
+  their vintage bands (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and
+  $1,700/unit), in the defaults, the underwrite warnings and the pricing
+  floors (ADR 0003 decision (i)).
 
 **2. Review** `output/deal.assumptions.json` (one row per assumption: value,
 unit, source, basis, default, override, delta, guardrail). Rows sourced from

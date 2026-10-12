@@ -402,9 +402,15 @@ WARNING) and `"enforced"` in pricing mode. See
 are reserved and rejected (validator `DEAL_TYPE_UNSUPPORTED`). Entries sourced
 from `house:*` or `engine_fallback` warn with `ASSUMPTION_REVIEW_REQUIRED`.
 `deal_profile.deferred_maintenance` (boolean) puts recurring capex at the high
-end of the vintage band. A waived floor (an analyst or PCA figure kept below
-it) records `action: "floor_waived_by_analyst_override"` or
-`"floor_waived_by_deal_evidence"` with `waived_by`.
+end of the vintage band, raises the house vacancy, collection-loss, year-1
+concession and R&M minimums to the upper part of their vintage bands, and,
+with no PCA or analyst figure, budgets a placeholder immediate capex at close
+(`house:deferred_capex_placeholder`). A waived floor (an analyst figure kept
+below it) records `action: "floor_waived_by_analyst_override"` with
+`waived_by`. A PCA recurring capex below the vintage band is `"warned"` in
+underwrite and `"floor_applied_over_deal_evidence"` in pricing (raised to the
+floor), each with `evidence`. `"floor_waived_by_deal_evidence"` is retired and
+only read from older canonicals.
 
 ### `capital_plan` (ADR 0003 §3): the three capex buckets
 
