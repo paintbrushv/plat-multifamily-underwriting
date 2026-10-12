@@ -44,7 +44,9 @@ STABILIZED_KEYS = {
     "insurance_per_unit",
     "r_and_m_per_unit",
     "replacement_reserve_per_unit",
-    "economic_capex_per_unit",
+    "immediate_capex",
+    "recurring_capex_per_unit",
+    "recurring_capex_growth",
     "exit_cap_rate",
     "sale_cost_percent",
     "acquisition_fee_pct",
@@ -140,8 +142,11 @@ def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
         # The house lender-style reserve is written when the canonical carries none.
         ("replacement_reserve_per_unit", "house:replacement_reserve", 250.0,
          ["house:replacement_reserve", "engine_fallback"]),
-        # Economic CapEx is disclosed from the vintage band and never written.
-        ("economic_capex_per_unit", "house:vintage_1980s", 1_000.0, ["house:vintage_1980s"]),
+        # The capex buckets: nothing at close without evidence; recurring capex at the
+        # low end of the 1980s band (stabilized), growing like R&M.
+        ("immediate_capex", "house:deferred_capex", 0.0, ["house:deferred_capex"]),
+        ("recurring_capex_per_unit", "house:recurring_capex_vintage", 1_000.0, ["house:recurring_capex_vintage"]),
+        ("recurring_capex_growth", "house:opex_growth_table", 0.03, ["house:opex_growth_table"]),
         ("exit_cap_rate", "analyst", 0.055, ["analyst", "house:exit_cap_spread", "engine_fallback"]),
         ("sale_cost_percent", "house:backsolve_policy", 0.02, ["house:backsolve_policy", "engine_fallback"]),
         ("acquisition_fee_pct", "house:backsolve_policy", 0.01, ["house:backsolve_policy", "engine_fallback"]),
@@ -414,15 +419,19 @@ def test_input_is_not_mutated(minimal_deal_inputs):
 
 
 def test_engine_output_is_unchanged_with_and_without_the_new_sections(minimal_deal_inputs):
-    baseline = run_underwriting(copy.deepcopy(minimal_deal_inputs))
     resolved = resolve_assumptions(minimal_deal_inputs)
     stripped = {k: v for k, v in resolved.items() if k not in ("assumptions", "deal_profile")}
 
-    assert stripped == minimal_deal_inputs
+    # The resolver fills only the capital plan (the three capex buckets, ADR 0003 §3);
+    # every other field is the hand-authored one. The engine ignores the new sections.
+    assert {k: v for k, v in stripped.items() if k != "capital_plan"} == minimal_deal_inputs
+    baseline = run_underwriting({**copy.deepcopy(minimal_deal_inputs), "capital_plan": resolved["capital_plan"]})
     assert run_underwriting(resolved) == baseline
     assert run_underwriting(stripped) == baseline
     value_add = resolve_assumptions(minimal_deal_inputs, deal_profile=DealProfile("value_add", year_built=1984))
-    assert run_underwriting(value_add) == baseline
+    assert run_underwriting(value_add) == run_underwriting(
+        {**copy.deepcopy(minimal_deal_inputs), "capital_plan": value_add["capital_plan"]}
+    )
 
 
 def test_hand_authored_values_are_recorded_as_analyst_overrides(minimal_deal_inputs):
@@ -709,66 +718,127 @@ def test_house_reserve_is_written_when_the_canonical_has_none():
     assert "guardrail" not in entry
 
 
-def test_economic_capex_is_disclosed_but_stays_out_of_the_cash_flows():
+def test_recurring_capex_by_vintage_is_written_below_noi_for_every_deal():
     deal = _ingest(year_built=1984, deal_type="value_add")
-    entry = _entries(deal)["economic_capex_per_unit"]
-    midpoint = float(house.default_economic_capex_per_unit(1984, strategy="value_add"))
+    entries = _entries(deal)
+    entry = entries["recurring_capex_per_unit"]
+    midpoint = float(house.default_recurring_capex_per_unit(1984, strategy="value_add"))
 
-    assert midpoint == 1_750.0  # value-add: midpoint of the 1980s economic CapEx band
-    assert (entry["source"], entry["value"], entry["review_required"]) == ("house:vintage_1980s", midpoint, True)
+    assert midpoint == 1_750.0  # value-add: midpoint of the 1980s band
+    assert (entry["source"], entry["value"], entry["review_required"]) == (
+        "house:recurring_capex_vintage", midpoint, True)
     assert entry["override"] is None
-    assert "Informational" in entry["basis"] and "PCA" in entry["basis"]
-    assert "capex_schedule" not in deal
-    stabilized = _entries(_ingest(year_built=1984))["economic_capex_per_unit"]
-    assert stabilized["value"] == 1_000.0  # cashflow: the low end of the band
+    assert entry["detail"]["band_pick"] == "midpoint" and entry["detail"]["pca_review_required"] is True
+    assert "max(recurring capex, replacement reserve)" in entry["basis"]
+    assert deal["capital_plan"]["recurring_capex"] == {"per_unit_annual": midpoint, "growth_rate": 0.03}
+    assert entries["recurring_capex_growth"]["source"] == "house:opex_growth_table"
+    assert deal["capital_plan"]["immediate_capex"] == {"amount": 0.0, "funding": "equity_at_close"}
+    assert "capex_schedule" not in deal  # below NOI, never an operating capex line
+    stabilized = _entries(_ingest(year_built=1984))["recurring_capex_per_unit"]
+    assert stabilized["value"] == 1_000.0  # stabilized: the low end of the band
+    deferred = _entries(_ingest(year_built=1984, deferred_maintenance=True))["recurring_capex_per_unit"]
+    assert deferred["value"] == 2_500.0  # deferred maintenance: the high end
     assert resolve_assumptions(deal) == deal
 
 
-def test_an_economic_capex_override_opts_it_into_the_cash_flows():
+def test_recurring_capex_precedence_pca_then_analyst_then_house():
+    pca = {"recurring_capex_per_unit": 1_400, "immediate_capex": 250_000, "as_of": "2026-09-01",
+           "reference": "Synthetic PCA"}
+    with_pca = _ingest(year_built=1984, pca=pca, recurring_capex_per_unit=900, immediate_capex=100_000)
+    entries = _entries(with_pca)
+    recurring = entries["recurring_capex_per_unit"]
+    # PCA > analyst: the analyst figure is kept as a superseded candidate.
+    assert (recurring["source"], recurring["value"], recurring["override"]) == ("deal:pca", 1_400.0, None)
+    assert [c["source"] for c in recurring["candidates"]] == ["analyst", "deal:pca", "house:recurring_capex_vintage"]
+    assert recurring["candidates"][0]["value"] == 900.0
+    assert recurring["review_required"] is False and recurring["detail"]["pca_review_required"] is False
+    immediate = entries["immediate_capex"]
+    assert (immediate["source"], immediate["value"]) == ("deal:pca", 250_000.0)
+    assert with_pca["capital_plan"]["recurring_capex"]["per_unit_annual"] == 1_400.0
+    assert with_pca["capital_plan"]["immediate_capex"]["amount"] == 250_000.0
+    assert resolve_assumptions(with_pca) == with_pca
+
+    # Analyst > house: no PCA, so the analyst figures are overrides.
+    analyst = _entries(_ingest(year_built=1984, recurring_capex_per_unit=900, immediate_capex=100_000))
+    assert (analyst["recurring_capex_per_unit"]["source"], analyst["recurring_capex_per_unit"]["value"]) == (
+        "analyst", 900.0)
+    assert analyst["recurring_capex_per_unit"]["default_value"] == 1_000.0
+    # Built before 2000 with no PCA: still a review prompt, even with the analyst's figure.
+    assert analyst["recurring_capex_per_unit"]["review_required"] is True
+    assert (analyst["immediate_capex"]["source"], analyst["immediate_capex"]["value"]) == ("analyst", 100_000.0)
+    # An explicit later edit still wins over the PCA (shown as a user edit, PCA as default).
+    edited = resolve_assumptions(with_pca, overrides={"recurring_capex_per_unit": {"value": 1_600, "note": "IC"}})
+    entry = _entries(edited)["recurring_capex_per_unit"]
+    assert (entry["source"], entry["value"], entry["default_value"]) == ("analyst", 1_600.0, 1_400.0)
+
+
+def test_unknown_vintage_falls_back_to_the_reserve_and_is_flagged():
+    deal = _ingest()
+    entry = _entries(deal)["recurring_capex_per_unit"]
+    assert (entry["source"], entry["value"], entry["review_required"]) == ("house:replacement_reserve", 250.0, True)
+    assert "Year built unknown" in entry["basis"]
+    assert deal["capital_plan"]["recurring_capex"]["per_unit_annual"] == 250.0
+
+
+def test_the_retired_economic_capex_opt_in_becomes_the_analysts_recurring_capex():
     deal = _ingest(year_built=1984)
-    opted = resolve_assumptions(deal, overrides={"economic_capex_per_unit": {"value": 1_200, "note": "PCA"}})
-    entry = _entries(opted)["economic_capex_per_unit"]
-
-    assert (entry["source"], entry["value"], entry["default_value"]) == ("analyst", 1_200.0, 1_000.0)
-    assert opted["capex_schedule"] == [{
-        "category": "Economic CapEx (analyst opt-in)", "capex_type": "reserve",
-        "amount_per_unit": 1_200.0, "timing": "annual",
-    }]
-    assert validate_schema(opted) == []
-    assert resolve_assumptions(opted) == opted  # idempotent
-    # Clearing the override takes it back out of the cash flows.
-    cleared = resolve_assumptions(opted, overrides={"economic_capex_per_unit": None})
-    assert "capex_schedule" not in cleared
-    assert _entries(cleared)["economic_capex_per_unit"]["source"] == "house:vintage_1980s"
-    assert resolve_assumptions(cleared) == cleared
-
-
-def _capex_warnings(deal):
-    return [i for i in validate_deal(deal).issues if i.code == "CAPEX_BUDGET_MISSING"]
+    legacy = copy.deepcopy(deal)
+    legacy.pop("capital_plan")
+    legacy["assumptions"]["entries"].pop("recurring_capex_per_unit")
+    legacy["assumptions"]["entries"].pop("recurring_capex_growth")
+    legacy["capex_schedule"] = [{"category": "Economic CapEx (analyst opt-in)", "capex_type": "reserve",
+                                 "amount_per_unit": 1_200.0, "timing": "annual"}]
+    migrated = resolve_assumptions(legacy)
+    entry = _entries(migrated)["recurring_capex_per_unit"]
+    assert (entry["source"], entry["value"]) == ("analyst", 1_200.0)
+    assert "capex_schedule" not in migrated  # charged once, below NOI
+    assert migrated["capital_plan"]["recurring_capex"]["per_unit_annual"] == 1_200.0
+    # The retired key is still accepted in overrides.
+    aliased = resolve_assumptions(deal, overrides={"economic_capex_per_unit": 1_100})
+    assert _entries(aliased)["recurring_capex_per_unit"]["value"] == 1_100.0
 
 
-def test_pre_2000_vintage_without_a_capex_budget_is_flagged_for_capex_review(minimal_deal_inputs):
+def _capex_warnings(deal, code="CAPEX_PCA_MISSING"):
+    return [i for i in validate_deal(deal).issues if i.code == code]
+
+
+def test_pre_2000_vintage_without_a_pca_is_flagged_for_capex_review(minimal_deal_inputs):
     deal = copy.deepcopy(minimal_deal_inputs)
     assert _capex_warnings(deal) == []  # no year built: nothing to say
     deal["metadata"]["year_built"] = 1984
     warnings = _capex_warnings(deal)
-    assert [(w.severity, w.path) for w in warnings] == [("WARNING", "/capex_schedule")]
-    assert "PCA" in warnings[0].message and "economic_capex_per_unit" in warnings[0].message
+    assert [(w.severity, w.path) for w in warnings] == [("WARNING", "/capital_plan/pca")]
+    assert "PCA" in warnings[0].message and "recurring_capex_per_unit" in warnings[0].message
     assert validate_deal(deal).status == "PASS"
 
+    # A capex budget no longer silences it: only PCA evidence does.
     budgeted = copy.deepcopy(deal)
     budgeted["capex_schedule"] = [{"category": "Roofs", "capex_type": "one_time", "month": "2027-03",
                                    "amount": 250_000}]
-    assert _capex_warnings(budgeted) == []
-    upfront = copy.deepcopy(deal)
-    upfront["capex_upfront_funded"] = [{"start_period": "2026-07", "end_period": "2026-07", "amount": 100_000}]
-    assert _capex_warnings(upfront) == []
-    # An analyst opt-in of the vintage economic CapEx is a capex line too.
-    opted = resolve_assumptions(deal, overrides={"economic_capex_per_unit": 1_000})
-    assert _capex_warnings(opted) == []
+    assert len(_capex_warnings(budgeted)) == 1
+    with_pca = copy.deepcopy(deal)
+    with_pca["capital_plan"] = {"pca": {"recurring_capex_per_unit": 1_100.0}}
+    assert _capex_warnings(with_pca) == []
     newer = copy.deepcopy(deal)
     newer["metadata"]["year_built"] = 2004
     assert _capex_warnings(newer) == []
+
+    # The ingest gate carries the same review flag; a PCA clears it.
+    ingested = _ingest(year_built=1984)
+    assert "capex_pca_missing_pre_2000_review" in ingested["metadata"]["intake_sanity_flags"]
+    assert _entries(ingested)["recurring_capex_per_unit"]["review_required"] is True
+    cleared = _ingest(year_built=1984, pca={"recurring_capex_per_unit": 1_100})
+    assert "capex_pca_missing_pre_2000_review" not in cleared["metadata"].get("intake_sanity_flags", [])
+
+
+def test_deferred_maintenance_without_an_immediate_budget_is_flagged():
+    deal = _ingest(year_built=2005, deferred_maintenance=True)
+    assert deal["deal_profile"]["deferred_maintenance"] is True
+    assert [w.path for w in _capex_warnings(deal, "DEFERRED_CAPEX_UNBUDGETED")] == ["/capital_plan/immediate_capex"]
+    assert _entries(deal)["immediate_capex"]["review_required"] is True
+    budgeted = _ingest(year_built=2005, deferred_maintenance=True, immediate_capex=300_000)
+    assert _capex_warnings(budgeted, "DEFERRED_CAPEX_UNBUDGETED") == []
+    assert validate_deal(budgeted).status == "PASS"
 
 
 def test_analyst_reserve_and_closing_costs_win(minimal_deal_inputs):

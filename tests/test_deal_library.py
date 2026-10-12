@@ -250,6 +250,14 @@ def test_resolved_assumptions_fall_in_the_expected_bands(slug):
     reserve = entries["replacement_reserve_per_unit"]["value"]
     _in(bands["replacement_reserve_per_unit"], reserve, "reserve per unit")
     assert canonical["replacement_reserves"][0]["annual_amount"] == pytest.approx(reserve * sum_units(canonical))
+    # The capex buckets (ADR 0003 §3): recurring capex by vintage below NOI (the
+    # reserve is its floor) and immediate capex at close, on every deal.
+    recurring = entries["recurring_capex_per_unit"]["value"]
+    _in(bands["recurring_capex_per_unit"], recurring, "recurring capex per unit")
+    assert canonical["capital_plan"]["recurring_capex"] == {
+        "per_unit_annual": recurring, "growth_rate": float(house.HOUSE_RECURRING_CAPEX_GROWTH)}
+    _in(bands["immediate_capex"], entries["immediate_capex"]["value"], "immediate capex")
+    assert canonical["capital_plan"]["immediate_capex"]["amount"] == entries["immediate_capex"]["value"]
     closing = canonical["purchase_assumptions"]
     assert closing["closing_costs"] == pytest.approx(
         closing["purchase_price"] * float(house.DEFAULT_PURCHASE_CLOSING_COST_PCT), abs=0.01)
@@ -350,6 +358,9 @@ def _below_floor_keys(canonical, deal):
     reserves = [d(r["annual_amount"]) for r in canonical.get("replacement_reserves") or []] or [Decimal(0)]
     if min(reserves) / units < house.HOUSE_REPLACEMENT_RESERVE_PER_UNIT:
         below.add("replacement_reserve_per_unit")
+    recurring = d(canonical["capital_plan"]["recurring_capex"]["per_unit_annual"])
+    if recurring < house.default_recurring_capex_per_unit(year, strategy=strategy):
+        below.add("recurring_capex_per_unit")
     return below
 
 
@@ -358,11 +369,16 @@ def test_underwrite_guardrails_warn_exactly_where_a_value_is_below_its_floor(slu
     deal, canonical = _deal(slug), _canonical(slug)
     entries = _entries(canonical)
     assert canonical["assumptions"]["mode"] == "underwrite"
-    warned = {k for k, e in entries.items() if e.get("guardrail")}
-    assert all(entries[k]["guardrail"]["action"] == "warned" for k in warned)
+    flagged_keys = {k for k, e in entries.items() if e.get("guardrail")}
+    warned = {k for k in flagged_keys if entries[k]["guardrail"]["action"] == "warned"}
+    # A PCA (or analyst) recurring capex below the vintage floor is kept and disclosed, never warned.
+    waived = flagged_keys - warned
+    assert all("waived" in entries[k]["guardrail"]["action"] for k in waived)
+    assert waived == set(deal["expected"]["guardrail_waivers"])
     assert all(entries[k]["override"] is None or entries[k]["source"] == "analyst" for k in warned)
-    assert warned <= set(GUARDRAIL_KEYS)
-    assert warned == _below_floor_keys(canonical, deal) == set(deal["expected"]["guardrail_warnings"])
+    assert flagged_keys <= set(GUARDRAIL_KEYS)
+    assert warned | waived == _below_floor_keys(canonical, deal)
+    assert warned == set(deal["expected"]["guardrail_warnings"])
     report = validate_deal(canonical)
     flagged = {i.path for i in report.issues if i.code == "GUARDRAIL_BELOW_FLOOR"}
     assert all(i.severity == "WARNING" for i in report.issues if i.code == "GUARDRAIL_BELOW_FLOOR")
@@ -391,10 +407,18 @@ def test_backsolve_enforces_floors_and_its_case_is_stable_on_re_resolve(slug):
     # Every floor the solve enforced is recorded on its entry and in policy_overrides.
     enforced = {k for k, e in entries.items() if (e.get("guardrail") or {}).get("action") == "enforced"}
     summary = result["summary"]["policy_summary"]
-    # The underwrite already carries the house reserve, so pricing has none to enforce.
-    assert "replacement_reserve_per_unit" not in enforced
+    # The underwrite already carries the house reserve and recurring capex, so pricing
+    # has neither to enforce.
+    assert {"replacement_reserve_per_unit", "recurring_capex_per_unit"}.isdisjoint(enforced)
     assert all(_entries(canonical)[k]["guardrail"]["action"] == "warned" for k in enforced)
-    assert {f["key"] for f in summary["guardrails"]["findings"]} == enforced
+    findings = summary["guardrails"]["findings"]
+    assert {f["key"] for f in findings if f["action"] == "enforced"} == enforced
+    # A waived floor is disclosed, never raised (deal d: the PCA recurring capex).
+    waived = {f["key"] for f in findings if "waived" in f["action"]}
+    assert waived == set(_deal(slug)["expected"]["guardrail_waivers"])
+    for key in waived:
+        assert entries[key]["value"] == _entries(canonical)[key]["value"]
+        assert "waived" in entries[key]["guardrail"]["action"]
     assert {o["assumption"] for o in summary["policy_overrides"] if "assumption" in o} == enforced
     for key in enforced:
         record = entries[key]["guardrail"]

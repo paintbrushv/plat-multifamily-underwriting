@@ -168,6 +168,189 @@ def test_immediate_capex_and_the_renovation_budget_are_separate_budgets(minimal_
         equity + 80_000 + 100_000)
 
 
+# ── resolver precedence and guardrails ───────────────────────────────────
+
+
+@pytest.mark.parametrize("deal_type, deferred, expected, pick", [
+    ("stabilized", False, 1_000.0, "low"),
+    ("value_add", False, 1_750.0, "midpoint"),
+    ("stabilized", True, 2_500.0, "high"),
+])
+def test_house_band_pick_by_deal_type_and_deferred_flag(minimal_deal_inputs, deal_type, deferred, expected, pick):
+    profile = {"deal_type": deal_type, "year_built": 1984, "deferred_maintenance": deferred}
+    resolved = resolve_assumptions(minimal_deal_inputs, deal_profile=profile)
+    entry = resolved["assumptions"]["entries"]["recurring_capex_per_unit"]
+    assert (entry["source"], entry["value"], entry["detail"]["band_pick"]) == (
+        "house:recurring_capex_vintage", expected, pick)
+    assert resolved["capital_plan"]["recurring_capex"] == {"per_unit_annual": expected, "growth_rate": 0.03}
+    assert house.HOUSE_RECURRING_CAPEX_GROWTH == house.OPEX_GROWTH_REPAIRS_MAINTENANCE
+    assert GuardrailProfile.coerce(resolved["deal_profile"]).recurring_capex_per_unit() == expected
+
+
+def _pricing(canonical, profile):
+    findings = guardrails.enforce_floors(
+        canonical, mode="pricing", profile=profile, keys=("recurring_capex_per_unit",))
+    return canonical, findings
+
+
+def test_pricing_floor_raises_unsourced_values_and_waives_analyst_and_pca(minimal_deal_inputs):
+    profile = GuardrailProfile(strategy="cashflow", year_built=1984)  # floor $1,000
+    # No provenance: raised to the floor (max(value, floor)).
+    bare = _with_plan(minimal_deal_inputs, recurring_capex={"per_unit_annual": 400.0})
+    raised, findings = _pricing(bare, profile)
+    assert [(f["action"], f["original"], f["applied"]) for f in findings] == [("enforced", 400.0, 1_000.0)]
+    assert raised["capital_plan"]["recurring_capex"] == {"per_unit_annual": 1_000.0, "growth_rate": 0.03}
+    # A hold with no recurring capex gets the floor.
+    _, none_findings = _pricing(copy.deepcopy(minimal_deal_inputs), profile)
+    assert none_findings[0]["original"] == 0.0 and none_findings[0]["action"] == "enforced"
+
+    # An analyst figure below the floor is kept and disclosed (insurance waiver convention).
+    deal = copy.deepcopy(minimal_deal_inputs)
+    deal["metadata"]["year_built"] = 1984
+    analyst = resolve_assumptions(deal, overrides={"recurring_capex_per_unit": 400})
+    kept, findings = _pricing(copy.deepcopy(analyst), profile)
+    assert [(f["action"], f["applied"]) for f in findings] == [("floor_waived_by_analyst_override", 400.0)]
+    assert kept["capital_plan"]["recurring_capex"]["per_unit_annual"] == 400.0
+    record = analyst["assumptions"]["entries"]["recurring_capex_per_unit"]["guardrail"]
+    assert record["action"] == "floor_waived_by_analyst_override" and record["floor"] == 1_000.0
+    assert not [i for i in validate_deal(analyst).issues
+                if i.code == "GUARDRAIL_BELOW_FLOOR" and "recurring_capex" in i.path]
+
+    # PCA evidence below the floor: kept and disclosed too.
+    pca = copy.deepcopy(deal)
+    pca["capital_plan"] = {"pca": {"recurring_capex_per_unit": 600.0}}
+    pca = resolve_assumptions(pca)
+    _, findings = _pricing(copy.deepcopy(pca), profile)
+    assert [f["action"] for f in findings] == ["floor_waived_by_deal_evidence"]
+    assert pca["assumptions"]["entries"]["recurring_capex_per_unit"]["guardrail"]["waived_by"].startswith("the PCA")
+
+
+# ── backsolve: buckets 1 and 2 move the price ────────────────────────────
+
+
+@lru_cache(maxsize=None)
+def _library(slug: str) -> str:
+    return json.dumps(dl.ingest(dl.load_deal(slug)))
+
+
+def _solve(canonical, **policy_values):
+    result = backsolve_price(
+        canonical, target_coc="0.06",
+        policy={"version": "plat.backsolve-policy/1", "strategy": "cashflow", **policy_values},
+        benchmark=BENCHMARK, min_price="15000000.00", max_price="40000000.00",
+    )
+    assert result["status"] == "converged"
+    return result
+
+
+@lru_cache(maxsize=None)
+def _baseline() -> str:
+    return json.dumps(_solve(json.loads(_library(STABILIZED))))
+
+
+def _price(result):
+    return result["summary"]["solved_purchase_price"]
+
+
+def test_backsolve_price_falls_when_recurring_capex_rises():
+    base = json.loads(_baseline())
+    plan = base["summary"]["capital_plan"]
+    assert plan["recurring_capex_per_unit"] == 750.0 and plan["binding_year_1"] == "recurring_capex"
+    assert plan["recurring_capex_floor_per_unit"] == 750.0 and plan["replacement_reserve_per_unit"] == 250.0
+    assert plan["below_noi_capex_charge"]["by_analysis_year"][0]["binding"] == "recurring_capex"
+    heavier = resolve_assumptions(json.loads(_library(STABILIZED)), overrides={"recurring_capex_per_unit": 1_500})
+    result = _solve(heavier)
+    assert _price(result) < _price(base)
+    assert result["case"]["capital_plan"]["recurring_capex"]["per_unit_annual"] == 1_500.0
+
+
+def test_backsolve_price_falls_when_immediate_capex_is_added_and_equity_carries_it():
+    base = json.loads(_baseline())
+    canonical = resolve_assumptions(json.loads(_library(STABILIZED)), overrides={"immediate_capex": 600_000})
+    result = _solve(canonical)
+    assert _price(result) < _price(base)
+    purchase, fund = result["case"]["purchase_assumptions"], result["case"]["fund_assumptions"]
+    price = purchase["purchase_price"]
+    expected = (purchase["equity_contribution"] + purchase["closing_costs"] + price * fund["acquisition_fee_pct"]
+                + fund["partnership_closing_costs"] + 600_000)
+    assert purchase["total_equity_basis"] == pytest.approx(expected, abs=0.01)
+    assert purchase["total_unlevered_basis"] == pytest.approx(price + purchase["closing_costs"] + 600_000, abs=0.01)
+    immediate = result["summary"]["capital_plan"]["immediate_capex"]
+    assert immediate == {"amount": 600_000.0, "funding": "equity_at_close",
+                         "included_in_total_equity_basis": True, "loan_upsized_by_holdback": False}
+    # The priced case states the amount it already carries, so the engine adds nothing more.
+    assert result["case"]["capital_plan"]["immediate_capex"]["amount_in_stated_basis"] == 600_000.0
+    assert result["results"]["metrics"]["coc"]["components"]["equity_basis"] == pytest.approx(
+        purchase["total_equity_basis"], abs=0.01)
+    # Never in the cash flows.
+    assert sum(m["total_capex"] for m in result["results"]["cashflow"]["by_month"]) == 0
+
+
+def test_a_lender_holdback_upsizes_the_loan_instead_of_the_equity():
+    canonical = resolve_assumptions(json.loads(_library(STABILIZED)), overrides={"immediate_capex": 600_000})
+    canonical["capital_plan"]["immediate_capex"]["funding"] = "lender_holdback"
+    result = _solve(canonical)
+    case = result["case"]
+    purchase, fund = case["purchase_assumptions"], case["fund_assumptions"]
+    price = purchase["purchase_price"]
+    sized = price - purchase["equity_contribution"]
+    assert case["debt_terms"]["commitment"] == pytest.approx(sized + 600_000, abs=0.01)
+    assert purchase["total_equity_basis"] == pytest.approx(
+        purchase["equity_contribution"] + purchase["closing_costs"] + price * fund["acquisition_fee_pct"]
+        + fund["partnership_closing_costs"], abs=0.01)
+    assert result["summary"]["capital_plan"]["immediate_capex"]["loan_upsized_by_holdback"] is True
+
+
+def test_backsolve_discloses_an_analyst_recurring_capex_below_the_floor():
+    base = json.loads(_baseline())
+    lighter = resolve_assumptions(json.loads(_library(STABILIZED)), overrides={"recurring_capex_per_unit": 400})
+    result = _solve(lighter)
+    waivers = [o for o in result["summary"]["policy_summary"]["policy_overrides"]
+               if o.get("input") == "recurring_capex_per_unit"]
+    assert waivers == [{
+        "input": "recurring_capex_per_unit", "action": "floor_waived_by_analyst_override", "floor": 750.0,
+        "floor_source": "house:recurring_capex_vintage", "waived_by": "the analyst's recurring capex figure",
+        "original": 400.0, "applied": 400.0,
+    }]
+    entry = result["case"]["assumptions"]["entries"]["recurring_capex_per_unit"]
+    assert (entry["value"], entry["source"]) == (400.0, "analyst")
+    assert entry["guardrail"]["action"] == "floor_waived_by_analyst_override"
+    assert _price(result) > _price(base)  # priced as given: the waiver is disclosed, not silent
+
+
+# ── assumptions sheet and register ───────────────────────────────────────
+
+
+def test_the_buckets_round_trip_through_the_sheet(tmp_path):
+    canonical = json.loads(_library(STABILIZED))
+    rows = {row["key"]: row for row in sheet_rows(canonical)}
+    assert [rows[k]["value"] for k in ("immediate_capex", "recurring_capex_per_unit", "replacement_reserve_per_unit")] \
+        == [0.0, 750.0, 250.0]
+
+    sheet = tmp_path / "deal.assumptions.json"
+    write_assumptions_json(canonical, sheet)
+    document = json.loads(sheet.read_text(encoding="utf-8"))
+    for row in document["rows"]:
+        if row["key"] == "recurring_capex_per_unit":
+            row["override_value"], row["override_note"] = 1_200.0, "PCA pending"
+        elif row["key"] == "immediate_capex":
+            row["override_value"] = 350_000.0
+    sheet.write_text(json.dumps(document), encoding="utf-8")
+    edited = resolve_assumptions(canonical, overrides=read_assumption_overrides(sheet))
+    assert edited["capital_plan"]["recurring_capex"]["per_unit_annual"] == 1_200.0
+    assert edited["capital_plan"]["immediate_capex"]["amount"] == 350_000.0
+    entry = edited["assumptions"]["entries"]["recurring_capex_per_unit"]
+    assert (entry["source"], entry["default_value"], entry["override"]["note"]) == ("analyst", 750.0, "PCA pending")
+
+    # The Excel tab round-trips the same edit, and blanking the override clears it.
+    workbook = tmp_path / "deal.xlsx"
+    write_assumptions_xlsx(edited, workbook)
+    assert resolve_assumptions(edited, overrides=read_assumption_overrides_xlsx(workbook)) == edited
+    cleared = resolve_assumptions(edited, overrides={"recurring_capex_per_unit": None, "immediate_capex": None})
+    assert cleared["capital_plan"]["recurring_capex"]["per_unit_annual"] == 750.0
+    assert cleared["capital_plan"]["immediate_capex"]["amount"] == 0.0
+
+
 def test_the_workbook_shows_the_buckets_and_the_charge(tmp_path, minimal_deal_inputs):
     from openpyxl import load_workbook
 
@@ -186,3 +369,11 @@ def test_the_workbook_shows_the_buckets_and_the_charge(tmp_path, minimal_deal_in
     assert labels["Below-NOI charge, year 1:"][1] == pytest.approx(50_000.0, abs=0.1)
     annual = {row[0] for row in workbook["Annual_ProForma"].iter_rows(values_only=True) if row[0]}
     assert {"Below-NOI CapEx Charge", "  Recurring CapEx (vintage)", "  Replacement Reserve (floor)"} <= annual
+
+
+def test_backsolve_cli_summary_prints_the_buckets(tmp_path):
+    from engine.backsolve import format_cli_summary
+
+    text = format_cli_summary(json.loads(_baseline())["summary"], tmp_path / "backsolve_summary.json")
+    assert "  Immediate capex:  $0 at close (equity_at_close)" in text
+    assert "  Recurring capex:  $750/unit/yr vs reserve $250/unit/yr; binds: recurring_capex" in text

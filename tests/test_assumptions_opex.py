@@ -242,7 +242,10 @@ def test_hand_authored_canonical_numbers_are_unchanged(minimal_deal_inputs):
     for key, entry in _entries(resolved).items():
         if key.endswith(".growth"):
             assert entry["source"] == "analyst", key
-    assert run_underwriting(resolved) == run_underwriting(copy.deepcopy(minimal_deal_inputs))
+    # The only numbers the resolver adds are the missing capex buckets (ADR 0003 §3).
+    assert run_underwriting(resolved) == run_underwriting(
+        {**copy.deepcopy(minimal_deal_inputs), "capital_plan": resolved["capital_plan"]}
+    )
 
 
 def test_hand_authored_row_without_growth_gets_the_house_rate(minimal_deal_inputs):

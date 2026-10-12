@@ -62,6 +62,9 @@ from engine.underwriting_policy import (
     DEFAULT_PARTNERSHIP_CLOSING_COSTS,
     DEFAULT_PURCHASE_CLOSING_COST_PCT,
     DEFAULT_YEAR1_INSURANCE_PER_UNIT,
+    IMMEDIATE_CAPEX_EQUITY_AT_CLOSE,
+    IMMEDIATE_CAPEX_FUNDING_MODES,
+    IMMEDIATE_CAPEX_LENDER_HOLDBACK,
     PRIMARY_COC_TARGET_PCT,
     insurance_requires_claim_review,
 )
@@ -1037,6 +1040,55 @@ def _apply_renovation_funding(prepared: dict[str, Any], *, strategy: str) -> dic
     return out
 
 
+def _immediate_capex(canonical: dict[str, Any]) -> tuple[Decimal, str]:
+    """Bucket 1 of the priced canonical: ``(amount, funding)``."""
+    block = (canonical.get("capital_plan") or {}).get("immediate_capex") or {}
+    funding = block.get("funding") or IMMEDIATE_CAPEX_EQUITY_AT_CLOSE
+    if funding not in IMMEDIATE_CAPEX_FUNDING_MODES:
+        raise BacksolveInputError(
+            f"capital_plan.immediate_capex.funding must be one of {IMMEDIATE_CAPEX_FUNDING_MODES}"
+        )
+    return dec(block.get("amount") or 0), funding
+
+
+def _capital_plan_summary(
+    prepared: dict[str, Any], units: int, profile: GuardrailProfile, reserve_floor: Decimal | None,
+) -> dict[str, Any]:
+    """The three capex buckets as priced, with the bucket that binds in year 1."""
+    amount, funding = _immediate_capex(prepared)
+    recurring = (prepared.get("capital_plan") or {}).get("recurring_capex") or {}
+    recurring_per_unit = recurring.get("per_unit_annual")
+    reserve = _reserve_per_unit(prepared, units)
+    floor = profile.recurring_capex_per_unit()
+    binding = None
+    if recurring_per_unit is not None or reserve is not None:
+        binding = (
+            "recurring_capex" if float(recurring_per_unit or 0) > float(reserve or 0) else "replacement_reserve"
+        )
+    renovation_plan = _renovation_plan(prepared)
+    return {
+        "immediate_capex": {
+            "amount": float(amount),
+            "funding": funding,
+            # Equity at close: in the total equity basis at every candidate price.
+            # A lender holdback: the loan is upsized by the holdback instead.
+            "included_in_total_equity_basis": bool(amount > 0 and funding == IMMEDIATE_CAPEX_EQUITY_AT_CLOSE),
+            "loan_upsized_by_holdback": bool(amount > 0 and funding == IMMEDIATE_CAPEX_LENDER_HOLDBACK),
+        },
+        # The value-add renovation budget, shown beside bucket 1, never inside it.
+        "renovation_budget": float(renovation_plan["renovation_budget"]) if renovation_plan else 0.0,
+        "recurring_capex_per_unit": float(recurring_per_unit) if recurring_per_unit is not None else None,
+        "recurring_capex_growth": (
+            float(recurring["growth_rate"]) if recurring.get("growth_rate") is not None else None
+        ),
+        "recurring_capex_floor_per_unit": float(floor) if floor is not None else None,
+        "replacement_reserve_per_unit": reserve,
+        "replacement_reserve_floor_per_unit": float(reserve_floor) if reserve_floor is not None else None,
+        "below_noi_charge_rule": "max(recurring capex, replacement reserve) per month",
+        "binding_year_1": binding,
+    }
+
+
 def _reserve_per_unit(canonical: dict[str, Any], units: int) -> float | None:
     """The priced reserve per unit: the first ``replacement_reserves`` segment."""
     rows = sorted(canonical.get("replacement_reserves") or [], key=lambda r: str(r.get("start_period", "")))
@@ -1187,7 +1239,10 @@ def _prepare_house_assumptions(
                     continue
     rebase_summary = _rebase_to_house_box_score(prepared, grouped_comps=grouped_comps)
     units = _sum_units(prepared)
-    guardrail_profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=False)
+    guardrail_profile = GuardrailProfile(
+        strategy=strategy, year_built=year_built, deferred=False,
+        deferred_maintenance=bool((prepared.get("deal_profile") or {}).get("deferred_maintenance", False)),
+    )
     guardrail_findings: list[dict[str, Any]] = []
     observed_insurance = _find_annual_opex(prepared, "insurance")
     observed_insurance_per_unit = (
@@ -1264,6 +1319,19 @@ def _prepare_house_assumptions(
         context={"policy_overrides": policy_overrides},
         keys=("replacement_reserve_per_unit",),
     )
+
+    # Recurring capex by vintage: max(value, vintage band floor). An analyst or
+    # PCA figure below the floor is kept and disclosed (the insurance waiver
+    # convention); a hold with none gets the floor. The charge below NOI is
+    # max(recurring capex, reserve), so the reserve floor above never stacks.
+    recurring_findings = guardrails.enforce_floors(
+        prepared,
+        mode=guardrails.MODE_PRICING,
+        profile=guardrail_profile,
+        context={"policy_overrides": policy_overrides},
+        keys=("recurring_capex_per_unit",),
+    )
+    guardrail_findings += recurring_findings
 
     # R&M including turnover / make-ready, excluding payroll (the floor basis).
     observed_r_and_m = sum_r_and_m_floor_basis(prepared)
@@ -1406,6 +1474,8 @@ def _prepare_house_assumptions(
             float(r_and_m_floor_annual) if r_and_m_floor_annual is not None else None
         ),
         "repairs_maintenance_top_up_annual": float(r_and_m_top_up),
+        # The three capex buckets priced (ADR 0003 §3).
+        "capital_plan": _capital_plan_summary(prepared, units, guardrail_profile, reserve_per_unit),
         "house_box_score_rebase": rebase_summary,
         "revenue_quality_bridge_required": bridge_required,
         "revenue_quality_bridge_required_reason": bridge_required_reason,
@@ -1440,6 +1510,8 @@ def _build_price_case(
     renovation_budget: Decimal = Decimal("0"),
     coc_basis: str = "year_1",
     exit_cap_anchor: dict[str, Any] | None = None,
+    immediate_capex: Decimal = Decimal("0"),
+    immediate_capex_funding: str = "equity_at_close",
 ) -> dict[str, Any]:
     """The candidate case at ``price``.
 
@@ -1451,6 +1523,12 @@ def _build_price_case(
     (``renovation_capex_funding: "equity_at_close"``): it is added to the total
     equity basis and the unlevered basis, and the engine keeps it out of
     operating cash flow.
+
+    ``immediate_capex`` is the capital plan's bucket 1 (deferred maintenance /
+    PCA immediate needs at close). Funded with equity at close it is added to
+    the total equity basis and the unlevered basis; as a lender holdback the
+    loan commitment is upsized by it (equity unchanged) and it is in the
+    unlevered basis. It is never in NOI or the monthly cash flows.
     """
     price = normalize_property_tax_purchase_price(price)
     persisted_price = property_tax_decimal_to_json_number(
@@ -1475,6 +1553,8 @@ def _build_price_case(
         agency_spread=agency_spread,
     )
     commitment = dec(agency_terms["loan_amount"])
+    holdback = immediate_capex if immediate_capex_funding == IMMEDIATE_CAPEX_LENDER_HOLDBACK else Decimal("0")
+    equity_immediate = immediate_capex - holdback
     closing_costs = price * purchase_closing_cost_pct
     acquisition_fee = price * acquisition_fee_pct
     upfront_capex = sum(
@@ -1489,6 +1569,7 @@ def _build_price_case(
         + loan_closing_costs
         + upfront_capex
         + renovation_budget
+        + equity_immediate
     )
     case["purchase_assumptions"] = {
         "purchase_price": persisted_price,
@@ -1496,12 +1577,20 @@ def _build_price_case(
         "closing_costs": float(closing_costs),
         "total_equity_basis": float(total_equity_basis),
     }
-    if renovation_budget > 0:
+    if renovation_budget > 0 or immediate_capex > 0:
         case["purchase_assumptions"]["total_unlevered_basis"] = float(
-            price + closing_costs + upfront_capex + renovation_budget
+            price + closing_costs + upfront_capex + renovation_budget + immediate_capex
         )
+    stated_block = (case.get("capital_plan") or {}).get("immediate_capex")
+    if immediate_capex > 0 or (isinstance(stated_block, dict) and "amount_in_stated_basis" in stated_block):
+        # The bases above already carry bucket 1: the engine must not add it again.
+        plan = deepcopy(case.get("capital_plan") or {})
+        plan.setdefault("immediate_capex", {})["amount_in_stated_basis"] = float(immediate_capex)
+        case["capital_plan"] = plan
     case["debt_terms"] = {
-        "commitment": float(commitment),
+        # A lender holdback for immediate capex upsizes the loan; the sized loan
+        # still funds the purchase (equity_contribution above).
+        "commitment": float(commitment + holdback),
         "rate": agency_terms["rate"],
         "amort_years": agency_terms["amort_years"],
         "io_months": agency_terms["io_months"],
@@ -1883,12 +1972,14 @@ def backsolve_price(
     funding = policy_summary.get("renovation_funding") or {}
     renovation_budget = dec(funding.get("equity_funded_renovation_budget", 0))
     last_renovation_month = (funding.get("plan") or {}).get("last_renovation_month")
+    immediate_amount, immediate_funding = _immediate_capex(prepared)
 
     def evaluate(price):
         case = _build_price_case(
             prepared, price=price, target_coc=target, benchmark_treasury=treasury,
             projected_noi=projected_noi, renovation_budget=renovation_budget, coc_basis=coc_basis,
             exit_cap_anchor=exit_cap_anchor,
+            immediate_capex=immediate_amount, immediate_capex_funding=immediate_funding,
             **{key: values[key] for key in (
                 "year_built", "agency_spread", "purchase_closing_cost_pct",
                 "partnership_closing_costs", "acquisition_fee_pct", "loan_closing_costs")},
@@ -2024,6 +2115,11 @@ def backsolve_price(
             },
             "coc_basis": basis_detail,
             "renovation_funding": {k: v for k, v in funding.items() if k != "plan"},
+            # The three capex buckets priced; the below-NOI charge by analysis year.
+            "capital_plan": {
+                **(policy_summary.get("capital_plan") or {}),
+                "below_noi_capex_charge": (solved_results.get("capital_plan") or {}).get("below_noi_capex_charge"),
+            },
             "free_cf_year_1": solved_results["metrics"]["coc"]["free_cf_year_1"],
             "levered_irr": solved_results["metrics"]["irr"]["levered_irr"],
             "minimum_dscr": solved_results["metrics"]["dscr"]["minimum_dscr"],
@@ -2044,6 +2140,22 @@ def backsolve_price(
 
 def _pct(value: Any) -> str:
     return "n/a" if value is None else f"{float(value):.2%}"
+
+
+def _capital_plan_cli_lines(plan: Any) -> list[str]:
+    """The three capex buckets priced, for the CLI summary (empty without a plan)."""
+    if not isinstance(plan, dict) or not plan:
+        return []
+    immediate = plan.get("immediate_capex") or {}
+    recurring = plan.get("recurring_capex_per_unit")
+    reserve = plan.get("replacement_reserve_per_unit")
+    return [
+        f"  Immediate capex:  ${float(immediate.get('amount') or 0):,.0f} at close "
+        f"({immediate.get('funding', 'equity_at_close')})",
+        f"  Recurring capex:  {'n/a' if recurring is None else f'${float(recurring):,.0f}/unit/yr'} vs reserve "
+        f"{'n/a' if reserve is None else f'${float(reserve):,.0f}/unit/yr'}; binds: "
+        f"{plan.get('binding_year_1') or 'n/a'}",
+    ]
 
 
 def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
@@ -2078,6 +2190,7 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
         f"  Levered IRR:      {_pct(summary.get('levered_irr'))}",
         f"  Min DSCR:         {'n/a' if dscr is None else f'{float(dscr):.2f}x'}",
         f"  Exit cap:         {exit_line}",
+        *_capital_plan_cli_lines(summary.get("capital_plan")),
         f"  Floors enforced:  {enforced}",
         f"  Summary:          {summary_path}",
     ]

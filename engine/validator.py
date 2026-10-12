@@ -21,7 +21,7 @@ from engine.property_tax import (
     require_property_tax_policy,
     validate_property_tax_policy,
 )
-from engine.underwriting_policy import CAP_RATE_SANITY_BAND
+from engine.underwriting_policy import CAP_RATE_SANITY_BAND, CAPEX_PCA_REVIEW_BEFORE_YEAR
 from engine.version import SCHEMA_VERSION
 
 
@@ -728,9 +728,9 @@ def _check_guardrails(inputs: Dict[str, Any]) -> List[ValidationIssue]:
     return issues
 
 
-# Vintages built before this year need a capex review (ADR 0003 §3): the
-# replacement reserve is a lender-style $250/door, not sustaining capital.
-CAPEX_REVIEW_BEFORE_YEAR = 2000
+# Vintages built before this year without PCA evidence need a capex review
+# (ADR 0003 §3): recurring capex then rests on the house vintage band alone.
+CAPEX_REVIEW_BEFORE_YEAR = CAPEX_PCA_REVIEW_BEFORE_YEAR
 
 
 def _canonical_year_built(inputs: Mapping[str, Any]) -> Optional[int]:
@@ -749,34 +749,53 @@ def _canonical_year_built(inputs: Mapping[str, Any]) -> Optional[int]:
     return None
 
 
-def _check_capex_budget(inputs: Dict[str, Any]) -> List[ValidationIssue]:
-    """A pre-2000 vintage with no capex budget, renovation program or capex line is a WARNING.
+def _capital_plan(inputs: Mapping[str, Any]) -> Mapping[str, Any]:
+    plan = inputs.get("capital_plan")
+    return plan if isinstance(plan, Mapping) else {}
 
-    The house replacement reserve ($250/door, below NOI) does not fund
-    sustaining capital. The vintage economic CapEx is disclosed as
-    ``assumptions.entries.economic_capex_per_unit`` and stays out of the cash
-    flows unless the analyst opts in, so an older asset needs a PCA / capex
-    review. Never an ERROR.
+
+def has_pca_evidence(inputs: Mapping[str, Any]) -> bool:
+    """Whether the canonical carries PCA recurring-capex evidence (``capital_plan.pca``)."""
+    pca = _capital_plan(inputs).get("pca")
+    return isinstance(pca, Mapping) and pca.get("recurring_capex_per_unit") is not None
+
+
+def _check_capex_budget(inputs: Dict[str, Any]) -> List[ValidationIssue]:
+    """Capex review prompts (ADR 0003 §3). WARNINGs only, never an ERROR.
+
+    - ``CAPEX_PCA_MISSING``: built before 2000 with no PCA evidence. Recurring
+      capex then comes from an analyst figure or the house vintage band, so
+      the deal needs a property condition assessment.
+    - ``DEFERRED_CAPEX_UNBUDGETED``: deferred maintenance is flagged but
+      nothing is budgeted at close (immediate capex is zero or absent).
     """
+    issues: List[ValidationIssue] = []
     year = _canonical_year_built(inputs)
-    if year is None or year >= CAPEX_REVIEW_BEFORE_YEAR:
-        return []
-    if any(inputs.get(field) for field in (
-        "capex_schedule", "capex_upfront_funded", "renovation_programs", "unit_renovations",
-    )):
-        return []
-    return [
-        ValidationIssue(
+    if year is not None and year < CAPEX_REVIEW_BEFORE_YEAR and not has_pca_evidence(inputs):
+        issues.append(ValidationIssue(
             severity="WARNING",
-            code="CAPEX_BUDGET_MISSING",
+            code="CAPEX_PCA_MISSING",
             message=(
-                f"Built {year} (before {CAPEX_REVIEW_BEFORE_YEAR}) with no capex budget, renovation program "
-                "or capex line: the $250/door replacement reserve does not fund sustaining capital. Review the "
-                "PCA / capex plan; the vintage economic CapEx is disclosed as economic_capex_per_unit."
+                f"Built {year} (before {CAPEX_REVIEW_BEFORE_YEAR}) with no PCA evidence: recurring capex rests on "
+                "an analyst figure or the house vintage band (recurring_capex_per_unit). Review it against a "
+                "property condition assessment (capital_plan.pca)."
             ),
-            path="/capex_schedule",
-        )
-    ]
+            path="/capital_plan/pca",
+        ))
+    if (inputs.get("deal_profile") or {}).get("deferred_maintenance"):
+        immediate = _capital_plan(inputs).get("immediate_capex")
+        amount = immediate.get("amount") if isinstance(immediate, Mapping) else None
+        if not amount:
+            issues.append(ValidationIssue(
+                severity="WARNING",
+                code="DEFERRED_CAPEX_UNBUDGETED",
+                message=(
+                    "Deferred maintenance is flagged but no immediate capex is budgeted at close "
+                    "(capital_plan.immediate_capex): enter the PCA immediate needs or an analyst budget."
+                ),
+                path="/capital_plan/immediate_capex",
+            ))
+    return issues
 
 
 def _check_required_revenue_quality_bridge(inputs: Dict[str, Any]) -> List[ValidationIssue]:
