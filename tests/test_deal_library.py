@@ -183,8 +183,15 @@ def test_every_entry_has_a_source_and_the_matching_review_flag(slug):
     if deal["market_data"] is None:
         assert market_sourced == set()
     else:
-        assert {"rent_growth", "physical_vacancy", "exit_cap_rate"} <= market_sourced
+        assert {"rent_growth", "physical_vacancy"} <= market_sourced
         assert all(entries[k]["as_of"] == deal["market_data"]["as_of"] for k in market_sourced)
+        # Exit caps track entry caps: the market cap rate is a recorded candidate and
+        # the steal-test reference, not the exit cap (ADR 0003 §3).
+        exit_cap = entries["exit_cap_rate"]
+        assert exit_cap["source"] == "house:exit_cap_spread"
+        assert any(c["source"].startswith("market:") for c in exit_cap["candidates"])
+        assert exit_cap["detail"]["market"]["rate"] is not None
+        assert exit_cap["detail"]["steal"] is False
 
 
 @pytest.mark.parametrize("slug", SLUGS)
@@ -601,9 +608,18 @@ def test_sheet_override_round_trip_moves_the_result_the_expected_way(slug, tmp_p
     assert after["collection_loss"]["override"]["note"] == "stress collections"
     assert {r["loss_rate"] for r in edited["collection_loss_curve"]} == {collection}
     assert edited["growth_assumptions"]["annual_growth_rates"] == growth
-    # Nothing else moved.
-    untouched = set(entries) - {"collection_loss", "rent_growth"}
+    # Nothing else moved, except the entry-anchored exit cap: the higher collection
+    # loss lowers year-1 NOI, so the going-in cap at the same price, and the exit
+    # cap anchored to it, move with it (ADR 0003 §3).
+    untouched = set(entries) - {"collection_loss", "rent_growth", "exit_cap_rate"}
     assert {k: after[k]["value"] for k in untouched} == {k: entries[k]["value"] for k in untouched}
+    if entries["exit_cap_rate"]["source"] == "house:exit_cap_spread":
+        assert after["exit_cap_rate"]["source"] == "house:exit_cap_spread"
+        assert after["exit_cap_rate"]["value"] < entries["exit_cap_rate"]["value"]
+        detail = after["exit_cap_rate"]["detail"]
+        assert after["exit_cap_rate"]["value"] == pytest.approx(detail["going_in_cap_rate"] + 0.005)
+    else:
+        assert after["exit_cap_rate"]["value"] == entries["exit_cap_rate"]["value"]
 
     results = run_underwriting(edited)
     year1 = lambda r: r["cashflow"]["by_year"][1]["effective_gross_income"]  # noqa: E731 - first full year
@@ -620,6 +636,7 @@ def _assert_restored(before, after):
     for key in CLEARED_KEYS:
         for field in RESTORED_FIELDS:
             assert _entries(after)[key][field] == _entries(before)[key][field], (key, field)
+    assert _entries(after)["exit_cap_rate"]["detail"] == _entries(before)["exit_cap_rate"]["detail"]
     assert after["exit_assumptions"]["exit_cap_rate"] == before["exit_assumptions"]["exit_cap_rate"]
     assert after["growth_assumptions"] == before["growth_assumptions"]
 
@@ -628,14 +645,19 @@ def _assert_restored(before, after):
 def test_clearing_an_override_restores_the_market_default(registry):
     slug = "a_stabilized_1990s"
     before = _canonical(slug)
-    assert all(_entries(before)[k]["source"] == "market:synthetic" for k in CLEARED_KEYS)
+    # Rent growth is market-sourced; the exit cap is entry-anchored and keeps the
+    # market cap rate as its steal-test reference (detail.market).
+    default_sources = {"rent_growth": "market:synthetic", "exit_cap_rate": "house:exit_cap_spread"}
+    assert all(_entries(before)[k]["source"] == default_sources[k] for k in CLEARED_KEYS)
+    assert _entries(before)["exit_cap_rate"]["detail"]["market"]["source"] == "market:synthetic"
     overridden = resolve_assumptions(before, overrides={"exit_cap_rate": 0.06, "rent_growth": 0.02})
     assert all(_entries(overridden)[k]["source"] == "analyst" for k in CLEARED_KEYS)
-    # Re-resolving while the override stands keeps the market default as the default.
+    # Re-resolving while the override stands keeps the market-informed default as the default.
     kept = resolve_assumptions(overridden)
     for key in CLEARED_KEYS:
         assert _entries(kept)[key]["default_value"] == _entries(before)[key]["default_value"], key
-        assert "from market:synthetic" in _entries(kept)[key]["basis"], key
+        assert f"from {default_sources[key]}" in _entries(kept)[key]["basis"], key
+    assert _entries(kept)["exit_cap_rate"]["detail"] == _entries(before)["exit_cap_rate"]["detail"]
 
     # No registry, one without data for the deal (e.g. no feeder files), or the deal's own.
     market = {

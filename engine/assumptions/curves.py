@@ -33,10 +33,17 @@ results into curves the engine reads:
     T12 bad debt / GPR, else the house default (vintage
     ``bad_debt_typical_low``, 2.0% when the year built is unknown).
 ``exit_cap_rate``
-    The exit-year ``market_cap_rate`` (submarket, else MSA) when an exit is
-    modeled, else the OM rate, else the going-in cap rate (T12 NOI / price)
-    plus ``HOUSE_EXIT_CAP_SPREAD`` (``house:exit_cap_spread``), else the
-    engine default.
+    Exit caps track entry caps. The going-in cap rate at the modeled price
+    (engine year-1 NOI / purchase price) plus ``HOUSE_EXIT_CAP_SPREAD``
+    (``house:exit_cap_spread``, review_required; ``exit_cap.py``). The
+    exit-year ``market_cap_rate`` (submarket, else MSA) only enters through the
+    rare steal test (going-in more than ``HOUSE_STEAL_THRESHOLD`` above market:
+    compress toward market + spread, at most ``HOUSE_MAX_EXIT_COMPRESSION``)
+    and is otherwise a candidate; it is the value only when there is no price
+    to anchor to. Else the engine default. The OM rate is a candidate. The
+    market reference is kept on the entry's ``detail.market``, so a
+    re-resolution without market data (backsolve's, at the solved price)
+    applies the same steal test.
 
 Analyst overrides keep resolver v1 semantics and always win. A curve already
 in a canonical that the resolver did not write is recorded as an analyst
@@ -78,13 +85,15 @@ from engine.assumptions.resolver import (
     PLACEHOLDER,
     PRESENT,
     _candidate,
+    entry_anchor,
     _Choice,
     _cohort_reader,
     _Context,
     _Current,
+    _anchored_exit_cap_choice,
+    _exit_cap_candidates,
     _exit_cap_default,
     _fallback,
-    _house_exit_cap,
     _ltl_candidates,
     _num,
     _read_concessions,
@@ -1056,32 +1065,84 @@ def _market_exit_cap(ctx: _Context) -> Optional[tuple[float, MarketPick, int]]:
     return _r(rate), pick, year
 
 
+def market_exit_reference(ctx: _Context) -> Optional[dict[str, Any]]:
+    """The exit-year market cap rate the steal test compares with, or None.
+
+    From the registry when it has one; else the reference the last resolution
+    recorded on the entry (``detail.market``), so re-resolving without market
+    data at a new price (backsolve's solved case) applies the same test.
+    """
+    market = _market_exit_cap(ctx)
+    if market is not None:
+        rate, pick, year = market
+        return {
+            "rate": rate,
+            "source": pick.source,
+            "level": pick.level,
+            "exit_year": year,
+            "as_of": pick.as_of,
+            "confidence": pick.observation.confidence,
+            "provider": str(pick.observation.provenance.provider),
+        }
+    prior = ctx.prior_entries.get("exit_cap_rate") if isinstance(ctx.prior_entries, Mapping) else None
+    recorded = ((prior or {}).get("detail") or {}).get("market") if isinstance(prior, Mapping) else None
+    if isinstance(recorded, Mapping) and _num(recorded.get("rate")) is not None:
+        return dict(recorded)
+    return None
+
+
 _read_exit_scalar = _scalar_reader("exit_assumptions", "exit_cap_rate")
 
 
 def _read_exit_cap(ctx: _Context) -> _Current:
     current = _read_exit_scalar(ctx)
-    # A modeled exit without a cap rate takes the market rate when one exists,
-    # else the going-in cap rate plus the house spread (ADR 0003 §3).
-    if current.state == ABSENT and (_market_exit_cap(ctx) is not None or _house_exit_cap(ctx) is not None):
+    # A modeled exit without a cap rate takes the entry-anchored rate, else the
+    # market rate when there is no price to anchor to (ADR 0003 §3).
+    if current.state == ABSENT and (
+        market_exit_reference(ctx) is not None or entry_anchor(ctx) is not None
+    ):
         return _Current(PLACEHOLDER)
     return current
 
 
+def _market_exit_choice(market: Mapping[str, Any]) -> _Choice:
+    return _Choice(
+        str(market["source"]),
+        market["rate"],
+        f"No usable going-in cap rate to anchor to (no purchase price, or year-1 NOI / price outside the "
+        f"HOUSE_EXIT_CAP_GOING_IN_MAX guard): {market.get('level')} market cap rate for the exit year "
+        f"{market.get('exit_year')} ({market.get('provider')}, calendar-year mean of the quarterly series).",
+        as_of=market.get("as_of"),
+        confidence=market.get("confidence"),
+        detail={"rule": "market_no_price_anchor", "market": dict(market)},
+    )
+
+
 def _exit_cap_default_v4(ctx: _Context, state: str) -> _Choice:
     if state != NO_SECTION:
-        market = _market_exit_cap(ctx)
+        market = market_exit_reference(ctx)
+        anchored = _anchored_exit_cap_choice(ctx, market)
+        if anchored is not None:
+            return anchored
         if market is not None:
-            rate, pick, year = market
-            return _Choice(
-                pick.source,
-                rate,
-                f"{pick.level} market cap rate for the exit year {year} ({pick.observation.provenance.provider}, "
-                f"calendar-year mean of the quarterly series).",
-                as_of=pick.as_of,
-                confidence=pick.observation.confidence,
-            )
+            return _market_exit_choice(market)
     return _exit_cap_default(ctx, state)
+
+
+def _exit_cap_candidates_v4(ctx: _Context) -> list[dict[str, Any]]:
+    """OM, the house anchor (with the steal test) and the engine fallback.
+
+    Without a registry, the market candidates the last resolution recorded are
+    carried, so every candidate stays on the entry.
+    """
+    out = _exit_cap_candidates(ctx, market_exit_reference(ctx))
+    if not market_observations(ctx, "market_cap_rate"):
+        prior = ctx.prior_entries.get("exit_cap_rate") if isinstance(ctx.prior_entries, Mapping) else None
+        out += [
+            deepcopy(dict(c)) for c in ((prior or {}).get("candidates") or [])
+            if isinstance(c, Mapping) and str(c.get("source", "")).startswith(MARKET_PREFIX)
+        ]
+    return out
 
 
 # ── override shapes (called from resolver._normalize_override) ───────────
@@ -1192,7 +1253,7 @@ def apply(specs: tuple[_Spec, ...]) -> tuple[_Spec, ...]:
             read=_read_concessions_v4, write=_write_concessions_v4, default=_concession_default,
             gather=_concession_candidates,
         ),
-        "exit_cap_rate": dict(read=_read_exit_cap, default=_exit_cap_default_v4),
+        "exit_cap_rate": dict(read=_read_exit_cap, default=_exit_cap_default_v4, gather=_exit_cap_candidates_v4),
     }
     return tuple(
         replace(spec, adr_rank=_no_adr_note, **patches[spec.key]) if spec.key in patches else spec
@@ -1214,6 +1275,7 @@ __all__ = [
     "apply",
     "carry_market_default",
     "market_candidates",
+    "market_exit_reference",
     "market_observations",
     "market_pick",
     "msa_geo",

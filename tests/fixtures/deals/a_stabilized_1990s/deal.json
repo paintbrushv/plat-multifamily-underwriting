@@ -150,7 +150,7 @@
       "loss_to_lease": "house:vintage_1990s",
       "concessions": "deal:t12",
       "collection_loss": "deal:t12",
-      "exit_cap_rate": "market:synthetic",
+      "exit_cap_rate": "house:exit_cap_spread",
       "insurance_per_unit": "deal:t12",
       "r_and_m_per_unit": "deal:t12",
       "replacement_reserve_per_unit": "house:replacement_reserve",
@@ -206,8 +206,8 @@
         0.01
       ],
       "exit_cap_rate": [
-        0.057,
-        0.058
+        0.062,
+        0.0626
       ],
       "insurance_per_unit": [
         600,

@@ -588,15 +588,58 @@ HOUSE_LTL_BURN_OFF_MONTHS = 12
 # stabilized level.
 HOUSE_YEAR1_CONCESSION_MONTHS = 12
 
-# Exit cap rate when an exit is modeled but neither the analyst nor market
-# data supplies one (ADR 0003 §3): the going-in cap rate (trailing T12 NOI /
-# purchase price) plus this spread. 50 bps of cap-rate expansion over a
-# typical 5-year hold is the conservative house assumption: it prices the exit
-# on an older asset in a market that may not stay as tight as today's.
+# ── Exit cap rate (ADR 0003 §3) ──────────────────────────────────────────
+# HOUSE POLICY. Exit caps track entry caps: unless the analyst sets one, the
+# exit cap is the going-in cap rate AT THE PRICE BEING MODELED (year-1 NOI /
+# purchase price) plus HOUSE_EXIT_CAP_SPREAD. It is re-measured whenever the
+# price changes (backsolve recomputes it at every candidate price), so a solved
+# price never pairs a high entry cap with an exit cap anchored at the ask.
+#
+# 50 bps of cap-rate expansion over a typical 5-year hold is the conservative
+# house assumption: it prices the exit on an older asset in a market that may
+# not stay as tight as today's.
 HOUSE_EXIT_CAP_SPREAD = Decimal("0.0050")
-# A trailing NOI / purchase price above this is not a usable going-in cap rate
-# (the price or the T12 is not comparable), so the house spread is not applied.
+# A going-in cap above this is not usable (the price or the NOI is not
+# comparable), so the exit is not anchored to it.
 HOUSE_EXIT_CAP_GOING_IN_MAX = Decimal("0.25")
+# The "screaming steal" exception, which is rare: only when a market or
+# submarket cap rate is available AND the going-in cap at the modeled price is
+# more than HOUSE_STEAL_THRESHOLD above it may the exit compress toward market
+# + spread, and never by more than HOUSE_MAX_EXIT_COMPRESSION below going-in +
+# spread. Without market data there is never compression; a going-in cap at or
+# below market (paying up) still exits at entry + spread.
+HOUSE_STEAL_THRESHOLD = Decimal("0.0150")
+HOUSE_MAX_EXIT_COMPRESSION = Decimal("0.0100")
+
+
+def house_exit_cap_rate(
+    going_in_cap_rate: Decimal | float,
+    *,
+    market_cap_rate: Optional[Decimal | float] = None,
+) -> dict[str, Decimal | bool | None]:
+    """The house exit cap for a going-in cap rate measured at the modeled price.
+
+    Returns ``exit_cap_rate`` and how it was reached: ``anchored`` (going-in +
+    spread), ``market_cap_rate``, ``steal`` and ``compression`` (anchored minus
+    the exit cap; 0 unless it is a steal). The caller guards the going-in cap
+    with ``HOUSE_EXIT_CAP_GOING_IN_MAX``.
+    """
+    going_in = Decimal(str(going_in_cap_rate))
+    market = Decimal(str(market_cap_rate)) if market_cap_rate is not None else None
+    anchored = going_in + HOUSE_EXIT_CAP_SPREAD
+    value = anchored
+    steal = market is not None and going_in - market > HOUSE_STEAL_THRESHOLD
+    if steal:
+        value = max(market + HOUSE_EXIT_CAP_SPREAD, anchored - HOUSE_MAX_EXIT_COMPRESSION)
+    return {
+        "going_in_cap_rate": going_in,
+        "spread": HOUSE_EXIT_CAP_SPREAD,
+        "anchored": anchored,
+        "market_cap_rate": market,
+        "steal": steal,
+        "compression": anchored - value,
+        "exit_cap_rate": value,
+    }
 
 
 def default_bad_debt_rate(year_built: Optional[int]) -> Decimal:

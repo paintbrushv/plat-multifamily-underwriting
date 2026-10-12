@@ -203,20 +203,43 @@
   },
   {
     "key": "exit_cap_rate",
-    "value": 0.0575,
+    "value": 0.062292,
     "unit": "decimal",
-    "source": "market:synthetic",
-    "basis": "submarket market cap rate for the exit year 2031 (synthetic, calendar-year mean of the quarterly series).",
-    "as_of": "2026-09-30",
-    "confidence": "high",
-    "review_required": false,
-    "default_value": 0.0575,
+    "source": "house:exit_cap_spread",
+    "basis": "Entry-anchored: going-in cap 5.73% at the modeled price (year-1 NOI $1,897,512.85 / purchase price $33,120,000.00) plus the house spread 50 bps (HOUSE_EXIT_CAP_SPREAD) = 6.23%. The market cap rate 5.75% is a candidate only: the going-in cap is at or below it (paying at or above market), so the exit stays anchored to entry.",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": 0.062292,
     "delta": 0.0,
     "override_value": null,
     "override_note": null,
     "override_cohorts": null,
     "guardrail_status": null,
-    "extra": null
+    "extra": {
+      "detail": {
+        "rule": "entry_anchored",
+        "purchase_price": 33120000.0,
+        "year1_noi": 1897512.85,
+        "going_in_cap_rate": 0.057292,
+        "spread": 0.005,
+        "anchored_exit_cap_rate": 0.062292,
+        "market_cap_rate": 0.0575,
+        "steal": false,
+        "compression": 0.0,
+        "exit_cap_rate": 0.062292,
+        "noi_basis": "year-1 NOI",
+        "market": {
+          "rate": 0.0575,
+          "source": "market:synthetic",
+          "level": "submarket",
+          "exit_year": 2031,
+          "as_of": "2026-09-30",
+          "confidence": "high",
+          "provider": "synthetic"
+        }
+      }
+    }
   },
   {
     "key": "sale_cost_percent",

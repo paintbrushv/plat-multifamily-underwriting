@@ -215,17 +215,32 @@
     "value": 0.0575,
     "unit": "decimal",
     "source": "analyst",
-    "basis": "Analyst override (ingest input exit_cap_rate); the resolver default is 5.82% from house:exit_cap_spread.",
+    "basis": "Analyst override (ingest input exit_cap_rate); the resolver default is 5.88% from house:exit_cap_spread.",
     "as_of": null,
     "confidence": "high",
     "review_required": false,
-    "default_value": 0.058218,
-    "delta": -0.000718,
+    "default_value": 0.058841,
+    "delta": -0.001341,
     "override_value": 0.0575,
     "override_note": "ingest input exit_cap_rate",
     "override_cohorts": null,
     "guardrail_status": null,
-    "extra": null
+    "extra": {
+      "detail": {
+        "rule": "entry_anchored",
+        "purchase_price": 30880000.0,
+        "year1_noi": 1662620.63,
+        "going_in_cap_rate": 0.053841,
+        "spread": 0.005,
+        "anchored_exit_cap_rate": 0.058841,
+        "market_cap_rate": null,
+        "steal": false,
+        "compression": 0.0,
+        "exit_cap_rate": 0.058841,
+        "noi_basis": "year-1 NOI",
+        "market": null
+      }
+    }
   },
   {
     "key": "sale_cost_percent",

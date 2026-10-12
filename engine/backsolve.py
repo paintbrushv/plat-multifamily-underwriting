@@ -34,6 +34,7 @@ from engine.assumptions.canonical_ops import (
     upsert_annual_opex_by_match as _upsert_annual_opex_by_match,
     upsert_annual_opex as _upsert_annual_opex,
 )
+from engine.assumptions import exit_cap as _exit_cap
 from engine.assumptions import guardrails
 from engine.assumptions.guardrails import (
     GuardrailProfile,
@@ -877,9 +878,8 @@ def _hold_months(canonical: dict[str, Any]) -> int:
     return (ey - sy) * 12 + (em - sm) + 1
 
 
-def _preview_projected_noi(canonical: dict[str, Any]) -> Decimal:
-    preview = deepcopy(canonical)
-    hold_months = _hold_months(preview)
+def _preview_price(canonical: dict[str, Any]) -> Decimal:
+    """The price the all-equity NOI preview runs at: the tax module's price basis."""
     tax_calculation = (
         ((canonical.get("metadata") or {}).get("property_summary") or {}).get(
             "property_tax_calculation"
@@ -888,7 +888,7 @@ def _preview_projected_noi(canonical: dict[str, Any]) -> Decimal:
     )
     tax_price_basis = tax_calculation.get("purchase_price_basis")
     if tax_price_basis is None:
-        preview_price = max(
+        return max(
             dec(
                 (canonical.get("purchase_assumptions") or {}).get(
                     "purchase_price",
@@ -897,43 +897,76 @@ def _preview_projected_noi(canonical: dict[str, Any]) -> Decimal:
             ),
             Decimal("20000000"),
         )
-    else:
-        preview_price = dec(tax_price_basis)
-    preview["purchase_assumptions"] = {
-        "purchase_price": float(preview_price),
-        "equity_contribution": float(preview_price),
-        "closing_costs": 0.0,
-        "total_equity_basis": float(preview_price),
+    return dec(tax_price_basis)
+
+
+def _preview_projected_noi(canonical: dict[str, Any]) -> Decimal:
+    """NOI of the second cashflow year on an all-equity preview (debt sizing)."""
+    return _exit_cap.preview_noi(canonical, _preview_price(canonical), run=run_underwriting)["projected"]
+
+
+# How the exit cap is priced (ADR 0003 §3). The policy's or the analyst's exit
+# cap (and the exit cap of a canonical that records no provenance) is fixed;
+# otherwise it is entry-anchored and re-measured at every candidate price.
+EXIT_CAP_MODE_POLICY = "explicit_policy"
+EXIT_CAP_MODE_ANALYST = "canonical_analyst"
+EXIT_CAP_MODE_CANONICAL = "canonical"
+EXIT_CAP_MODE_ANCHORED = "entry_anchored"
+
+
+def _exit_cap_policy(
+    policy: dict[str, Any],
+    values: dict[str, Any],
+    entries: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """``(mode, anchor)``: ``anchor`` is None unless the exit cap is entry-anchored.
+
+    The anchor carries the exit-year market cap rate the resolver recorded
+    (``detail.market``, for the steal test) and the fallback used at a
+    candidate price whose going-in cap is not usable (the market rate, else the
+    canonical's exit cap).
+    """
+    if "exit_cap_rate" in policy:
+        return EXIT_CAP_MODE_POLICY, None
+    entry = (entries or {}).get("exit_cap_rate")
+    if not isinstance(entry, dict):
+        # No provenance: the resolver treats an exit cap in such a canonical as the analyst's.
+        return EXIT_CAP_MODE_CANONICAL, None
+    if entry.get("source") == SOURCE_ANALYST_OVERRIDE:
+        return EXIT_CAP_MODE_ANALYST, None
+    market = ((entry.get("detail") or {}).get("market")) or None
+    rate = (market or {}).get("rate")
+    return EXIT_CAP_MODE_ANCHORED, {
+        "market": deepcopy(market),
+        "market_cap_rate": rate,
+        "fallback": dec(rate) if rate is not None else values["exit_cap_rate"],
     }
-    preview["pricing_provenance"] = {
-        "published_om_price": None,
-        "broker_whisper_price": None,
-        "strike_price": float(preview_price),
-        "strike_price_basis": "other",
-        "strike_price_derivation": (
-            "Temporary all-equity preview case used only to estimate projected NOI "
-            "before target-price backsolve."
-        ),
-        "om_pricing_process": "unknown",
-        "as_of_date": str(date.today()),
+
+
+def _anchor_exit_cap(case: dict[str, Any], *, price: Any, anchor: dict[str, Any]) -> None:
+    """Set the case's exit cap to the going-in cap at ``price`` + the house spread.
+
+    The steal test uses the anchor's market rate. A going-in cap outside the
+    ``HOUSE_EXIT_CAP_GOING_IN_MAX`` guard (an extreme bracket price) falls back
+    to the market rate, else the canonical's exit cap. The calculation is kept in
+    ``metadata.property_summary.exit_cap_calculation``.
+    """
+    year1 = _exit_cap.preview_noi(case, price, run=run_underwriting)["year_1"]
+    record = _exit_cap.anchored_exit_cap(year1, price, market_cap_rate=anchor.get("market_cap_rate"))
+    if record is None:
+        record = {
+            "rule": "fallback_going_in_not_usable",
+            "purchase_price": float(price),
+            "year1_noi": float(year1) if year1 is not None else None,
+            "market_cap_rate": anchor.get("market_cap_rate"),
+            "exit_cap_rate": float(anchor["fallback"]),
+        }
+    record["market"] = deepcopy(anchor.get("market"))
+    case.setdefault("exit_assumptions", {})["exit_cap_rate"] = record["exit_cap_rate"]
+    metadata = case.setdefault("metadata", {})
+    metadata.setdefault("property_summary", {})["exit_cap_calculation"] = {
+        "mode": EXIT_CAP_MODE_ANCHORED, **record,
     }
-    preview["debt_terms"] = {
-        "commitment": 0.0,
-        "rate": 0.0,
-        "amort_years": 30,
-        "io_months": 0,
-        "term_months": hold_months,
-        "loan_start_month": str(preview["time_grid"]["analysis_start_date"])[:7],
-    }
-    preview.setdefault("fund_assumptions", {})
-    preview.setdefault("exit_assumptions", {"exit_cap_rate": 0.0625, "sale_cost_percent": 0.02})
-    results = run_underwriting(preview)
-    by_year = results["cashflow"]["by_year"]
-    if len(by_year) >= 2:
-        return dec(by_year[1]["net_operating_income"])
-    if by_year:
-        return dec(by_year[0]["net_operating_income"])
-    return Decimal("0")
 
 
 def _renovation_plan(canonical: dict[str, Any]) -> dict[str, Any] | None:
@@ -1406,8 +1439,13 @@ def _build_price_case(
     projected_noi: Decimal,
     renovation_budget: Decimal = Decimal("0"),
     coc_basis: str = "year_1",
+    exit_cap_anchor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The candidate case at ``price``.
+
+    With ``exit_cap_anchor`` (an entry-anchored exit cap, ADR 0003 §3) the exit
+    cap is the going-in cap at this price (year-1 NOI / price) plus the house
+    spread, re-measured for every candidate.
 
     ``renovation_budget`` is a renovation budget funded with equity at close
     (``renovation_capex_funding: "equity_at_close"``): it is added to the total
@@ -1425,6 +1463,9 @@ def _build_price_case(
     )
     hold_months = _hold_months(case)
     candidate_projected_noi = _preview_projected_noi(case)
+    if exit_cap_anchor is not None:
+        # Same preview as the projected NOI above (memoized), so no extra engine run.
+        _anchor_exit_cap(case, price=persisted_price, anchor=exit_cap_anchor)
     agency_terms = compute_agency_loan_terms(
         year_built,
         t12_noi=candidate_projected_noi,
@@ -1572,7 +1613,19 @@ PRICING_POLICY_KEYS = (
 )
 
 
-def canonical_analyst_values(canonical: dict[str, Any]) -> dict[str, Decimal]:
+def _canonical_entries(canonical: dict[str, Any]) -> dict[str, Any] | None:
+    """The canonical's assumption entries re-read with the resolver, or None without provenance."""
+    if not isinstance(canonical.get("assumptions"), dict):
+        return None
+    try:
+        return resolve_assumptions(canonical)["assumptions"]["entries"]
+    except ValueError:  # an unresolvable canonical: fall back to the recorded provenance
+        return canonical["assumptions"].get("entries") or {}
+
+
+def canonical_analyst_values(
+    canonical: dict[str, Any], *, entries: dict[str, Any] | None = None,
+) -> dict[str, Decimal]:
     """Analyst-sourced values of ``PRICING_POLICY_KEYS`` in the canonical (ADR 0003 §5).
 
     Provenance comes from the canonical's ``assumptions`` section, re-read
@@ -1581,12 +1634,10 @@ def canonical_analyst_values(canonical: dict[str, Any]) -> dict[str, Decimal]:
     provenance, so none of its values is treated as an analyst value and the
     policy defaults apply as before. Dollar values are rounded to cents.
     """
-    if not isinstance(canonical.get("assumptions"), dict):
+    if entries is None:
+        entries = _canonical_entries(canonical)
+    if entries is None:
         return {}
-    try:
-        entries = resolve_assumptions(canonical)["assumptions"]["entries"]
-    except ValueError:  # an unresolvable canonical: fall back to the recorded provenance
-        entries = canonical["assumptions"].get("entries") or {}
     out: dict[str, Decimal] = {}
     for key in PRICING_POLICY_KEYS:
         entry = entries.get(key)
@@ -1805,8 +1856,10 @@ def backsolve_price(
     checked_benchmark = validate_benchmark(benchmark)
     # An analyst value in the canonical wins over the policy default; only an
     # explicit policy value overrides it (ADR 0003 §5).
-    analyst_values = canonical_analyst_values(canonical)
+    entries = _canonical_entries(canonical)
+    analyst_values = canonical_analyst_values(canonical, entries=entries)
     values = resolve_policy(policy, canonical, analyst_values)
+    exit_cap_mode, exit_cap_anchor = _exit_cap_policy(policy, values, entries)
     analyst_keys = {key for key in analyst_values if key not in policy}
     require_property_tax_policy(canonical)
     treasury = Decimal(checked_benchmark["rate"])
@@ -1816,8 +1869,12 @@ def backsolve_price(
         revenue_quality_bridge=revenue_quality_bridge, trailing_actuals=trailing_actuals,
     )
     values["year_built"] = policy_summary.get("year_built", values["year_built"])
+    value_sources = policy_value_sources(policy, analyst_values)
+    if exit_cap_mode == EXIT_CAP_MODE_ANCHORED:
+        value_sources["exit_cap_rate"] = EXIT_CAP_MODE_ANCHORED
     effective = {"policy": describe_policy(values),
-                 "policy_value_sources": policy_value_sources(policy, analyst_values),
+                 "policy_value_sources": value_sources,
+                 "exit_cap_mode": exit_cap_mode,
                  "benchmark": checked_benchmark,
                  "target_coc": str(target), "house_adjustments": policy_summary,
                  "property_tax_policy": deepcopy(require_property_tax_policy(canonical))}
@@ -1831,6 +1888,7 @@ def backsolve_price(
         case = _build_price_case(
             prepared, price=price, target_coc=target, benchmark_treasury=treasury,
             projected_noi=projected_noi, renovation_budget=renovation_budget, coc_basis=coc_basis,
+            exit_cap_anchor=exit_cap_anchor,
             **{key: values[key] for key in (
                 "year_built", "agency_spread", "purchase_closing_cost_pct",
                 "partnership_closing_costs", "acquisition_fee_pct", "loan_closing_costs")},
@@ -1971,6 +2029,12 @@ def backsolve_price(
             "minimum_dscr": solved_results["metrics"]["dscr"]["minimum_dscr"],
             "going_in_cap_rate": solved_results["metrics"]["yields"]["going_in_cap_rate"],
             "exit_cap_rate": solved_results["metrics"]["yields"]["exit_cap_rate"],
+            # How the exit cap was priced: entry-anchored at the solved price, or fixed.
+            "exit_cap_calculation": (
+                ((solved_case.get("metadata") or {}).get("property_summary") or {}).get("exit_cap_calculation")
+                if exit_cap_mode == EXIT_CAP_MODE_ANCHORED
+                else {"mode": exit_cap_mode, "exit_cap_rate": float(values["exit_cap_rate"])}
+            ),
             "policy_summary": policy_summary,
         }
     summary.update(base, status=status, target_coc_pct=float(target * 100),
@@ -1996,6 +2060,16 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
     findings = ((summary.get("policy_summary") or {}).get("guardrails") or {}).get("findings") or []
     enforced = sum(1 for f in findings if f.get("action") == guardrails.ACTION_ENFORCED)
     dscr = summary.get("minimum_dscr")
+    exit_calc = summary.get("exit_cap_calculation") or {}
+    exit_line = _pct(summary.get("exit_cap_rate"))
+    if exit_calc.get("mode") == EXIT_CAP_MODE_ANCHORED and exit_calc.get("going_in_cap_rate") is not None:
+        exit_line += (
+            f" (entry-anchored: going-in {_pct(exit_calc['going_in_cap_rate'])}"
+            f" + {float(exit_calc['spread']) * 10_000:g} bps"
+            + (", steal-adjusted" if exit_calc.get("steal") else "") + ")"
+        )
+    elif exit_calc.get("mode"):
+        exit_line += f" ({exit_calc['mode']})"
     lines = [
         f"Backsolve: {summary.get('status', 'unknown')}",
         f"  Solved price:     {'n/a' if price is None else f'${float(price):,.2f}'}",
@@ -2003,6 +2077,7 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
         f"  Achieved CoC:     {_pct(None if achieved is None else float(achieved) / 100)}",
         f"  Levered IRR:      {_pct(summary.get('levered_irr'))}",
         f"  Min DSCR:         {'n/a' if dscr is None else f'{float(dscr):.2f}x'}",
+        f"  Exit cap:         {exit_line}",
         f"  Floors enforced:  {enforced}",
         f"  Summary:          {summary_path}",
     ]
