@@ -166,6 +166,12 @@ python runs/ingest_deal.py --property-id SYN-A \
   their vintage bands (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and
   $1,700/unit), in the defaults, the underwrite warnings and the pricing
   floors (ADR 0003 decision (i)).
+- The R&M floor reviews payroll before it tops R&M up: payroll is payroll and
+  earns no credit unless the T12 labels maintenance labor in payroll and
+  payroll per unit is above the house benchmark ($2,000/unit). The review is
+  shown on the `r_and_m_payroll_credit` row of the assumptions sheet, flagged
+  when R&M is short and payroll is high; override the row to set the credit
+  (ADR 0003 decision (j)).
 
 **2. Review** `output/deal.assumptions.json` (one row per assumption: value,
 unit, source, basis, default, override, delta, guardrail). Rows sourced from

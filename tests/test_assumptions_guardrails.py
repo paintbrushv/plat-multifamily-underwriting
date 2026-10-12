@@ -727,7 +727,7 @@ def _with_lines(deal, *lines):
     return out
 
 
-def test_r_and_m_floor_counts_turnover_lines_and_never_payroll(minimal_deal_inputs):
+def test_r_and_m_floor_counts_turnover_lines_and_payroll_only_through_the_review(minimal_deal_inputs):
     """The vintage R&M band ($900-$1,700/unit for the 1980s) excludes payroll and is
     compared with R&M including turnover / make-ready."""
     deal = _below_floor_deal(minimal_deal_inputs)
@@ -742,11 +742,12 @@ def test_r_and_m_floor_counts_turnover_lines_and_never_payroll(minimal_deal_inpu
     assert resolved["assumptions"]["entries"]["r_and_m_per_unit"]["value"] == 950.0
     assert "guardrail" not in resolved["assumptions"]["entries"]["r_and_m_per_unit"]
 
-    # $300 R&M + $200 turns = $500/unit: payroll ($6,000/unit) is not counted, so
-    # the top-up is $400/unit, not zero.
+    # $300 R&M + $200 turns = $500/unit: payroll ($6,000/unit, none of it labeled
+    # maintenance labor) is not counted, so the top-up is $400/unit, not zero.
     short = _with_lines(deal, ("Repairs & Maintenance", 300), ("Turnover / Make-Ready", 200),
-                        ("Repairs Salaries", 4_000), ("Maintenance Payroll", 2_000))
+                        ("Payroll - Office", 4_000), ("Payroll - Leasing", 2_000))
     [finding] = enforce_floors(short, mode="pricing", profile=PROFILE, keys=("r_and_m_per_unit",))
+    assert finding["payroll_review"]["credit_annual"] == 0.0
     assert (finding["original"], finding["applied"], finding["top_up_annual"]) == (500.0, 900.0, 40_000.0)
     assert finding["floor_basis"] == house.R_AND_M_FLOOR_BASIS
     assert "turnover" in finding["floor_basis"] and "payroll excluded" in finding["floor_basis"]
@@ -756,11 +757,17 @@ def test_r_and_m_floor_counts_turnover_lines_and_never_payroll(minimal_deal_inpu
     assert "turnover" in floor["r_and_m_per_unit"].basis and "payroll excluded" in floor["r_and_m_per_unit"].basis
     # The entry's guardrail record says what the floor was compared with.
     unshorted = _with_lines(deal, ("Repairs & Maintenance", 300), ("Turnover / Make-Ready", 200),
-                            ("Repairs Salaries", 4_000))
+                            ("Payroll - Office", 4_000))
     record = resolve_assumptions(unshorted, deal_profile=PROFILE)["assumptions"]["entries"][
         "r_and_m_per_unit"]["guardrail"]
     assert (record["action"], record["original"]) == ("warned", 500.0)
     assert f"Floor basis: {house.R_AND_M_FLOOR_BASIS}." in record["basis"]
+    # Payroll labeled as maintenance labor and well above the house benchmark earns a
+    # credit (the payroll review, tests/test_r_and_m_payroll_review.py): $6,000/unit of
+    # labeled payroll, $4,000 above a $2,000 benchmark, covers the $400 shortfall.
+    labeled = _with_lines(deal, ("Repairs & Maintenance", 300), ("Turnover / Make-Ready", 200),
+                          ("Repairs Salaries", 4_000), ("Maintenance Payroll", 2_000))
+    assert enforce_floors(labeled, mode="pricing", profile=PROFILE, keys=("r_and_m_per_unit",)) == []
 
 
 def test_backsolve_does_not_over_top_a_t12_that_books_turns_separately(minimal_deal_inputs):

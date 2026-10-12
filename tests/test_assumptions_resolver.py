@@ -43,6 +43,7 @@ STABILIZED_KEYS = {
     "concessions",
     "insurance_per_unit",
     "r_and_m_per_unit",
+    "r_and_m_payroll_credit",
     "replacement_reserve_per_unit",
     "immediate_capex",
     "recurring_capex_per_unit",

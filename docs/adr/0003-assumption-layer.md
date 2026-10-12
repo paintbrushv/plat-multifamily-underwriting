@@ -123,6 +123,7 @@ key:
 | `house:recurring_capex_vintage` | `default_recurring_capex_per_unit`: the vintage economic CapEx band (low end stabilized, midpoint value-add, high end with deferred maintenance) |
 | `house:deferred_capex` | `HOUSE_IMMEDIATE_CAPEX_DEFAULT`: nothing budgeted at close without PCA or analyst evidence |
 | `house:deferred_capex_placeholder` | `default_deferred_capex_placeholder_per_unit`: deferred maintenance flagged with no PCA and no analyst figure, one year of the vintage economic CapEx band high end per unit at close (review_required) |
+| `house:r_and_m_payroll_review` | The R&M floor's payroll review (`r_and_m_payroll_credit`): the payroll credit toward the R&M floor, $0 unless the T12 labels maintenance labor in payroll and payroll per unit is above `HOUSE_PAYROLL_BENCHMARK_PER_UNIT`. A disclosure: flagged only in the ambiguous case (§5) |
 | `house:opex_growth_table` | The house per-category opex growth table (also the 3% real estate tax growth and the recurring capex growth, `HOUSE_RECURRING_CAPEX_GROWTH` = the R&M rate) |
 | `house:property_tax_module` | `engine/property_tax.py`: the real estate tax line reassessed at the purchase price |
 | `house:management_fee_pct_egr` | The house management fee as a percent of EGR |
@@ -235,8 +236,10 @@ How each key combines sources:
     (`t12_totals_not_found_reconciliation_unverified`,
     `rent_roll_summary_not_found_reconciliation_unverified`), never a blocker.
 - **Flags** are review prompts. They cover any entry from `house:*` or
-  `engine_fallback`, provider data with low confidence, and values outside the
-  submarket or vintage typical band. The validator emits a WARNING and
+  `engine_fallback` (except a disclosure source, `registry.REVIEW_ON_FINDING_SOURCES`:
+  the R&M payroll review is flagged only in its ambiguous case), provider data
+  with low confidence, and values outside the submarket or vintage typical
+  band. The validator emits a WARNING and
   `review_required: true`.
 - **House floors** (vintage vacancy, LTL, collection loss, concessions,
   insurance, R&M, reserves) are guardrails:
@@ -256,7 +259,7 @@ reuses the `underwriting_policy` vintage functions:
 | `collection_loss` | max(vintage floor, broker bad debt) | each `collection_loss_curve` segment (no curve counts as 0) |
 | `concessions` | max(vintage year-1 floor, broker concessions) | each `concession_schedule` row that applies in analysis year 1 (`free_months` read as months / 12); no year-1 row counts as 0% |
 | `insurance_per_unit` | $600/unit (`DEFAULT_YEAR1_INSURANCE_PER_UNIT`); waived by an explicit analyst insurance override, and the waiver is disclosed | the matched insurance line, annualized |
-| `r_and_m_per_unit` | vintage R&M per unit (the band excludes payroll) | R&M including turnover: the repairs & maintenance and turnover / make-ready lines, annualized (`underwriting_policy.R_AND_M_FLOOR_BASIS`, `canonical_ops.in_r_and_m_floor_basis`). Payroll is never counted, even on a line labeled as repairs, so a T12 that books turns separately is not topped up for R&M it carries. A shortfall is one top-up line sized from the other R&M lines (an existing top-up line never counts toward the floor); the guardrail record's basis names the floor basis |
+| `r_and_m_per_unit` | vintage R&M per unit (the band excludes payroll) | R&M including turnover: the repairs & maintenance and turnover / make-ready lines, annualized (`underwriting_policy.R_AND_M_FLOOR_BASIS`, `canonical_ops.in_r_and_m_floor_basis`), plus the payroll credit of the payroll review (decision (j)). A payroll line is never in the basis, even one labeled as repairs, so a T12 that books turns separately is not topped up for R&M it carries. A shortfall is one top-up line sized from the other R&M lines less the payroll credit (an existing top-up line never counts toward the floor); the guardrail record's basis names the floor basis and the payroll review |
 | `replacement_reserve_per_unit` | `HOUSE_REPLACEMENT_RESERVE_PER_UNIT` ($250/unit, `house:replacement_reserve`, any vintage) | each `replacement_reserves` segment (none counts as 0) |
 | `recurring_capex_per_unit` | The vintage band pick for the deal (`house:recurring_capex_vintage`; none when the vintage is unknown). An analyst figure below it is kept and disclosed (`floor_waived_by_analyst_override`, with `waived_by`), as the insurance override is. A PCA figure below it is warned in underwrite (the record names the `evidence`) and raised to the floor in pricing, `max(PCA, floor)`, disclosed as `floor_applied_over_deal_evidence` (decision (i)). Any other value below it is warned (underwrite) or raised (pricing); a hold with none gets the floor in pricing | `capital_plan.recurring_capex.per_unit_annual` (none counts as 0) |
 
@@ -739,6 +742,40 @@ Three decisions on deferred maintenance and PCA evidence:
 
    This lowers prices for flagged deals and for deals whose PCA recurring
    capex is below the band (library deal d: $1,500 raised to $1,750/unit).
+
+10. **(j) The R&M floor's payroll review.** Payroll is payroll: oftentimes the
+    whole site team's time is booked to payroll and the R&M lines are true
+    repairs and maintenance, so by default payroll earns no credit toward the
+    R&M floor. A credit needs evidence that maintenance labor is booked in
+    payroll beyond normal staffing, both of:
+    - payroll lines labeled as maintenance labor
+      (`canonical_ops.is_maintenance_labor_label`: maintenance wages or
+      salaries, maintenance or service technicians, repair staff, make-ready
+      technicians, building engineers), read line by line from the T12 (the
+      parser keeps each line's annual amount, `source_lines` on the T12 opex
+      evidence); a T12 section taken whole that mixes maintenance labor with
+      other payroll cannot be split and earns nothing;
+    - total payroll per unit above `HOUSE_PAYROLL_BENCHMARK_PER_UNIT`
+      ($2,000/unit/year: NAA Income/Expense IQ 2024 data, administrative plus
+      payroll $2,323/unit nationally; NAA 2021 survey, salaries and personnel
+      25% of garden opex, about $2,160/unit on the 2024 total of $8,657; NAA
+      staffing best practice of one office and one maintenance employee per
+      100 units).
+
+    The credit is the lesser of the labeled maintenance payroll and the
+    payroll above the benchmark. The floor test is R&M + turnover + credit;
+    the top-up covers only the remaining shortfall. The review is always
+    disclosed on the `r_and_m_payroll_credit` entry
+    (`house:r_and_m_payroll_review`, unit $/unit/year; `detail` carries
+    payroll per unit vs the benchmark, the labeled maintenance payroll lines,
+    the credit and the resulting top-up), on the R&M guardrail record's basis
+    and in backsolve's `policy_overrides` (`payroll_review`). It is
+    `review_required` only in the ambiguous case: R&M is below the floor
+    before any credit and payroll is above the benchmark. An analyst value for
+    `r_and_m_payroll_credit` replaces the credit. A hand-entered wage line
+    ("Maintenance Wages") is payroll and no longer counts toward the R&M
+    basis. The synthetic library deals carry $1,150-$1,500/unit of payroll,
+    below the benchmark, so no credit applies and their prices do not move.
 
 ## Consequences
 

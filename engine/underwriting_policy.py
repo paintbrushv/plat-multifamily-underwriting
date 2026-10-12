@@ -393,6 +393,34 @@ R_AND_M_FLOOR_BASIS = (
     "repairs & maintenance plus turnover / make-ready lines, annualized; payroll excluded"
 )
 
+# ── R&M floor: the payroll review (ADR 0003 §5) ──────────────────────────
+# HOUSE POLICY, NOT MARKET DATA. Payroll is payroll: site payroll earns no
+# credit toward the R&M floor by default, even when the whole team's time is
+# booked there, because the vintage R&M band is repair and maintenance spend
+# (contracts, materials, turns) on top of normal site staffing. A credit needs
+# evidence that maintenance labor is booked in payroll beyond normal staffing:
+# payroll lines labeled as maintenance labor (canonical_ops
+# ``is_maintenance_labor_label``) AND total payroll per unit above this
+# benchmark. The credit is the lesser of the labeled maintenance payroll and
+# the payroll above the benchmark; the floor test is R&M + turnover + credit.
+#
+# The benchmark is total site payroll (wages, payroll taxes and benefits) per
+# unit a year for a garden community, set at the top of normal staffing:
+# - NAA Income/Expense IQ 2024 data (NAA, 2025-12-22): administrative plus
+#   payroll costs $2,323/unit/year nationally (all property types).
+# - NAA 2021 Survey of Operating Income & Expenses (2020 data): salaries and
+#   personnel are 25% of total opex for garden communities; 25% of the 2024
+#   national total opex of $8,657/unit is about $2,160/unit.
+# - NAA Best Practices, Staffing (2019 survey, 2018 data): the general rule is
+#   one office and one maintenance employee per 100 units, and the surveyed
+#   average was one employee per 45.3 units, so about half of site payroll is
+#   maintenance staff in a normal operation.
+# $2,000/unit sits just below the derived garden figure, so payroll above it
+# is above normal staffing for a garden asset. No public NAA table gives
+# garden payroll per unit in dollars; replace it with market data when a
+# provider supplies one.
+HOUSE_PAYROLL_BENCHMARK_PER_UNIT = Decimal("2000")
+
 
 def vintage_bucket(year_built: Optional[int]) -> Optional[str]:
     if year_built is None:

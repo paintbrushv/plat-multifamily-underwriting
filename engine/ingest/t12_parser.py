@@ -331,6 +331,9 @@ def parse_t12_with_provenance(
     totals: dict[str, float] = {}
     recoverables: dict[str, bool] = {}
     source_rows: dict[str, list[str]] = {}
+    # canonical -> each statement line (or resolved section) with its annual
+    # amount, so a merged category (e.g. Payroll) can still be read line by line.
+    line_amounts: dict[str, list[dict[str, Any]]] = {}
 
     for category_raw, monthly_values in rows:
         if not category_raw or not monthly_values:
@@ -348,6 +351,11 @@ def parse_t12_with_provenance(
         source_rows.setdefault(canonical, []).extend(
             _source_labels.get(category_raw) or [category_raw.strip()]
         )
+        line: dict[str, Any] = {"label": category_raw.strip(), "annual": round(annual_total, 2)}
+        if _source_labels.get(category_raw):
+            # A section taken whole: its lines are named but not amounted one by one.
+            line["source_rows"] = list(_source_labels[category_raw])
+        line_amounts.setdefault(canonical, []).append(line)
 
     opex_table = [
         {
@@ -360,6 +368,7 @@ def parse_t12_with_provenance(
     ]
     provenance: dict[str, Any] = {
         **source_rows,
+        "_line_amounts": line_amounts,
         "_warnings": [
             {
                 "tier_reached": warning.tier_reached,

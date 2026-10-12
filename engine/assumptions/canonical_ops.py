@@ -105,6 +105,44 @@ PAYROLL_KEYWORDS = (
 )
 
 
+# Labels that name payroll even without a PAYROLL_KEYWORDS word ("Maintenance
+# Wages", "Personnel"): the payroll review reads them as payroll lines.
+PAYROLL_LABEL_EXTRA_KEYWORDS = ("wages", "personnel")
+# Words that identify a payroll line as maintenance labor (maintenance wages,
+# salaries or technicians, repair staff, make-ready technicians, building
+# engineers). Read only on payroll lines (ADR 0003 §5, the R&M payroll review).
+MAINTENANCE_LABOR_KEYWORDS = (
+    "maint",
+    "repair",
+    "technician",
+    "service tech",
+    "make ready",
+    "make-ready",
+    "engineer",
+)
+
+
+def is_payroll_label(label: str) -> bool:
+    """Whether an opex line is site payroll (never in the R&M floor basis)."""
+    lower = label.lower()
+    if in_r_and_m_floor_basis(label):
+        return False
+    return (
+        opex_bucket_for_policy(label) == "payroll"
+        or _contains_any(lower, PAYROLL_KEYWORDS)
+        or _contains_any(lower, PAYROLL_LABEL_EXTRA_KEYWORDS)
+    )
+
+
+def is_maintenance_labor_label(label: str) -> bool:
+    """Whether a payroll line's label identifies maintenance labor."""
+    return _contains_any(label.lower(), MAINTENANCE_LABOR_KEYWORDS)
+
+
+def payroll_rows(canonical: dict[str, Any]) -> list[dict[str, Any]]:
+    return [row for row in canonical.get("opex_table") or [] if is_payroll_label(str(row.get("category_name", "")))]
+
+
 def opex_bucket_for_policy(label: str) -> str | None:
     lower = label.lower()
     if "insurance" in lower:
@@ -224,14 +262,18 @@ def opex_bucket_for_policy(label: str) -> str | None:
 
 # The R&M floor basis (engine/underwriting_policy.R_AND_M_FLOOR_BASIS): the
 # repairs & maintenance and turnover / make-ready buckets. Payroll is never in
-# it, even on a line labeled as repairs (e.g. "Repairs Salaries").
+# it, even on a line labeled as repairs (e.g. "Repairs Salaries", "Maintenance Wages").
 R_AND_M_FLOOR_BUCKETS = ("repairs_maintenance", "make_ready")
 
 
 def in_r_and_m_floor_basis(label: str) -> bool:
     """Whether an opex line counts toward the R&M floor: R&M or turnover, never payroll."""
     lower = label.lower()
-    return opex_bucket_for_policy(label) in R_AND_M_FLOOR_BUCKETS and not _contains_any(lower, PAYROLL_KEYWORDS)
+    return (
+        opex_bucket_for_policy(label) in R_AND_M_FLOOR_BUCKETS
+        and not _contains_any(lower, PAYROLL_KEYWORDS)
+        and not _contains_any(lower, PAYROLL_LABEL_EXTRA_KEYWORDS)
+    )
 
 
 def r_and_m_floor_rows(canonical: dict[str, Any]) -> list[dict[str, Any]]:

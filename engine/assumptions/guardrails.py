@@ -41,7 +41,9 @@ from engine import underwriting_policy as house
 from engine.assumptions.canonical_ops import (
     annual_opex_amount,
     concession_pct_rent,
+    is_maintenance_labor_label,
     matching_opex_rows,
+    payroll_rows,
     sum_r_and_m_floor_basis,
     sum_units,
     upsert_annual_opex,
@@ -52,6 +54,7 @@ from engine.assumptions.registry import (
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_PREFIX,
     HOUSE_PRICING_NORMALIZATION,
+    HOUSE_R_AND_M_PAYROLL_REVIEW,
     HOUSE_RECURRING_CAPEX,
     HOUSE_REPLACEMENT_RESERVE,
     HOUSE_YEAR1_INSURANCE_FLOOR,
@@ -995,14 +998,175 @@ def _is_r_and_m_top_up(row: Mapping[str, Any]) -> bool:
     return str(row.get("category_name", "")).strip().lower() == R_AND_M_TOP_UP_CATEGORY.lower()
 
 
-def _guard_r_and_m(canonical: dict[str, Any], floor: Floor, mode: str, units: int) -> list[dict[str, Any]]:
+# ── R&M floor: the payroll review ────────────────────────────────────────
+
+PAYROLL_CREDIT_KEY = "r_and_m_payroll_credit"
+
+
+def _t12_line_facts(canonical: Mapping[str, Any]) -> Mapping[str, Any]:
+    gate = (canonical.get("metadata") or {}).get("ingest_gate") if isinstance(canonical, Mapping) else None
+    evidence = (gate or {}).get("evidence") if isinstance(gate, Mapping) else None
+    t12 = (evidence or {}).get("t12") if isinstance(evidence, Mapping) else None
+    lines = (t12 or {}).get("opex_lines") if isinstance(t12, Mapping) else None
+    return lines if isinstance(lines, Mapping) else {}
+
+
+def payroll_lines(canonical: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(lines, unseparated)``: every payroll line with its annual amount and label test.
+
+    An ingested payroll row is read line by line from the T12 evidence
+    (``source_lines``) while the row still carries the T12 amount; otherwise
+    the row is one line under its own name. A T12 section taken whole whose
+    lines mix maintenance labor with other payroll cannot be split: it counts
+    as non-maintenance and is listed in ``unseparated``.
+    """
+    from engine.assumptions.resolver import _same
+
+    t12 = _t12_line_facts(canonical)
+    lines: list[dict[str, Any]] = []
+    unseparated: list[dict[str, Any]] = []
+    for row in payroll_rows(dict(canonical)):
+        name = str(row.get("category_name", ""))
+        try:
+            annual = annual_opex_amount(dict(canonical), row)
+        except ValueError:
+            continue
+        facts = t12.get(name) if isinstance(t12.get(name), Mapping) else {}
+        source_lines = facts.get("source_lines")
+        if isinstance(source_lines, list) and source_lines and _same(facts.get("annual_amount"), float(annual)):
+            for line in source_lines:
+                labels = [str(label) for label in line.get("source_rows") or []]
+                maintenance = (
+                    all(is_maintenance_labor_label(label) for label in labels) if labels
+                    else is_maintenance_labor_label(str(line.get("label", "")))
+                )
+                item = {"label": str(line.get("label", "")), "annual": Decimal(str(line.get("annual") or 0)),
+                        "maintenance": maintenance}
+                lines.append(item)
+                if labels and not maintenance and any(is_maintenance_labor_label(label) for label in labels):
+                    unseparated.append({"label": item["label"], "annual": float(item["annual"]),
+                                        "source_rows": labels})
+            continue
+        lines.append({"label": name, "annual": annual, "maintenance": is_maintenance_labor_label(name)})
+    return lines, unseparated
+
+
+def _analyst_payroll_credit(canonical: Mapping[str, Any], context: Mapping[str, Any]) -> Optional[Decimal]:
+    """The analyst's ``r_and_m_payroll_credit`` (per unit a year), if one is set."""
+    entries = context.get("assumption_entries")
+    if not isinstance(entries, Mapping):
+        section = canonical.get("assumptions")
+        entries = section.get("entries") if isinstance(section, Mapping) else None
+    entry = entries.get(PAYROLL_CREDIT_KEY) if isinstance(entries, Mapping) else None
+    if not isinstance(entry, Mapping) or entry.get("source") != SOURCE_ANALYST or entry.get("value") is None:
+        return None
+    return Decimal(str(entry["value"]))
+
+
+def r_and_m_payroll_review(
+    canonical: Mapping[str, Any],
+    floor_per_unit: Optional[Decimal],
+    *,
+    credit_override_per_unit: Optional[Decimal] = None,
+) -> dict[str, Any]:
+    """The R&M floor's payroll review (``underwriting_policy.HOUSE_PAYROLL_BENCHMARK_PER_UNIT``).
+
+    Payroll is payroll: by default it earns no credit toward the R&M floor. A
+    credit needs payroll lines labeled as maintenance labor AND total payroll
+    per unit above the house benchmark; it is the lesser of the two (labeled
+    maintenance payroll, payroll above the benchmark). An analyst credit (per
+    unit a year) replaces the house credit. The floor test is R&M + turnover
+    + credit; ``top_up_annual`` is the remaining shortfall (the R&M basis
+    excludes a top-up line an earlier pricing run added). ``review_required``
+    marks the ambiguous case: a shortfall before any credit with payroll above
+    the benchmark, and no analyst credit.
+    """
+    units = sum_units(dict(canonical))
+    units_dec = Decimal(str(units)) if units else Decimal("0")
+    lines, unseparated = payroll_lines(canonical)
+    payroll = sum((line["annual"] for line in lines), Decimal("0"))
+    benchmark = house.HOUSE_PAYROLL_BENCHMARK_PER_UNIT
+    above = max(Decimal("0"), payroll - benchmark * units_dec)
+    maintenance = sum((line["annual"] for line in lines if line["maintenance"]), Decimal("0"))
+    house_credit = min(maintenance, above)
+    if credit_override_per_unit is not None:
+        credit, credit_source = Decimal(str(credit_override_per_unit)) * units_dec, SOURCE_ANALYST
+    else:
+        credit, credit_source = house_credit, HOUSE_R_AND_M_PAYROLL_REVIEW
+    try:
+        basis = sum_r_and_m_floor_basis(dict(canonical)) - sum(
+            (annual_opex_amount(dict(canonical), row) for row in canonical.get("opex_table") or []
+             if _is_r_and_m_top_up(row)),
+            Decimal("0"),
+        )
+    except ValueError:
+        basis = None
+    floor_annual = floor_per_unit * units_dec if floor_per_unit is not None and units else None
+    shortfall = max(Decimal("0"), floor_annual - basis) if floor_annual is not None and basis is not None else None
+    top_up = max(Decimal("0"), shortfall - credit) if shortfall is not None else None
+    per_unit = (lambda amount: float(amount / units_dec) if units else None)
+    return {
+        "payroll_annual": float(payroll),
+        "payroll_per_unit": per_unit(payroll),
+        "benchmark_per_unit": float(benchmark),
+        "payroll_above_benchmark_annual": float(above),
+        "maintenance_payroll_annual": float(maintenance),
+        "maintenance_payroll_lines": [
+            {"label": line["label"], "annual": float(line["annual"])} for line in lines if line["maintenance"]
+        ],
+        "unseparated_payroll_sections": unseparated,
+        "house_credit_annual": float(house_credit),
+        "credit_annual": float(credit),
+        "credit_per_unit": per_unit(credit),
+        "credit_source": credit_source,
+        "r_and_m_basis_annual": float(basis) if basis is not None else None,
+        "floor_per_unit": float(floor_per_unit) if floor_per_unit is not None else None,
+        "floor_annual": float(floor_annual) if floor_annual is not None else None,
+        "shortfall_before_credit_annual": float(shortfall) if shortfall is not None else None,
+        "top_up_annual": float(top_up) if top_up is not None else None,
+        "review_required": bool(
+            credit_source != SOURCE_ANALYST and shortfall is not None and shortfall > 0 and above > 0
+        ),
+    }
+
+
+def payroll_review_text(review: Mapping[str, Any]) -> str:
+    """One sentence that discloses the payroll review."""
+    def usd(value: Any) -> str:
+        return "n/a" if value is None else f"${float(value):,.0f}"
+
+    labeled = review.get("maintenance_payroll_lines") or []
+    text = (
+        f"Payroll review: payroll {usd(review.get('payroll_per_unit'))}/unit vs the house benchmark "
+        f"{usd(review.get('benchmark_per_unit'))}/unit ({usd(review.get('payroll_above_benchmark_annual'))} above); "
+        f"maintenance payroll labeled in the T12 {usd(review.get('maintenance_payroll_annual'))}"
+        + (f" ({', '.join(str(line['label']) for line in labeled)})" if labeled else "")
+        + f"; credit toward the R&M floor {usd(review.get('credit_annual'))} "
+        f"({'analyst' if review.get('credit_source') == SOURCE_ANALYST else 'house review'})"
+    )
+    if review.get("top_up_annual") is not None:
+        text += f"; R&M top-up after the credit {usd(review.get('top_up_annual'))}"
+    text += "."
+    if review.get("unseparated_payroll_sections"):
+        text += " A payroll section mixes maintenance labor with other payroll and cannot be split, so it earns no credit."
+    if review.get("review_required"):
+        text += (" R&M is below the floor and payroll is above the benchmark: confirm whether maintenance labor "
+                 "is booked in payroll (override r_and_m_payroll_credit).")
+    return text
+
+
+def _guard_r_and_m(
+    canonical: dict[str, Any], floor: Floor, mode: str, units: int, context: Optional[Mapping[str, Any]] = None
+) -> list[dict[str, Any]]:
     """R&M against the vintage floor; a shortfall is one top-up line.
 
     The floor basis is ``house.R_AND_M_FLOOR_BASIS``: the repairs & maintenance
-    and turnover / make-ready lines, never payroll. The basis as found
-    (``original``) includes a top-up line an earlier pricing run added. The new
-    top-up is sized from the other R&M lines alone, so re-pricing after the
-    analyst lowers R&M lands exactly on the floor instead of keeping the stale
+    and turnover / make-ready lines, never payroll. Payroll earns a credit only
+    through the payroll review (``r_and_m_payroll_review``): the floor test is
+    the basis plus the credit. The basis as found (``original``) includes a
+    top-up line an earlier pricing run added. The new top-up is sized from the
+    other R&M lines alone (less the credit), so re-pricing after the analyst
+    lowers R&M lands exactly on the floor instead of keeping the stale
     top-up's size.
     """
     if not units:
@@ -1018,17 +1182,21 @@ def _guard_r_and_m(canonical: dict[str, Any], floor: Floor, mode: str, units: in
         if mode == MODE_PRICING:
             raise
         return []
+    review = r_and_m_payroll_review(
+        canonical, floor.value, credit_override_per_unit=_analyst_payroll_credit(canonical, context or {}))
+    credit = Decimal(str(review["credit_annual"]))
     floor_annual = floor.value * Decimal(str(units))
-    if observed >= floor_annual:
+    if observed + credit >= floor_annual:
         return []
     finding = _finding("r_and_m_per_unit", floor, float(observed / Decimal(str(units))), mode,
-                       original_annual=float(observed), floor_basis=house.R_AND_M_FLOOR_BASIS)
+                       original_annual=float(observed), floor_basis=house.R_AND_M_FLOOR_BASIS,
+                       payroll_review=review)
     if mode == MODE_PRICING:
-        top_up = floor_annual - (observed - prior_top_up)
+        top_up = floor_annual - (observed - prior_top_up) - credit
         upsert_annual_opex(canonical, category_name=R_AND_M_TOP_UP_CATEGORY, annual_amount=top_up)
         _grow_like_r_and_m(canonical)
         finding.update(applied_annual=float(floor_annual), top_up_annual=float(top_up),
-                       category_name=R_AND_M_TOP_UP_CATEGORY)
+                       payroll_credit_annual=float(credit), category_name=R_AND_M_TOP_UP_CATEGORY)
         if prior_top_up:
             finding["replaced_top_up_annual"] = float(prior_top_up)
     return [finding]
@@ -1211,7 +1379,7 @@ def enforce_floors(
             findings += _guard_insurance(canonical, floor, mode, units,
                                          analyst_override=context.get("insurance_per_unit_override"))
         elif key == "r_and_m_per_unit":
-            findings += _guard_r_and_m(canonical, floor, mode, units)
+            findings += _guard_r_and_m(canonical, floor, mode, units, context)
         elif key == "replacement_reserve_per_unit":
             findings += _guard_reserves(canonical, floor, mode, units)
         elif key == "recurring_capex_per_unit":
@@ -1350,6 +1518,8 @@ def _entry_record(key: str, items: list[Mapping[str, Any]]) -> dict[str, Any]:
     if first.get("floor_basis"):
         # What the floor is compared with (the R&M floor: R&M plus turnover, never payroll).
         record["basis"] += f" Floor basis: {first['floor_basis']}."
+    if isinstance(first.get("payroll_review"), Mapping):
+        record["basis"] += " " + payroll_review_text(first["payroll_review"])
     if first.get("evidence"):
         # A PCA figure below the floor: underwrite keeps it; pricing applies the floor over it.
         record["evidence"] = first["evidence"]
