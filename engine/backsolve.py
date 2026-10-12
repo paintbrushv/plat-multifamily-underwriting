@@ -1324,10 +1324,12 @@ def _prepare_house_assumptions(
         keys=("replacement_reserve_per_unit",),
     )
 
-    # Recurring capex by vintage: max(value, vintage band floor). An analyst or
-    # PCA figure below the floor is kept and disclosed (the insurance waiver
-    # convention); a hold with none gets the floor. The charge below NOI is
-    # max(recurring capex, reserve), so the reserve floor above never stacks.
+    # Recurring capex by vintage: max(value, vintage band floor). An analyst
+    # figure below the floor is kept and disclosed (the insurance waiver
+    # convention); a PCA figure below it is raised to the floor and disclosed
+    # (floor_applied_over_deal_evidence); a hold with none gets the floor. The
+    # charge below NOI is max(recurring capex, reserve), so the reserve floor
+    # above never stacks.
     recurring_findings = guardrails.enforce_floors(
         prepared,
         mode=guardrails.MODE_PRICING,
@@ -2193,7 +2195,7 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
         target = float(summary["target_coc_pct"]) / 100
     achieved = summary.get("achieved_coc_pct")
     findings = ((summary.get("policy_summary") or {}).get("guardrails") or {}).get("findings") or []
-    enforced = sum(1 for f in findings if f.get("action") == guardrails.ACTION_ENFORCED)
+    enforced = sum(1 for f in findings if f.get("action") in guardrails.ENFORCING_ACTIONS)
     dscr = summary.get("minimum_dscr")
     exit_calc = summary.get("exit_cap_calculation") or {}
     exit_line = _pct(summary.get("exit_cap_rate"))

@@ -2040,8 +2040,9 @@ def _apply_guardrail_mode(
 
     context = dict(context or {})
     enforced = context.pop("enforced", None)
-    # The guardrails read who set a value (an analyst or PCA recurring capex below
-    # the vintage floor is waived and disclosed, not raised) from these entries.
+    # The guardrails read who set a value (an analyst recurring capex below the
+    # vintage floor is waived and disclosed; a PCA one is warned, or raised in
+    # pricing) from these entries.
     context["assumption_entries"] = entries
     if ctx.mode == guardrails.MODE_PRICING and enforced is not None:
         findings = list(enforced)
@@ -2051,7 +2052,7 @@ def _apply_guardrail_mode(
             deferred_maintenance=ctx.profile.deferred_maintenance,
         )
         findings = guardrails.enforce_floors(ctx.canonical, mode=ctx.mode, profile=profile, context=context)
-        if any(f["action"] == guardrails.ACTION_ENFORCED for f in findings):
+        if any(f["action"] in guardrails.ENFORCING_ACTIONS for f in findings):
             # Re-read the raised values, with the first pass as the prior resolution.
             # Keys outside the specs (opex.*) are kept; the caller re-reads them.
             entries = {

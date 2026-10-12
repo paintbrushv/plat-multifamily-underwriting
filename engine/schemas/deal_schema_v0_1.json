@@ -437,15 +437,16 @@
         },
         "guardrail": {
           "type": "object",
-          "description": "ADR 0003 §5. Present when a value is below its house floor: warned in underwrite mode, enforced in pricing mode, or waived (kept and disclosed) when an explicit analyst figure or PCA evidence set it (insurance, recurring capex).",
+          "description": "ADR 0003 §5. Present when a value is below its house floor: warned in underwrite mode, enforced in pricing mode, waived (kept and disclosed) when an explicit analyst figure set it (insurance, recurring capex), or applied over deal evidence in pricing when a PCA recurring capex is below the vintage band (evidence names it). floor_waived_by_deal_evidence is retired and only read from older canonicals.",
           "additionalProperties": false,
           "required": ["floor", "floor_source", "status", "action", "original"],
           "properties": {
             "floor": { "type": "number" },
             "floor_source": { "type": ["string", "null"] },
             "status": { "type": "string", "enum": ["below_floor"] },
-            "action": { "type": "string", "enum": ["warned", "enforced", "floor_waived_by_analyst_override", "floor_waived_by_deal_evidence"] },
+            "action": { "type": "string", "enum": ["warned", "enforced", "floor_waived_by_analyst_override", "floor_waived_by_deal_evidence", "floor_applied_over_deal_evidence"] },
             "waived_by": { "type": "string" },
+            "evidence": { "type": "string" },
             "original": { "type": ["number", "null"] },
             "applied": { "type": "number" },
             "segments": { "type": "array", "items": { "type": "object" } },
