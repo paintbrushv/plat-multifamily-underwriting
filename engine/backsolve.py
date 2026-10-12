@@ -567,6 +567,7 @@ def _apply_house_revenue_policy(
     year_built: int | None,
     strategy: str,
     deferred: bool = False,
+    deferred_maintenance: bool = False,
     broker_snapshot: dict[str, Any] | None = None,
     trailing_actuals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -582,7 +583,10 @@ def _apply_house_revenue_policy(
     value.
     """
     broker_notes = (broker_snapshot or {}).get("underwriting_notes", {})
-    profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=deferred)
+    # deal_profile.deferred_maintenance raises the vacancy, collection-loss and
+    # year-1 concession floors (underwriting_policy, "Deferred maintenance minimums").
+    profile = GuardrailProfile(strategy=strategy, year_built=year_built, deferred=deferred,
+                               deferred_maintenance=deferred_maintenance)
     context: dict[str, Any] = {"broker_snapshot": broker_snapshot, "trailing_actuals": trailing_actuals}
     floors, vacancy_summary = guardrails.house_floors(canonical, profile, context)
 
@@ -1408,6 +1412,7 @@ def _prepare_house_assumptions(
         year_built=year_built,
         strategy=strategy,
         deferred=False,
+        deferred_maintenance=guardrail_profile.deferred_maintenance,
         broker_snapshot=broker_snapshot,
         trailing_actuals=trailing_actuals,
     )

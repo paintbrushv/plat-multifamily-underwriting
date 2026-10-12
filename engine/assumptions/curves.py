@@ -536,14 +536,29 @@ def _rent_growth_candidates(ctx: _Context) -> list[dict[str, Any]]:
 # ── collection loss ──────────────────────────────────────────────────────
 
 
+def _deferred(ctx: _Context) -> bool:
+    """Whether the deal is flagged with deferred maintenance (the house minimums rise)."""
+    return bool(ctx.profile.deferred_maintenance)
+
+
 def _house_collection_loss(ctx: _Context) -> dict[str, Any]:
-    value = float(house.default_bad_debt_rate(ctx.year_built))
+    deferred = _deferred(ctx)
+    value = float(house.default_bad_debt_rate(ctx.year_built, strategy=ctx.strategy, deferred=deferred))
     if ctx.bucket is None:
         return _candidate(
             HOUSE_DEFAULT_COLLECTION_LOSS_SOURCE,
             value,
             f"Year built unknown; house default collection loss {value:.2%} "
             "(HOUSE_DEFAULT_COLLECTION_LOSS).",
+        )
+    if deferred:
+        typical_low = float(house.default_bad_debt_rate(ctx.year_built))
+        return _candidate(
+            house_vintage_source(ctx.bucket),
+            value,
+            f"Year built {ctx.year_built} ({ctx.year_built_origin}) maps to the {ctx.bucket} vintage bucket; "
+            f"deferred maintenance flagged, so the house default collection loss {value:.2%} = max(vintage "
+            f"bad_debt_typical_low {typical_low:.2%}, the deferred-maintenance collection-loss floor).",
         )
     return _candidate(
         house_vintage_source(ctx.bucket),
@@ -560,7 +575,7 @@ def _collection_loss_candidates(ctx: _Context) -> list[dict[str, Any]]:
         out.append(_candidate(SOURCE_DEAL_T12, _r(t12_rate), "T12 bad debt / gross potential rent."))
     out.append(_house_collection_loss(ctx))
     if ctx.bucket is not None:
-        floor = house.default_collection_loss_rate(ctx.year_built, strategy=ctx.strategy)
+        floor = house.default_collection_loss_rate(ctx.year_built, strategy=ctx.strategy, deferred=_deferred(ctx))
         if floor is not None:
             out.append(
                 _candidate(
@@ -770,7 +785,8 @@ def house_stabilized_vacancy(ctx: _Context) -> Optional[tuple[float, str]]:
     floor. The floors themselves are unchanged.
     """
     typical = house.typical_physical_vacancy_rate(ctx.year_built)
-    floor = house.default_physical_vacancy_rate(ctx.year_built, strategy=ctx.strategy)
+    deferred = _deferred(ctx)
+    floor = house.default_physical_vacancy_rate(ctx.year_built, strategy=ctx.strategy, deferred=deferred)
     if typical is None:
         return None
     guardrails = house.revenue_guardrails(ctx.year_built, strategy=ctx.strategy)
@@ -779,8 +795,9 @@ def house_stabilized_vacancy(ctx: _Context) -> Optional[tuple[float, str]]:
     basis = (
         f"house {ctx.bucket} vintage stabilized vacancy {float(value):.2%} = max(typical-band midpoint "
         f"{float(typical):.2%} of {float(low):.2%}-{float(high):.2%}, house vacancy floor "
-        f"{float(floor if floor is not None else typical):.2%} for the {ctx.strategy} strategy; "
-        f"year built {ctx.year_built})"
+        f"{float(floor if floor is not None else typical):.2%} for the {ctx.strategy} strategy"
+        + ("; deferred maintenance flagged" if deferred else "")
+        + f"; year built {ctx.year_built})"
     )
     return _r(float(value)), basis
 
@@ -905,7 +922,8 @@ def _concession_parts(ctx: _Context):
     t12 = _t12_rate(ctx, "concessions")
     pick = market_pick(ctx, "concession_rate")
     market = float(pick.observation.scalar) if pick else None
-    house_year1 = house.default_year1_concessions_rate(ctx.year_built, strategy=ctx.strategy)
+    house_year1 = house.default_year1_concessions_rate(ctx.year_built, strategy=ctx.strategy,
+                                                       deferred=_deferred(ctx))
     house_stabilized = house.stabilized_concessions_rate(ctx.year_built)
 
     if t12 is not None:
@@ -915,7 +933,8 @@ def _concession_parts(ctx: _Context):
                  f"{pick.observation.provenance.provider}")
     elif house_year1 is not None:
         year1 = (_r(float(house_year1)), house_vintage_source(ctx.bucket),
-                 f"house {ctx.bucket} vintage year-1 concessions floor {float(house_year1):.2%}")
+                 f"house {ctx.bucket} vintage year-1 concessions floor {float(house_year1):.2%}"
+                 + (" (raised for deferred maintenance)" if _deferred(ctx) else ""))
     else:
         year1 = None
     if market is not None:
@@ -1030,7 +1049,8 @@ def _concession_candidates(ctx: _Context) -> list[dict[str, Any]]:
     t12_rate = _t12_rate(ctx, "concessions")
     if t12_rate is not None:
         out.append(_candidate(SOURCE_DEAL_T12, _r(t12_rate), "T12 concessions / gross potential rent (year 1)."))
-    house_year1 = house.default_year1_concessions_rate(ctx.year_built, strategy=ctx.strategy)
+    house_year1 = house.default_year1_concessions_rate(ctx.year_built, strategy=ctx.strategy,
+                                                       deferred=_deferred(ctx))
     if house_year1 is not None:
         out.append(_candidate(house_vintage_source(ctx.bucket), float(house_year1),
                               f"House {ctx.bucket} vintage year-1 concessions floor."))

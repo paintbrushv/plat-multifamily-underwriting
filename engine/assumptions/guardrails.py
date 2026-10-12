@@ -192,9 +192,12 @@ class GuardrailProfile:
 
     strategy: str = "cashflow"
     year_built: Optional[int] = None
+    # ``deferred`` is the older name of the flag; either one applies the
+    # deferred-maintenance minimums (underwriting_policy, "Deferred maintenance
+    # minimums"): vacancy, collection loss, year-1 concessions and R&M move to
+    # the upper part of the vintage band, recurring capex to its high end.
     deferred: bool = False
-    # deal_profile.deferred_maintenance: only the recurring capex floor reads it
-    # (the high end of the vintage band). ``deferred`` keeps its older meaning.
+    # deal_profile.deferred_maintenance.
     deferred_maintenance: bool = False
 
     def __post_init__(self) -> None:
@@ -243,27 +246,40 @@ class GuardrailProfile:
         return house.vintage_bucket(self.year_built)
 
     @property
+    def deferred_flagged(self) -> bool:
+        """Whether the deferred-maintenance minimums apply."""
+        return self.deferred or self.deferred_maintenance
+
+    @property
     def vintage_source(self) -> Optional[str]:
         return house_vintage_source(self.bucket) if self.bucket else None
 
     # Vintage floors, straight from engine/underwriting_policy.py.
     def physical_vacancy(self) -> Optional[Decimal]:
-        return house.default_physical_vacancy_rate(self.year_built, strategy=self.strategy, deferred=self.deferred)
+        return house.default_physical_vacancy_rate(
+            self.year_built, strategy=self.strategy, deferred=self.deferred_flagged
+        )
 
     def loss_to_lease(self) -> Optional[Decimal]:
         return house.default_loss_to_lease_rate(self.year_built, strategy=self.strategy)
 
     def collection_loss(self) -> Optional[Decimal]:
-        return house.default_collection_loss_rate(self.year_built, strategy=self.strategy, deferred=self.deferred)
+        return house.default_collection_loss_rate(
+            self.year_built, strategy=self.strategy, deferred=self.deferred_flagged
+        )
 
     def year1_concessions(self) -> Optional[Decimal]:
-        return house.default_year1_concessions_rate(self.year_built, strategy=self.strategy, deferred=self.deferred)
+        return house.default_year1_concessions_rate(
+            self.year_built, strategy=self.strategy, deferred=self.deferred_flagged
+        )
 
     def insurance_per_unit(self) -> Decimal:
         return house.DEFAULT_YEAR1_INSURANCE_PER_UNIT
 
     def r_and_m_per_unit(self) -> Optional[Decimal]:
-        return house.default_r_and_m_per_unit(self.year_built, strategy=self.strategy, deferred=self.deferred)
+        return house.default_r_and_m_per_unit(
+            self.year_built, strategy=self.strategy, deferred=self.deferred_flagged
+        )
 
     def replacement_reserve_per_unit(self) -> Decimal:
         # The lender-style house reserve: the same for every vintage, so this
@@ -275,7 +291,7 @@ class GuardrailProfile:
         # The vintage band pick for the deal type (None when the year built is
         # unknown: the reserve, the floor of the charge, still applies).
         return house.default_recurring_capex_per_unit(
-            self.year_built, strategy=self.strategy, deferred=self.deferred_maintenance
+            self.year_built, strategy=self.strategy, deferred=self.deferred_flagged
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -470,12 +486,14 @@ def _max_floor(
     vintage_source: Optional[str],
     broker: Optional[Decimal],
     label: str,
+    *,
+    note: str = "",
 ) -> Floor:
     if vintage is None and broker is None:
         return Floor(key, None, None, f"No vintage {label} floor (year built unknown) and no broker anchor.")
     if broker is not None and (vintage is None or broker > vintage):
         return Floor(key, broker, SOURCE_DEAL_OM, f"Broker {label} note outranks the vintage floor.")
-    return Floor(key, vintage, vintage_source, f"House vintage {label} floor (VINTAGE_FRAMEWORK_2026).")
+    return Floor(key, vintage, vintage_source, f"House vintage {label} floor (VINTAGE_FRAMEWORK_2026).{note}")
 
 
 def _broker_notes(context: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -506,7 +524,11 @@ def house_floors(
         broker_snapshot=context.get("broker_snapshot"),
         strict=strict,
     )
-    band_pick = house.recurring_capex_band_pick(strategy=gp.strategy, deferred=gp.deferred_maintenance)
+    band_pick = house.recurring_capex_band_pick(strategy=gp.strategy, deferred=gp.deferred_flagged)
+    deferred_note = (
+        " Raised for deferred maintenance (deal_profile.deferred_maintenance): the upper part of the "
+        "vintage band." if gp.deferred_flagged else ""
+    )
     selected = vacancy_summary["base_case_selected_anchor"]
     if "vintage_house_floor" in selected:
         vacancy_source = gp.vintage_source or SOURCE_HOUSE_VACANCY_ANCHOR
@@ -518,7 +540,9 @@ def house_floors(
             anchor,
             vacancy_source,
             f"Property-level vacancy anchor (max of {', '.join(sorted(vacancy_summary['base_case_candidates']))}); "
-            f"selected {', '.join(selected) or 'none'}.",
+            f"selected {', '.join(selected) or 'none'}." + (
+                " The vintage house floor is raised for deferred maintenance." if gp.deferred_flagged else ""
+            ),
         ),
         "loss_to_lease": _max_floor(
             "loss_to_lease", gp.loss_to_lease(), gp.vintage_source,
@@ -526,11 +550,11 @@ def house_floors(
         ),
         "collection_loss": _max_floor(
             "collection_loss", gp.collection_loss(), gp.vintage_source,
-            parse_percent_note(notes.get("bad_debt")), "collection-loss",
+            parse_percent_note(notes.get("bad_debt")), "collection-loss", note=deferred_note,
         ),
         "concessions": _max_floor(
             "concessions", gp.year1_concessions(), gp.vintage_source,
-            parse_percent_note(notes.get("concessions")), "year-1 concessions",
+            parse_percent_note(notes.get("concessions")), "year-1 concessions", note=deferred_note,
         ),
         "insurance_per_unit": Floor(
             "insurance_per_unit", gp.insurance_per_unit(), HOUSE_YEAR1_INSURANCE_FLOOR,
@@ -539,7 +563,7 @@ def house_floors(
         "r_and_m_per_unit": Floor(
             "r_and_m_per_unit", gp.r_and_m_per_unit(), gp.vintage_source,
             f"House vintage R&M per unit, compared with {house.R_AND_M_FLOOR_BASIS}; a shortfall is "
-            "topped up with one line.",
+            "topped up with one line." + deferred_note,
         ),
         "replacement_reserve_per_unit": Floor(
             "replacement_reserve_per_unit", gp.replacement_reserve_per_unit(), HOUSE_REPLACEMENT_RESERVE,

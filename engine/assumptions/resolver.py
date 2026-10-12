@@ -273,18 +273,22 @@ def _house_vintage(
     unit: str,
     *,
     strategy: Optional[str] = None,
+    deferred: bool = False,
 ) -> Optional[dict[str, Any]]:
+    """The house vintage candidate; ``deferred`` applies the deferred-maintenance minimums."""
     if ctx.bucket is None:
         return None
     strategy = strategy or ctx.strategy
-    value = fn(ctx.year_built, strategy=strategy)
+    value = fn(ctx.year_built, strategy=strategy, deferred=True) if deferred else fn(ctx.year_built, strategy=strategy)
     if value is None:
         return None
     return _candidate(
         house_vintage_source(ctx.bucket),
         float(value),
         f"Year built {ctx.year_built} ({ctx.year_built_origin}) maps to the {ctx.bucket} vintage "
-        f"bucket; house {label} {_fmt(value, unit)} (VINTAGE_FRAMEWORK_2026, {strategy} strategy).",
+        f"bucket; house {label} {_fmt(value, unit)} (VINTAGE_FRAMEWORK_2026, {strategy} strategy"
+        + ("; deferred maintenance flagged: the upper part of the vintage band" if deferred else "")
+        + ").",
     )
 
 
@@ -723,7 +727,8 @@ def _collection_loss_candidates(ctx: _Context) -> list[dict[str, Any]]:
     if t12_rate is not None:
         out.append(_candidate(SOURCE_DEAL_T12, t12_rate, "T12 bad debt / gross potential rent."))
     house_candidate = _house_vintage(
-        ctx, house.default_collection_loss_rate, "collection-loss floor", "decimal_of_rent"
+        ctx, house.default_collection_loss_rate, "collection-loss floor", "decimal_of_rent",
+        deferred=ctx.profile.deferred_maintenance,
     )
     if house_candidate:
         out.append(house_candidate)
@@ -756,7 +761,8 @@ def _vacancy_candidates(ctx: _Context) -> list[dict[str, Any]]:
     if roll_rate is not None:
         out.append(_candidate(SOURCE_DEAL_RENT_ROLL, roll_rate, "Current physical vacancy from the rent roll."))
     house_candidate = _house_vintage(
-        ctx, house.default_physical_vacancy_rate, "physical-vacancy floor", "decimal_of_units"
+        ctx, house.default_physical_vacancy_rate, "physical-vacancy floor", "decimal_of_units",
+        deferred=ctx.profile.deferred_maintenance,
     )
     if house_candidate:
         guardrails = house.revenue_guardrails(ctx.year_built, strategy=ctx.strategy)
@@ -801,7 +807,8 @@ def _concession_candidates(ctx: _Context) -> list[dict[str, Any]]:
     if t12_rate is not None:
         out.append(_candidate(SOURCE_DEAL_T12, t12_rate, "T12 concessions / gross potential rent."))
     house_candidate = _house_vintage(
-        ctx, house.default_year1_concessions_rate, "year-1 concessions floor", "decimal_of_rent"
+        ctx, house.default_year1_concessions_rate, "year-1 concessions floor", "decimal_of_rent",
+        deferred=ctx.profile.deferred_maintenance,
     )
     if house_candidate:
         out.append(house_candidate)
@@ -863,7 +870,8 @@ def _r_and_m_candidates(ctx: _Context) -> list[dict[str, Any]]:
     )
     if evidence:
         out.append(evidence)
-    house_candidate = _house_vintage(ctx, house.default_r_and_m_per_unit, "R&M per unit", "usd_per_unit_year")
+    house_candidate = _house_vintage(ctx, house.default_r_and_m_per_unit, "R&M per unit", "usd_per_unit_year",
+                                     deferred=ctx.profile.deferred_maintenance)
     if house_candidate:
         out.append(house_candidate)
     out.append(_candidate(SOURCE_ENGINE_FALLBACK, 0.0, "No R&M opex lines: the engine carries none."))
