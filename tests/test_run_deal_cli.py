@@ -68,7 +68,7 @@ def test_run_is_deterministic(canonical_path, tmp_path):
     first, second = tmp_path / "one", tmp_path / "two"
     assert _run(str(canonical_path), "--output-dir", str(first)).returncode == 0
     assert _run(str(canonical_path), "--output-dir", str(second)).returncode == 0
-    for name in ("results.json", "assumptions.json"):
+    for name in ("results.json", "assumptions.json", "assumptions.html"):
         assert (first / name).read_bytes() == (second / name).read_bytes()
     assert not (first / "underwriting.xlsx").exists()
 
