@@ -176,9 +176,14 @@ vacancy rebuilt on the rent-roll floorplans).
 The R&M floor compares the vintage R&M band, which excludes payroll, with R&M
 including turnover: the repairs & maintenance and turnover / make-ready lines,
 never payroll (a "Repairs Salaries" line is payroll). A T12 that books turns on
-their own lines is therefore not topped up for R&M it already carries. A
+their own lines is therefore not topped up for R&M it already carries. Payroll
+earns a credit toward the floor only through the payroll review (ADR 0003
+decision (j)): payroll lines labeled as maintenance labor and total payroll per
+unit above the house benchmark ($2,000/unit); the credit is the lesser of the
+two, or the analyst's `r_and_m_payroll_credit`. The R&M finding in
+`policy_overrides` carries `payroll_review` and `payroll_credit_annual`. A
 shortfall tops the basis up with one "Repairs & Maintenance Vintage Floor
-Top-Up" line sized from the other R&M lines; a top-up line left by an earlier
+Top-Up" line sized from the other R&M lines less the credit; a top-up line left by an earlier
 pricing run never counts toward the floor, so re-pricing a priced canonical
 after lowering R&M lands exactly on the floor (`replaced_top_up_annual`
 reports the old line).
