@@ -52,7 +52,11 @@ def test_opex_and_income_tie_to_the_statement_totals(yardi_t12):
     statement = parse_t12_statement(yardi_t12)
     recon = statement["reconciliation"]
 
-    assert statement["statement_totals"] == {"income": T12_EGI, "opex": T12_OPEX_TOTAL}
+    assert statement["statement_totals"] == {
+        "income": T12_EGI,
+        "opex": T12_OPEX_TOTAL,
+        "gross_potential_rent": t12_section("TOTAL GROSS POTENTIAL RENT"),
+    }
     assert recon["status"] == "PASS"
     assert recon["opex"]["parsed_total"] == pytest.approx(T12_OPEX_TOTAL, abs=0.01)
     assert recon["income"]["parsed_total"] == pytest.approx(T12_EGI, abs=0.01)

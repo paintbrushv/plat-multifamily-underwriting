@@ -555,6 +555,13 @@ def _is_income_summary_row(label: str) -> bool:
     return normalized in {"INCOME", "REVENUE", "REVENUES"}
 
 
+def _is_gpr_total_row(label: str) -> bool:
+    normalized = _normalize_statement_label(_LEADING_ACCOUNT_CODE_RE.sub("", label.strip()))
+    return normalized.startswith("TOTAL ") and (
+        "GROSS POTENTIAL" in normalized or "POTENTIAL RENT" in normalized
+    )
+
+
 def _annual_statement_amount(values: list[float | None]) -> float:
     numeric = _strip_trailing_total_column([v for v in values if v is not None])
     return round(sum(numeric[:12]), 2)
@@ -567,7 +574,10 @@ def _extract_income_and_totals(
 
     Income lines are rows above the statement's income boundary (``Total
     Income`` and similar) or, failing that, above the operating-expense
-    header. Opex-only schedules return no income lines and no totals.
+    header. Opex-only schedules return no income lines and no totals. A
+    non-zero gross potential rent total row (``TOTAL GROSS POTENTIAL RENT``)
+    is kept as ``totals["gross_potential_rent"]``, the rent basis for T12
+    loss rates.
     """
     prepared: list[tuple[str, list[float | None], bool]] = []
     for raw_row in raw_rows:
@@ -619,6 +629,10 @@ def _extract_income_and_totals(
             section_amounts = []
             continue
         if _is_income_summary_row(label):
+            if "gross_potential_rent" not in totals and _is_gpr_total_row(label):
+                gpr_total = _annual_statement_amount(values)
+                if gpr_total:
+                    totals["gross_potential_rent"] = gpr_total
             continue
         amount = _annual_statement_amount(values)
         if (
