@@ -12,10 +12,18 @@ Usage:
 
 ``export`` writes ``<canonical stem>.assumptions.json`` next to the canonical
 when neither --json nor --xlsx is given. ``apply`` accepts an edited
-``assumptions.json``, a plain ``{key: value | {"value", "note"}}`` overrides
-file, or an ``.xlsx`` with an edited "Assumptions" tab. Each edited row (a set
-Override, or a Value that differs from its Default Value) becomes an analyst
-override; the entry keeps its ``default_value``. ``apply`` also writes the
+``assumptions.json``, a plain ``{key: value | {"value", "note"} | null}``
+overrides file, or an ``.xlsx`` with an edited "Assumptions" tab. The sheet
+carries each row's override as exported (Exported Override), and each row is
+read against it:
+
+- an Override changed from the export becomes the analyst override (it wins);
+- with the Override left as exported, an edited Value becomes the override, so
+  editing the Value column always works;
+- a blanked Override on a row that had one clears that override (``null``):
+  the entry goes back to its resolver default.
+
+An overridden entry keeps its ``default_value``. ``apply`` also writes the
 re-resolved sheet as ``<output stem>.assumptions.json``.
 """
 
@@ -106,7 +114,11 @@ def _apply(args: argparse.Namespace) -> int:
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2)
     sheet = write_assumptions_json(result, sheet_path_for(args.output))
-    print(f"Applied {len(overrides)} override(s): {', '.join(overrides) or 'none'}")
+    cleared = [key for key, override in overrides.items() if override is None]
+    applied = [key for key in overrides if key not in cleared]
+    print(f"Applied {len(applied)} override(s): {', '.join(applied) or 'none'}")
+    if cleared:
+        print(f"Cleared {len(cleared)} override(s): {', '.join(cleared)}")
     print(f"Output: {args.output}")
     print(f"Assumptions sheet: {sheet}")
     return 0

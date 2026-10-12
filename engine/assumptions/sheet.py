@@ -12,10 +12,23 @@ Two formats carry the same rows:
   ``add_assumptions_sheet`` / ``write_assumptions_xlsx`` /
   ``read_assumption_overrides_xlsx``.
 
-The read side turns an edited sheet into the ``{key: {"value": ..., "note": ...}}``
-overrides ``resolve_assumptions`` takes. A row becomes an override when its
-override column is set (that wins), or else when its value differs from its
-``default_value``.
+The read side turns an edited sheet into the overrides ``resolve_assumptions``
+takes: ``{key: {"value": ..., "note": ...}}`` sets an override and
+``{key: None}`` clears one. The sheet carries each row's override as exported
+(the read-only ``exported_override`` column), so the reader can tell what the
+analyst changed:
+
+- an Override cell changed from the export sets that override (it wins);
+- otherwise an edited Value (different from the exported override, or from
+  ``default_value`` when there was none) sets an override, so editing the Value
+  column always works;
+- a blanked Override cell whose row had an override clears it (``None``), as
+  does a Value set back to ``default_value`` with the Override cell blank;
+- an Override cell left as exported keeps that override.
+
+Sheets written before the ``exported_override`` column (sheet version 1) are
+read as before: a set Override wins, else a Value that differs from
+``default_value`` becomes an override.
 
 Rows are built generically from whatever an entry carries: scalar, vector and
 dict values all work, and fields the sheet does not know about are kept in the
@@ -26,11 +39,12 @@ from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-SHEET_VERSION = "plat.assumptions.sheet/1"
+SHEET_VERSION = "plat.assumptions.sheet/2"
 SHEET_TITLE = "Assumptions"
 TABLE_NAME = "tbl_assumptions"
 DEFAULT_EDIT_NOTE = "edited in the assumptions sheet"
@@ -71,13 +85,20 @@ COLUMNS: tuple[tuple[str, str], ...] = (
     ("extra", "Extra"),
 )
 ROW_FIELDS = tuple(field for field, _ in COLUMNS)
-_HEADER_TO_FIELD = {header.lower(): field for field, header in COLUMNS}
+# The override value each row carried when the sheet was written. It is
+# read-only: the reader compares the Override cell with it to tell an edited, a
+# cleared and an untouched override apart. It is a sheet column, not an entry
+# field, so ``sheet_rows`` (one row per entry) does not carry it.
+EXPORTED_OVERRIDE_FIELD = "exported_override"
+SHEET_COLUMNS: tuple[tuple[str, str], ...] = COLUMNS + ((EXPORTED_OVERRIDE_FIELD, "Exported Override"),)
+SHEET_FIELDS = tuple(field for field, _ in SHEET_COLUMNS)
+_HEADER_TO_FIELD = {header.lower(): field for field, header in SHEET_COLUMNS}
 _EDITABLE_FIELDS = ("override_value", "override_note")
 # Columns whose cells may hold a number, a vector or an object.
 _VALUE_FIELDS = frozenset(
-    {"value", "default_value", "delta", "override_value", "override_cohorts", "extra"}
+    {"value", "default_value", "delta", "override_value", "override_cohorts", "extra", EXPORTED_OVERRIDE_FIELD}
 )
-_NUMBER_FORMAT_FIELDS = ("value", "default_value", "delta", "override_value")
+_NUMBER_FORMAT_FIELDS = ("value", "default_value", "delta", "override_value", EXPORTED_OVERRIDE_FIELD)
 
 _REL_TOL = 1e-9
 _ABS_TOL = 1e-12
@@ -221,6 +242,23 @@ def sheet_rows(canonical: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [entry_row(key, entries[key]) for key in sorted_keys(entries)]
 
 
+def document_rows(canonical: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The rows a written sheet carries: ``sheet_rows`` plus ``exported_override``."""
+    return [
+        {**row, EXPORTED_OVERRIDE_FIELD: deepcopy(row["override_value"])}
+        for row in sheet_rows(canonical)
+    ]
+
+
+SHEET_INSTRUCTIONS = (
+    "Edit a row's value, or set its override_value (and override_note), then pass this file to "
+    "--assumption-overrides or `runs/assumptions_sheet.py apply`. An override_value changed from "
+    "exported_override wins over an edited value; with override_value left as exported, an edited "
+    "value becomes the override. Blank override_value (null) to clear the row's override and "
+    "return it to default_value. Do not edit exported_override."
+)
+
+
 def assumptions_document(canonical: Mapping[str, Any]) -> dict[str, Any]:
     """The ``assumptions.json`` payload: sheet rows plus section metadata."""
     section = canonical.get("assumptions") if has_assumptions(canonical) else {}
@@ -230,13 +268,9 @@ def assumptions_document(canonical: Mapping[str, Any]) -> dict[str, Any]:
         "resolver_version": section.get("resolver_version"),
         "mode": section.get("mode"),
         "deal_id": metadata.get("deal_id"),
-        "instructions": (
-            "Set override_value (and override_note) on a row, or edit its value, then pass this "
-            "file to --assumption-overrides or `runs/assumptions_sheet.py apply`. A set "
-            "override_value wins over an edited value."
-        ),
-        "columns": list(ROW_FIELDS),
-        "rows": sheet_rows(canonical),
+        "instructions": SHEET_INSTRUCTIONS,
+        "columns": list(SHEET_FIELDS),
+        "rows": document_rows(canonical),
     }
 
 
@@ -258,27 +292,60 @@ def sheet_path_for(output_path: Path | str) -> Path:
 # ── overrides from an edited sheet ───────────────────────────────────────
 
 
-def _row_override(row: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+# What a row asks of the resolver: nothing, an override, or a clear.
+_NO_CHANGE = object()
+CLEAR = None  # ``{key: None}`` clears the key's override (resolve_assumptions contract)
+
+
+def _row_override(row: Mapping[str, Any]) -> Any:
+    """The override a row asks for: ``_NO_CHANGE``, ``CLEAR`` (None) or a dict.
+
+    See the module docstring for the rules. A row without an
+    ``exported_override`` field (a version-1 sheet or a hand-built row list) is
+    read with the version-1 rules.
+    """
     value = row.get("value")
+    default_value = row.get("default_value")
     override_value = row.get("override_value")
     note = row.get("override_note")
     note = str(note).strip() if note is not None and str(note).strip() else None
-    if override_value is not None:
-        chosen = override_value
-    elif value is not None and not _same(value, row.get("default_value")):
-        chosen = value
-    else:
-        return None
-    out: dict[str, Any] = {"value": chosen, "note": note or DEFAULT_EDIT_NOTE}
     cohorts = row.get("override_cohorts")
-    if override_value is not None and cohorts:
+
+    if EXPORTED_OVERRIDE_FIELD not in row:
+        # Version 1: a set override wins, else a value that differs from the default.
+        if override_value is not None:
+            chosen, keep_cohorts = override_value, True
+        elif value is not None and not _same(value, default_value):
+            chosen, keep_cohorts = value, False
+        else:
+            return _NO_CHANGE
+    else:
+        exported = row.get(EXPORTED_OVERRIDE_FIELD)
+        override_edited = override_value is not None and not _same(override_value, exported)
+        baseline = exported if exported is not None else default_value
+        value_edited = value is not None and not _same(value, baseline)
+        if override_edited:
+            chosen, keep_cohorts = override_value, True
+        elif value_edited and override_value is None and exported is not None and _same(value, default_value):
+            return CLEAR  # override blanked and the value set back to the default
+        elif value_edited:
+            chosen, keep_cohorts = value, True
+        elif override_value is None and exported is not None:
+            return CLEAR  # override blanked
+        elif override_value is not None:
+            chosen, keep_cohorts = override_value, True  # kept as exported
+        else:
+            return _NO_CHANGE
+    out: dict[str, Any] = {"value": chosen, "note": note or DEFAULT_EDIT_NOTE}
+    if keep_cohorts and cohorts:
         out["cohort_overrides"] = cohorts
     return out
 
 
-def overrides_from_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-    """``{key: {"value", "note"[, "cohort_overrides"]}}`` for each edited row."""
-    out: dict[str, dict[str, Any]] = {}
+def overrides_from_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, Optional[dict[str, Any]]]:
+    """``{key: {"value", "note"[, "cohort_overrides"]}}`` for each edited row, and
+    ``{key: None}`` for each row whose override was cleared."""
+    out: dict[str, Optional[dict[str, Any]]] = {}
     seen: set[str] = set()
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
@@ -291,14 +358,15 @@ def overrides_from_rows(rows: Iterable[Mapping[str, Any]]) -> dict[str, dict[str
             raise ValueError(f"assumptions sheet lists {key!r} twice")
         seen.add(key)
         override = _row_override(row)
-        if override is not None:
+        if override is not _NO_CHANGE:
             out[key] = override
     return {key: out[key] for key in sorted_keys(out)}
 
 
 def overrides_from_document(data: Any) -> dict[str, Any]:
     """Overrides from an exported sheet document, a bare row list, or a plain
-    ``{key: value | {"value": ..., "note": ...}}`` overrides object (returned as-is)."""
+    ``{key: value | {"value": ..., "note": ...} | None}`` overrides object
+    (returned as-is; ``None`` clears the key's override)."""
     if isinstance(data, list):
         return overrides_from_rows(data)
     if not isinstance(data, Mapping):
@@ -312,7 +380,10 @@ def overrides_from_document(data: Any) -> dict[str, Any]:
 
 
 def read_assumption_overrides(path: Path | str) -> dict[str, Any]:
-    """Overrides from an edited ``assumptions.json`` (or a plain overrides JSON)."""
+    """Overrides from an edited ``assumptions.json`` (or a plain overrides JSON).
+
+    A row whose override was cleared comes back as ``{key: None}``.
+    """
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
     return overrides_from_document(data)
@@ -381,33 +452,35 @@ def add_assumptions_sheet(wb: Any, canonical: Mapping[str, Any], *, title: str =
     if title in wb.sheetnames:
         del wb[title]
     ws = wb.create_sheet(title)
-    rows = sheet_rows(canonical)
+    rows = document_rows(canonical)
 
     ws["A1"] = "ASSUMPTIONS"
     ws["A1"].font = Font(name="Calibri", size=14, bold=True, color=HEX_DARK_900)
     ws["A2"] = (
-        "Edit the Override and Note columns (or Value), then pass this workbook to "
-        "--assumption-overrides or `runs/assumptions_sheet.py apply`. Vectors and objects are JSON text."
+        "Edit Value, or Override and Note, then pass this workbook to --assumption-overrides or "
+        "`runs/assumptions_sheet.py apply`. A changed Override wins; with Override as exported, an "
+        "edited Value becomes the override. Clear an Override cell to return the row to its default. "
+        "Do not edit Exported Override. Vectors and objects are JSON text."
     )
     ws["A2"].font = Font(name="Calibri", size=10, italic=True, color=HEX_DARK_900)
 
     header_row = 4
-    write_header_row(ws, header_row, [header for _, header in COLUMNS])
+    write_header_row(ws, header_row, [header for _, header in SHEET_COLUMNS])
     editable_fill = PatternFill(start_color=HEX_GOLD_LIGHT, end_color=HEX_GOLD_LIGHT, fill_type="solid")
-    editable_cols = [ROW_FIELDS.index(field) + 1 for field in _EDITABLE_FIELDS]
+    editable_cols = [SHEET_FIELDS.index(field) + 1 for field in _EDITABLE_FIELDS]
     wrap = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
     for offset, row in enumerate(rows, start=1):
         excel_row = header_row + offset
-        write_data_row(ws, excel_row, [_to_cell(row[field]) for field in ROW_FIELDS], zebra=offset % 2 == 0)
+        write_data_row(ws, excel_row, [_to_cell(row[field]) for field in SHEET_FIELDS], zebra=offset % 2 == 0)
         fmt = _number_format(row.get("unit"))
         for field in _NUMBER_FORMAT_FIELDS:
-            cell = ws.cell(row=excel_row, column=ROW_FIELDS.index(field) + 1)
+            cell = ws.cell(row=excel_row, column=SHEET_FIELDS.index(field) + 1)
             if fmt and _number(cell.value) is not None:
                 cell.number_format = fmt
         for col in editable_cols:
             ws.cell(row=excel_row, column=col).fill = editable_fill
-        ws.cell(row=excel_row, column=ROW_FIELDS.index("basis") + 1).alignment = wrap
+        ws.cell(row=excel_row, column=SHEET_FIELDS.index("basis") + 1).alignment = wrap
     for col in editable_cols:
         ws.cell(row=header_row, column=col).font = Font(
             name="Calibri", size=10, bold=True, color=HEX_DARK_900
@@ -416,7 +489,7 @@ def add_assumptions_sheet(wb: Any, canonical: Mapping[str, Any], *, title: str =
 
     # An Excel table needs at least one data row; an empty sheet keeps a blank one.
     last_row = header_row + max(len(rows), 1)
-    ref = f"A{header_row}:{get_column_letter(len(COLUMNS))}{last_row}"
+    ref = f"A{header_row}:{get_column_letter(len(SHEET_COLUMNS))}{last_row}"
     table = Table(displayName=TABLE_NAME, ref=ref)
     table.tableStyleInfo = TableStyleInfo(name="TableStyleLight1", showRowStripes=False)
     ws.add_table(table)
@@ -425,9 +498,9 @@ def add_assumptions_sheet(wb: Any, canonical: Mapping[str, Any], *, title: str =
         "key": 30, "value": 16, "unit": 26, "source": 24, "basis": 70, "as_of": 12,
         "confidence": 12, "review_required": 10, "default_value": 16, "delta": 14,
         "override_value": 16, "override_note": 32, "override_cohorts": 22,
-        "guardrail_status": 14, "extra": 30,
+        "guardrail_status": 14, "extra": 30, EXPORTED_OVERRIDE_FIELD: 18,
     }
-    set_col_widths(ws, {ROW_FIELDS.index(field) + 1: width for field, width in widths.items()})
+    set_col_widths(ws, {SHEET_FIELDS.index(field) + 1: width for field, width in widths.items()})
     ws.freeze_panes = ws.cell(row=header_row + 1, column=2)
     return ws
 
@@ -505,6 +578,6 @@ def read_assumption_rows_xlsx(path: Path | str) -> list[dict[str, Any]]:
     raise KeyError(f"{SHEET_TITLE!r} tab has no Key header row: {path}")
 
 
-def read_assumption_overrides_xlsx(path: Path | str) -> dict[str, dict[str, Any]]:
-    """Overrides from an edited "Assumptions" tab."""
+def read_assumption_overrides_xlsx(path: Path | str) -> dict[str, Optional[dict[str, Any]]]:
+    """Overrides from an edited "Assumptions" tab (``{key: None}`` for a cleared override)."""
     return overrides_from_rows(read_assumption_rows_xlsx(path))
