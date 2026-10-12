@@ -1253,6 +1253,7 @@ def run_underwriting(
             cash_block["components"] = coc_v15["components"]
             cash_block["target_cash_on_cash_pct"] = coc_v15["target_cash_on_cash_pct"]
             cash_block["coc_below_target"] = coc_v15["coc_below_target"]
+            cash_block["coc_below_primary_target"] = coc_v15["coc_below_primary_target"]
             cash_block["coc_below_target_7pct"] = coc_v15["coc_below_target_7pct"]
             cash_block["coc_below_target_6pct"] = coc_v15["coc_below_target_6pct"]
             result["metrics"]["coc"] = {
@@ -1262,6 +1263,7 @@ def run_underwriting(
                 "components": coc_v15["components"],
                 "target_cash_on_cash_pct": coc_v15["target_cash_on_cash_pct"],
                 "coc_below_target": coc_v15["coc_below_target"],
+                "coc_below_primary_target": coc_v15["coc_below_primary_target"],
                 "coc_below_target_7pct": coc_v15["coc_below_target_7pct"],
                 "coc_below_target_6pct": coc_v15["coc_below_target_6pct"],
             }

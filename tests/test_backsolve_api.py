@@ -109,6 +109,7 @@ def test_cli_and_api_share_solver_output(economy, tmp_path, monkeypatch):
         "--policy-version", POLICY["version"], "--benchmark-5yr-treasury", BENCHMARK["rate"],
         "--benchmark-as-of", BENCHMARK["as_of"], "--benchmark-source", BENCHMARK["source"],
         "--exit-cap-rate", "0.06", "--min-price", "20", "--max-price", "100",
+        "--target-coc", "0.07",  # match the API request; the house default is 8%
     ])
     backsolve.main()
     summary = json.loads((tmp_path / "out/backsolve_summary.json").read_text())
@@ -128,7 +129,7 @@ def _run_cli(tmp_path, monkeypatch, *flags):
         "backsolve", "--canonical-json", str(source), "--output-dir", str(tmp_path / "out"),
         "--policy-version", POLICY["version"], "--benchmark-5yr-treasury", BENCHMARK["rate"],
         "--benchmark-as-of", BENCHMARK["as_of"], "--benchmark-source", BENCHMARK["source"],
-        "--exit-cap-rate", "0.06", *flags,
+        "--exit-cap-rate", "0.06", "--target-coc", "0.07", *flags,
     ])
     backsolve.main()
 
