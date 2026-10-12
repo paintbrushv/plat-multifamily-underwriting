@@ -38,7 +38,6 @@ from engine import underwriting_policy as house
 from engine.assumptions.canonical_ops import (
     annual_opex_amount,
     concession_pct_rent,
-    ensure_year1_concession_schedule,
     matching_opex_rows,
     sum_opex_bucket,
     sum_units,
@@ -66,6 +65,8 @@ from engine.modules.util import dec
 MODE_UNDERWRITE = "underwrite"
 MODE_PRICING = "pricing"
 STATUS_BELOW_FLOOR = "below_floor"
+# A loss-to-lease cohort the floor is not imposed on: no market vs in-place gap.
+STATUS_EXEMPT_NO_GAP = "exempt_no_gap"
 ACTION_WARNED = "warned"
 ACTION_ENFORCED = "enforced"
 # An explicit analyst insurance figure below the insurance floor: the value is
@@ -85,14 +86,16 @@ GUARDRAIL_KEYS = (
     "r_and_m_per_unit",
     "replacement_reserve_per_unit",
 )
-CURVE_KEYS = frozenset({"physical_vacancy", "loss_to_lease", "collection_loss", "replacement_reserve_per_unit"})
+CURVE_KEYS = frozenset({
+    "physical_vacancy", "loss_to_lease", "collection_loss", "concessions", "replacement_reserve_per_unit",
+})
 
 # canonical input each key's findings refer to (also the policy_overrides "input").
 GUARDRAIL_INPUTS = {
     "physical_vacancy": "physical_vacancy_curve",
     "loss_to_lease": "loss_to_lease",
     "collection_loss": "collection_loss_curve",
-    "concessions": "concession_schedule.year1_rate",
+    "concessions": "concession_schedule",
     "insurance_per_unit": "opex_table.insurance",
     "r_and_m_per_unit": "opex_table.repairs_maintenance",
     "replacement_reserve_per_unit": "replacement_reserves",
@@ -108,6 +111,8 @@ _UNITS = {
 }
 
 R_AND_M_TOP_UP_CATEGORY = "Repairs & Maintenance Vintage Floor Top-Up"
+# The year-1 pct_rent row the concessions floor adds when no row covers year 1.
+YEAR1_CONCESSION_FLOOR_ID = "house_year1_concessions"
 SOURCE_HOUSE_VACANCY_ANCHOR = "house:vacancy_anchor"
 SOURCE_SUPPLIED_MARKET_VACANCY = market_source("supplied_benchmark")
 
@@ -416,25 +421,6 @@ def vacancy_anchor_summary(
     }
 
 
-def cohort_rents(canonical: Mapping[str, Any], cohort_id: Any) -> tuple[Decimal, Decimal]:
-    """(market rent, in-place rent) for a cohort, as backsolve's LTL policy reads them."""
-    cohort = next(
-        (c for c in canonical.get("unit_cohorts") or [] if c.get("cohort_id") == cohort_id),
-        {},
-    )
-    market = next(
-        (
-            mr.get("market_rent")
-            for mr in canonical.get("market_rent_curve") or []
-            if mr.get("cohort_id") == cohort_id
-        ),
-        cohort.get("target_monthly_rent") or cohort.get("initial_inplace_rent") or 0,
-    )
-    inplace = cohort.get("initial_inplace_rent") or 0
-    market_dec = Decimal(str(market)) if market else Decimal("0")
-    return market_dec, Decimal(str(inplace))
-
-
 # ── floors ───────────────────────────────────────────────────────────────
 
 
@@ -575,16 +561,111 @@ def _guard_vacancy(canonical: dict[str, Any], floor: Floor, mode: str) -> list[d
     return findings
 
 
-def _guard_ltl(canonical: dict[str, Any], floor: Floor, mode: str) -> list[dict[str, Any]]:
-    findings = []
-    for row in canonical.get("loss_to_lease") or []:
-        rate = row.get("ltl_percent")
-        if rate is None:
+def cohort_rents(canonical: Mapping[str, Any], cohort_id: Any) -> tuple[Decimal, Decimal]:
+    """(market rent, in-place rent) for a cohort, as the LTL floor reads them.
+
+    Market rent is the cohort's first ``market_rent_curve`` row (the house
+    box-score rebase writes the capped rent there), else its target rent.
+    """
+    cohort = next(
+        (c for c in canonical.get("unit_cohorts") or [] if c.get("cohort_id") == cohort_id),
+        {},
+    )
+    market = next(
+        (
+            mr.get("market_rent")
+            for mr in canonical.get("market_rent_curve") or []
+            if mr.get("cohort_id") == cohort_id
+        ),
+        cohort.get("target_monthly_rent") or cohort.get("initial_inplace_rent") or 0,
+    )
+    inplace = cohort.get("initial_inplace_rent") or 0
+    market_dec = Decimal(str(market)) if market else Decimal("0")
+    return market_dec, Decimal(str(inplace))
+
+
+def _has_ltl_gap(canonical: Mapping[str, Any], cohort_id: Any) -> bool:
+    market, inplace = cohort_rents(canonical, cohort_id)
+    return market > inplace
+
+
+def ltl_exemptions(
+    canonical: Mapping[str, Any],
+    profile: Any = None,
+    context: Optional[Mapping[str, Any]] = None,
+    *,
+    strict: bool = False,
+) -> list[dict[str, Any]]:
+    """Cohorts the loss-to-lease floor is not imposed on (``status: "exempt_no_gap"``).
+
+    A cohort whose market rent is at or below its in-place rent (including a
+    market rent the house box-score rebase capped at in-place) has no
+    loss-to-lease gap, so the house floor is not imposed on it in either mode.
+    Only cohorts the floor would otherwise touch are listed: a row below the
+    floor, or no row at all. Their rows are kept exactly as entered.
+    """
+    floors, _ = house_floors(dict(canonical), profile, context, strict=strict)
+    floor = floors["loss_to_lease"]
+    if floor.value is None or floor.value <= 0:
+        return []
+    rows = canonical.get("loss_to_lease") or []
+    out = []
+    for cohort in canonical.get("unit_cohorts") or []:
+        cohort_id = cohort.get("cohort_id")
+        if cohort_id is None or _has_ltl_gap(canonical, cohort_id):
             continue
-        market, inplace = cohort_rents(canonical, row.get("cohort_id"))
-        # A cohort with no gap between market and in-place rent (e.g. a capped
-        # market rent) has no loss to lease to floor.
-        if market <= inplace or Decimal(str(rate)) >= floor.value:
+        own = [r for r in rows if str(r.get("cohort_id")) == str(cohort_id)]
+        below = [r for r in own if r.get("ltl_percent") is not None and Decimal(str(r["ltl_percent"])) < floor.value]
+        if own and not below:
+            continue
+        market, inplace = cohort_rents(canonical, cohort_id)
+        out.append({
+            "key": "loss_to_lease",
+            "status": STATUS_EXEMPT_NO_GAP,
+            "cohort_id": cohort_id,
+            "market_rent": float(market),
+            "in_place_rent": float(inplace),
+            "floor": float(floor.value),
+            "floor_source": floor.source,
+            "kept": [float(r["ltl_percent"]) for r in below] if own else [],
+        })
+    return out
+
+
+def ltl_exemption_note(exemptions: Iterable[Mapping[str, Any]]) -> str:
+    """The basis note that discloses LTL exemptions on the ``loss_to_lease`` entry."""
+    items = list(exemptions)
+    if not items:
+        return ""
+    cohorts = ", ".join(str(i["cohort_id"]) for i in items)
+    first = items[0]
+    return (
+        f"House loss-to-lease floor {_fmt(first['floor'], 'loss_to_lease')} ({first['floor_source']}) not "
+        f"imposed on {cohorts} ({STATUS_EXEMPT_NO_GAP}): market rent at or below in-place rent, so there is "
+        "no loss-to-lease gap; the entered values are kept."
+    )
+
+
+def _guard_ltl(canonical: dict[str, Any], floor: Floor, mode: str) -> list[dict[str, Any]]:
+    """Each loss-to-lease segment against the floor: ``max(segment, floor)``.
+
+    The floor only raises, so the analyst's higher segments and curve shape
+    stay. A cohort with no loss-to-lease gap (market rent at or below in-place,
+    see ``ltl_exemptions``) is exempt: the floor is neither warned nor imposed,
+    and its rows are kept. A cohort with a gap but no loss-to-lease row is read
+    as 0% and gets one row at the floor for the analysis period.
+    """
+    findings = []
+    rows = canonical.get("loss_to_lease") or []
+    gap = {
+        str(c.get("cohort_id")): _has_ltl_gap(canonical, c.get("cohort_id"))
+        for c in canonical.get("unit_cohorts") or []
+    }
+    for row in rows:
+        rate = row.get("ltl_percent")
+        if rate is None or Decimal(str(rate)) >= floor.value:
+            continue
+        if not gap.get(str(row.get("cohort_id")), _has_ltl_gap(canonical, row.get("cohort_id"))):
             continue
         findings.append(_finding(
             "loss_to_lease", floor, rate, mode,
@@ -594,6 +675,25 @@ def _guard_ltl(canonical: dict[str, Any], floor: Floor, mode: str) -> list[dict[
         ))
         if mode == MODE_PRICING:
             row["ltl_percent"] = float(floor.value)
+    grid = _grid(canonical)
+    if grid is None or floor.value <= 0:
+        return findings
+    covered = {str(row.get("cohort_id")) for row in rows}
+    for cohort in canonical.get("unit_cohorts") or []:
+        cohort_id = cohort.get("cohort_id")
+        if cohort_id is None or str(cohort_id) in covered or not gap.get(str(cohort_id)):
+            continue
+        findings.append(_finding(
+            "loss_to_lease", floor, 0.0, mode,
+            cohort_id=cohort_id, start_period=grid[0], end_period=grid[1],
+        ))
+        if mode == MODE_PRICING:
+            if not isinstance(canonical.get("loss_to_lease"), list):
+                canonical["loss_to_lease"] = []
+            canonical["loss_to_lease"].append({
+                "cohort_id": cohort_id, "start_period": grid[0], "end_period": grid[1],
+                "ltl_percent": float(floor.value),
+            })
     return findings
 
 
@@ -627,22 +727,105 @@ def _guard_collection(canonical: dict[str, Any], floor: Floor, mode: str) -> lis
     return findings
 
 
+def _shift_month(month: str, months: int) -> str:
+    index = int(month[:4]) * 12 + int(month[5:7]) - 1 + months
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
+def year1_window(canonical: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+    """(first, last) month of analysis year 1, clipped to the analysis period."""
+    grid = _grid(canonical)
+    if grid is None:
+        return None
+    return grid[0], min(_shift_month(grid[0], 11), grid[1])
+
+
+def year1_concession_rows(canonical: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The ``concession_schedule`` rows that apply in analysis year 1."""
+    window = year1_window(canonical)
+    if window is None:
+        return []
+    return [
+        row for row in canonical.get("concession_schedule") or []
+        if str(row.get("start_month", ""))[:7] <= window[1] and str(row.get("end_month", ""))[:7] >= window[0]
+    ]
+
+
+def year1_concession_rate(canonical: Mapping[str, Any]) -> Decimal:
+    """The highest year-1 concession rate (free months as their pct-of-rent equivalent)."""
+    return max((concession_pct_rent(row) for row in year1_concession_rows(canonical)), default=Decimal("0"))
+
+
 def _guard_concessions(canonical: dict[str, Any], floor: Floor, mode: str) -> list[dict[str, Any]]:
-    schedule = canonical.get("concession_schedule") or []
+    """Year-1 concession rows against the floor, row by row.
+
+    The analyst's schedule is kept: every row outside year 1 is untouched, and
+    a year-1 row at or above the floor keeps its rate. A year-1 row below the
+    floor is raised to it. ``free_months`` rows are compared as their percent
+    of rent (months / 12) and keep their type (a raised row carries the floor's
+    months equivalent). A row that runs past year 1 is split at the year-1
+    boundary so its later months keep the analyst's rate. With no year-1 row at
+    all, one year-1 ``pct_rent`` row at the floor is added.
+    """
+    window = year1_window(canonical)
+    if window is None or floor.value <= 0:
+        return []
+    year1 = year1_concession_rows(canonical)
     try:
-        rate = max((concession_pct_rent(row) for row in schedule), default=Decimal("0"))
+        rates = [concession_pct_rent(row) for row in year1]
     except ValueError:
         if mode == MODE_PRICING:
             raise
         return []
-    if rate >= floor.value or _grid(canonical) is None:
-        return []
-    finding = _finding("concessions", floor, float(rate), mode)
+    if not year1:
+        finding = _finding("concessions", floor, 0.0, mode,
+                           concession_id=YEAR1_CONCESSION_FLOOR_ID, applies_to_cohort="ALL",
+                           start_month=window[0], end_month=window[1], concession_type="pct_rent")
+        if mode == MODE_PRICING:
+            if not isinstance(canonical.get("concession_schedule"), list):
+                canonical["concession_schedule"] = []
+            canonical["concession_schedule"].append({
+                "concession_id": YEAR1_CONCESSION_FLOOR_ID, "start_month": window[0], "end_month": window[1],
+                "concession_type": "pct_rent", "amount": float(floor.value), "applies_to_cohort": "ALL",
+            })
+        return [finding]
+    below = {id(row): rate for row, rate in zip(year1, rates) if rate < floor.value}
+    findings: list[dict[str, Any]] = []
+    schedule: list[dict[str, Any]] = []
+    for row in canonical.get("concession_schedule") or []:
+        if id(row) not in below:
+            schedule.append(row)
+            continue
+        free_months = row.get("concession_type") == "free_months"
+        extra: dict[str, Any] = {
+            "concession_id": row.get("concession_id"),
+            "applies_to_cohort": row.get("applies_to_cohort"),
+            "start_month": row.get("start_month"),
+            "end_month": row.get("end_month"),
+            "concession_type": row.get("concession_type"),
+        }
+        if free_months:
+            extra["original_amount"] = row.get("amount")
+        finding = _finding("concessions", floor, float(below[id(row)]), mode, **extra)
+        findings.append(finding)
+        if mode != MODE_PRICING:
+            schedule.append(row)
+            continue
+        raised = dict(row)
+        later = None
+        if str(row.get("end_month", ""))[:7] > window[1]:
+            # The months after year 1 keep the analyst's rate.
+            later = dict(row, concession_id=f"{row.get('concession_id')}_after_year1",
+                         start_month=_shift_month(window[1], 1))
+            raised["end_month"] = window[1]
+            finding["split_at"] = window[1]
+        raised["amount"] = float(floor.value * Decimal("12")) if free_months else float(floor.value)
+        if free_months:
+            finding["applied_amount"] = raised["amount"]
+        schedule.extend([raised] + ([later] if later else []))
     if mode == MODE_PRICING:
-        # The year-1 concession rate is a scalar: the schedule becomes the
-        # house year-1 schedule at the floor (as backsolve has always written).
-        ensure_year1_concession_schedule(canonical, rate=floor.value)
-    return [finding]
+        canonical["concession_schedule"] = schedule
+    return findings
 
 
 def recorded_insurance_waiver(canonical: Mapping[str, Any]) -> Optional[dict[str, Any]]:
@@ -842,6 +1025,9 @@ def enforce_floors(
             pinned figure.
         ``policy_overrides``: a list; every enforced or waived finding is
             appended to it in ``policy_overrides`` form.
+        ``exemptions``: a list; the loss-to-lease cohorts exempt from the
+            floor (``ltl_exemptions``, ``status: "exempt_no_gap"``) are
+            appended to it.
     """
     _check_mode(mode)
     context = context or {}
@@ -851,6 +1037,9 @@ def enforce_floors(
         raise ValueError(f"unknown guardrail keys {sorted(unknown)}")
     floors, _ = house_floors(canonical, profile, context, strict=mode == MODE_PRICING)
     units = sum_units(canonical)
+    exempt_sink = context.get("exemptions")
+    if isinstance(exempt_sink, list) and "loss_to_lease" in selected:
+        exempt_sink.extend(ltl_exemptions(canonical, profile, context, strict=mode == MODE_PRICING))
     findings: list[dict[str, Any]] = []
     for key in GUARDRAIL_KEYS:
         if key not in selected:
@@ -915,7 +1104,10 @@ def _fmt(value: Any, key: str) -> str:
     return f"{float(value):.2%}"
 
 
-_SEGMENT_FIELDS = ("cohort_id", "applies_to", "start_period", "end_period")
+_SEGMENT_FIELDS = (
+    "cohort_id", "applies_to", "start_period", "end_period",
+    "concession_id", "applies_to_cohort", "start_month", "end_month", "concession_type",
+)
 
 
 def _waiver_record(key: str, first: Mapping[str, Any]) -> dict[str, Any]:
@@ -987,8 +1179,12 @@ def record_on_entries(
     *,
     mode: str,
     prior_entries: Optional[Mapping[str, Any]] = None,
+    exemptions: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> dict[str, dict[str, Any]]:
     """Record guardrail findings on ``entries`` (mutated and returned).
+
+    ``exemptions`` (``ltl_exemptions``) are disclosed as a note on the
+    ``loss_to_lease`` entry's basis; they never add a warning.
 
     An enforced key takes the floor's source, and its override pins the priced
     value (note ``GUARDRAIL_OVERRIDE_NOTE``) so a re-resolution keeps it; the
@@ -1046,6 +1242,10 @@ def record_on_entries(
                                "basis": "House floor enforced by the pricing guardrail."})
         entry["candidates"] = candidates
         entry["basis"] = f"Pricing guardrail: {record['basis']} Resolver default: {_fmt_default(entry, key)}."
+    note = ltl_exemption_note(exemptions or [])
+    ltl = entries.get("loss_to_lease")
+    if note and isinstance(ltl, dict) and note not in str(ltl.get("basis") or ""):
+        ltl["basis"] = f"{ltl.get('basis') or ''} {note}".strip()
     return entries
 
 
@@ -1191,7 +1391,8 @@ def apply_guardrails(
         out["assumptions"] = resolved["assumptions"]
         out["deal_profile"] = resolved["deal_profile"]
     else:
-        record_on_entries(entries, findings, mode=mode)
+        record_on_entries(entries, findings, mode=mode,
+                          exemptions=ltl_exemptions(out, profile, context, strict=False))
         section["mode"] = mode
     return out, findings
 

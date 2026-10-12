@@ -1588,7 +1588,12 @@ def _apply_guardrail_mode(
                 **entries,
                 **{spec.key: _resolve_key(spec, ctx, entries[spec.key], None).to_dict() for spec in specs},
             }
-    return guardrails.record_on_entries(entries, findings, mode=ctx.mode, prior_entries=prior_entries)
+    exemptions = guardrails.ltl_exemptions(
+        ctx.canonical, guardrails.GuardrailProfile(strategy=ctx.strategy, year_built=ctx.year_built), context,
+        strict=False,
+    )
+    return guardrails.record_on_entries(entries, findings, mode=ctx.mode, prior_entries=prior_entries,
+                                        exemptions=exemptions)
 
 
 def resolve_assumptions(

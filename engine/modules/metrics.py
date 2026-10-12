@@ -298,6 +298,96 @@ def find_stabilized_year(
     return max(2, min_year)
 
 
+def first_full_analysis_year_after(month: str, analysis_start: str) -> int:
+    """1-indexed analysis year that is the first to start after ``month``.
+
+    Analysis years are 12-month periods from ``analysis_start`` (``YYYY-MM``).
+    """
+    start_index = int(analysis_start[:4]) * 12 + int(analysis_start[5:7]) - 1
+    month_index = int(month[:4]) * 12 + int(month[5:7]) - 1
+    return max(0, month_index - start_index) // 12 + 2
+
+
+def stabilized_analysis_year(
+    analysis_years: List[Dict[str, Any]],
+    *,
+    analysis_start: str,
+    total_basis: Decimal,
+    last_renovation_month: Optional[str] = None,
+    vacancy_by_year: Optional[List[Decimal]] = None,
+    steady_state_vacancy: Optional[Decimal] = None,
+) -> Dict[str, Any]:
+    """The first stabilized analysis year, for a stabilized-year return basis.
+
+    - With a renovation schedule (``last_renovation_month``): the first full
+      analysis year that starts after the last unit is renovated (a renovated
+      unit earns its premium from the next month), ``rule:
+      "first_full_year_after_renovations"``.
+    - Otherwise: ``find_stabilized_year`` on the 12-month analysis years, with
+      each year's vacancy against the hold's steady-state vacancy and its
+      operating CapEx against ``total_basis``, ``rule: "find_stabilized_year"``.
+
+    Returns ``{"year", "rule", ...}``; ``year`` is 1-indexed.
+    """
+    if last_renovation_month:
+        return {
+            "year": first_full_analysis_year_after(last_renovation_month, analysis_start),
+            "rule": "first_full_year_after_renovations",
+            "last_renovation_month": last_renovation_month,
+        }
+    full_years = [dict(row) for row in analysis_years if row.get("months_in_year", 12) == 12]
+    for i, row in enumerate(full_years):
+        if vacancy_by_year is not None and i < len(vacancy_by_year):
+            row["vacancy_rate"] = vacancy_by_year[i]
+    year = find_stabilized_year(
+        cashflow_by_year=full_years,
+        capex_by_year=[dec(row.get("total_capex", 0)) for row in full_years],
+        total_basis=total_basis,
+        steady_state_vacancy=steady_state_vacancy if steady_state_vacancy is not None else Decimal("0.05"),
+        min_year=1,
+    )
+    return {
+        "year": year,
+        "rule": "find_stabilized_year",
+        "steady_state_vacancy": float(steady_state_vacancy) if steady_state_vacancy is not None else None,
+    }
+
+
+def compute_cash_on_cash_for_year(
+    analysis_years: List[Dict[str, Any]],
+    year: int,
+    equity_basis: float | Decimal,
+    fund_by_year: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Post-debt cash-on-cash for one 12-month analysis year (1-indexed).
+
+    Free CF = leveraged cash flow − asset management fee − partnership
+    expenses for that year, the same definition as the Year-1 CoC.
+    """
+    row = analysis_years[year - 1]
+    leveraged = dec(row.get("leveraged_cash_flow", 0))
+    fund = (fund_by_year or [])[year - 1] if fund_by_year and len(fund_by_year) >= year else {}
+    am_fee = dec(fund.get("asset_management_fee", 0))
+    partnership = dec(fund.get("partnership_expenses", 0))
+    free_cf = leveraged - am_fee - partnership
+    eq = dec(equity_basis)
+    return {
+        "year": year,
+        "cash_on_cash": free_cf / eq if eq > 0 else None,
+        "free_cf": float(round2(free_cf)),
+        "components": {
+            "noi": float(round2(dec(row.get("net_operating_income", 0)))),
+            "replacement_reserves": float(round2(dec(row.get("replacement_reserves", 0)))),
+            "capex": float(round2(dec(row.get("total_capex", 0)))),
+            "debt_service": float(round2(dec(row.get("debt_service", 0)))),
+            "leveraged_cash_flow": float(round2(leveraged)),
+            "asset_management_fee": float(round2(am_fee)),
+            "partnership_expenses": float(round2(partnership)),
+            "equity_basis": float(round2(eq)),
+        },
+    }
+
+
 def _full_year_unlevered_noi(
     surface: Optional[Dict[str, Any]],
     months_in_year: Optional[int],

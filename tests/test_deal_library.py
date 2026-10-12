@@ -44,10 +44,12 @@ from tests import deal_library as dl
 
 SLUGS = dl.DEAL_SLUGS
 BENCHMARK = {"rate": "0.04", "as_of": "2026-10-01", "source": "synthetic:deal-library"}
-# Backsolve runs on one deal of each type; targets keep the solve inside a
-# bracket where cash-on-cash falls with price.
+# Backsolve runs on one deal of each type plus the renovation deal; targets keep
+# the solve inside a bracket where cash-on-cash falls with price (deal c's
+# stabilized-year basis falls with price over the whole $1M-$100M bracket).
 BACKSOLVE = {
     "a_stabilized_1990s": {"strategy": "cashflow", "target_coc": "0.06", "max_price": "40000000.00"},
+    "c_value_add_1970s_reno": {"strategy": "value_add", "target_coc": "0.06", "max_price": "100000000.00"},
     "d_value_add_1980s_msa_only": {"strategy": "value_add", "target_coc": "0.03", "max_price": "20000000.00"},
 }
 TOL = 1e-9
@@ -309,17 +311,27 @@ def _below_floor_keys(canonical, deal):
     if any(d(r["vacancy_rate"]) < house.default_physical_vacancy_rate(year, strategy=strategy)
            for r in canonical["physical_vacancy_curve"]):
         below.add("physical_vacancy")
-    market = {r["cohort_id"]: d(r["market_rent"]) for r in canonical["market_rent_curve"]}
-    inplace = {c["cohort_id"]: d(c["initial_inplace_rent"]) for c in canonical["unit_cohorts"]}
-    if any(market[r["cohort_id"]] > inplace[r["cohort_id"]]
-           and d(r["ltl_percent"]) < house.default_loss_to_lease_rate(year, strategy=strategy)
-           for r in canonical["loss_to_lease"]):
+    # Loss to lease: cohorts with a market vs in-place gap only; such a cohort
+    # with no row reads as 0%.
+    market = {}
+    for r in canonical["market_rent_curve"]:
+        market.setdefault(r["cohort_id"], d(r["market_rent"]))
+    gap = {c["cohort_id"] for c in canonical["unit_cohorts"]
+           if market.get(c["cohort_id"], d(0)) > d(c["initial_inplace_rent"])}
+    ltl_cohorts = {r["cohort_id"] for r in canonical["loss_to_lease"]}
+    if any(r["cohort_id"] in gap and d(r["ltl_percent"]) < house.default_loss_to_lease_rate(year, strategy=strategy)
+           for r in canonical["loss_to_lease"]) or gap - ltl_cohorts:
         below.add("loss_to_lease")
     if any(d(r["loss_rate"]) < house.default_collection_loss_rate(year, strategy=strategy)
            for r in canonical.get("collection_loss_curve") or [{"loss_rate": 0}]):
         below.add("collection_loss")
-    year1 = max((concession_pct_rent(r) for r in canonical.get("concession_schedule") or []), default=Decimal(0))
-    if year1 < house.default_year1_concessions_rate(year, strategy=strategy):
+    # Concessions: each row that applies in analysis year 1 (none reads as 0%).
+    start = canonical["time_grid"]["analysis_start_date"][:7]
+    index = int(start[:4]) * 12 + int(start[5:7]) + 10
+    year1_end = f"{index // 12:04d}-{index % 12 + 1:02d}"
+    year1 = [concession_pct_rent(r) for r in canonical.get("concession_schedule") or []
+             if r["start_month"] <= year1_end and r["end_month"] >= start] or [Decimal(0)]
+    if min(year1) < house.default_year1_concessions_rate(year, strategy=strategy):
         below.add("concessions")
     insurance = matching_opex_rows(canonical, "insurance")
     if annual_opex_amount(canonical, insurance[0]) / units < house.DEFAULT_YEAR1_INSURANCE_PER_UNIT:
@@ -389,6 +401,107 @@ def test_backsolve_enforces_floors_and_its_case_is_stable_on_re_resolve(slug):
         if entry["override"] is None:
             assert entry["value"] == entry["default_value"], key
     assert not [i for i in validate_deal(case).issues if i.severity == "ERROR"]
+
+
+VALUE_ADD_RENO = "c_value_add_1970s_reno"
+WIDE = {"min_price": "1000000.00", "max_price": "100000000.00"}
+
+
+@lru_cache(maxsize=None)
+def _deal_c_solve(coc_basis=None) -> str:
+    policy = {"version": "plat.backsolve-policy/1", "strategy": "value_add"}
+    if coc_basis:
+        policy["coc_basis"] = coc_basis
+    result = backsolve_price(_canonical(VALUE_ADD_RENO), target_coc="0.06", policy=policy,
+                             benchmark=BENCHMARK, **WIDE)
+    return json.dumps(result)
+
+
+def test_value_add_renovation_deal_converges_over_a_wide_bracket_on_its_stabilized_year():
+    """UPL-62 decision (b): deal c is priced on the post-debt CoC of its first
+    stabilized year, with the renovation budget funded by equity at close, so
+    CoC falls with price and the solve converges over $1M-$100M."""
+    result = json.loads(_deal_c_solve())
+    assert result["status"] == "converged"
+    summary = result["summary"]
+    assert summary["bracket"]["min_price"] == "1000000.00" and summary["bracket"]["max_price"] == "100000000.00"
+    assert Decimal(summary["bracket"]["min_price_coc"]) > Decimal("0.06") > Decimal(summary["bracket"]["max_price_coc"])
+    assert 1_000_000 < summary["solved_purchase_price"] < 100_000_000
+
+    # The basis is reported: analysis year 3 (2028-11 to 2029-10), the first full
+    # year after the last renovation (2028-09), by default for value_add.
+    basis = summary["coc_basis"]
+    assert basis["basis"] == "stabilized_year"
+    assert basis["source"] == "default for the value_add strategy"
+    assert (basis["analysis_year"], basis["months"], basis["rule"], basis["last_renovation_month"]) == (
+        3, ["2028-11", "2029-10"], "first_full_year_after_renovations", "2028-09")
+    assert summary["cash_on_cash_persisted"] == pytest.approx(basis["free_cf"] / basis["equity_basis"], abs=1e-6)
+    assert summary["cash_on_cash_persisted"] >= 0.06
+    assert summary["maximum_feasible_boundary"]["next_infeasible_coc"] < 0.06
+    assert result["effective_assumptions"]["policy"]["coc_basis"] == "stabilized_year"
+
+
+def test_value_add_renovation_budget_is_equity_at_close_and_out_of_cash_flow():
+    result = json.loads(_deal_c_solve())
+    case, results, summary = result["case"], result["results"], result["summary"]
+    programs = _deal(VALUE_ADD_RENO)["analyst_inputs"]["renovation_programs"]
+    budget = sum(p["max_units"] * p["renovation_cost_per_unit"] for p in programs)
+    assert budget == 1_115_000
+
+    funding = summary["renovation_funding"]
+    assert funding["renovation_capex_funding"] == case["renovation_capex_funding"] == "equity_at_close"
+    assert funding["equity_funded_renovation_budget"] == budget
+    assert funding["included_in_total_equity_basis"] and funding["excluded_from_operating_cash_flow"]
+
+    # The equity basis (sources) includes the budget.
+    purchase, fund = case["purchase_assumptions"], case["fund_assumptions"]
+    price = purchase["purchase_price"]
+    expected_equity = (purchase["equity_contribution"] + purchase["closing_costs"]
+                       + price * fund["acquisition_fee_pct"] + fund["partnership_closing_costs"] + budget)
+    assert purchase["total_equity_basis"] == pytest.approx(expected_equity, abs=0.01)
+    assert summary["solved_total_equity_basis"] == purchase["total_equity_basis"]
+    assert summary["coc_basis"]["equity_basis"] == pytest.approx(purchase["total_equity_basis"], abs=0.01)
+    assert purchase["total_unlevered_basis"] == pytest.approx(price + purchase["closing_costs"] + budget, abs=0.01)
+
+    # Cash flow excludes the funded CapEx; NOI and the renovation schedule are unchanged.
+    months = results["cashflow"]["by_month"]
+    assert sum(m["total_capex"] for m in months) == 0
+    assert sum(m.get("equity_funded_capex", 0) for m in months) == pytest.approx(budget)
+    assert results["capex_funding"]["equity_funded_renovation_budget"] == pytest.approx(budget)
+    assert results["renovations"]["summary"]["total_renovation_cost"] == budget
+    assert results["metrics"]["coc"]["components"]["equity_basis"] == pytest.approx(
+        purchase["total_equity_basis"], abs=0.01)
+
+
+def test_value_add_coc_basis_is_overridable_and_disclosed():
+    stabilized = json.loads(_deal_c_solve())["summary"]
+    year1 = json.loads(_deal_c_solve("year_1"))
+    assert year1["status"] == "converged"
+    basis = year1["summary"]["coc_basis"]
+    assert (basis["basis"], basis["source"], basis["analysis_year"]) == ("year_1", "explicit policy value", 1)
+    # The budget is still funded at close; year 1 carries the renovation downtime,
+    # so the same 6% target supports a lower price than the stabilized year.
+    assert year1["summary"]["renovation_funding"]["equity_funded_renovation_budget"] == 1_115_000
+    assert year1["summary"]["solved_purchase_price"] < stabilized["solved_purchase_price"]
+
+
+def test_stabilized_deals_keep_the_year1_basis_and_their_price():
+    slug, config = "a_stabilized_1990s", BACKSOLVE["a_stabilized_1990s"]
+    results = {}
+    for basis in (None, "year_1"):
+        policy = {"version": "plat.backsolve-policy/1", "strategy": "cashflow"}
+        if basis:
+            policy["coc_basis"] = basis
+        results[basis] = backsolve_price(_canonical(slug), target_coc=config["target_coc"], policy=policy,
+                                         benchmark=BENCHMARK, min_price="1000000.00",
+                                         max_price=config["max_price"])
+    default, explicit = results[None], results["year_1"]
+    assert default["summary"]["coc_basis"]["basis"] == "year_1"
+    assert default["summary"]["solved_purchase_price"] == explicit["summary"]["solved_purchase_price"]
+    assert default["summary"]["cash_on_cash_persisted"] == default["summary"]["cash_on_cash_year_1_persisted"]
+    assert "renovation_capex_funding" not in default["case"]
+    assert default["summary"]["renovation_funding"]["equity_funded_renovation_budget"] == 0.0
+    assert "capex_funding" not in default["results"]
 
 
 # ── assumptions sheet ────────────────────────────────────────────────────

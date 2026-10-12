@@ -256,6 +256,12 @@
         }
       }
     },
+    "renovation_capex_funding": {
+      "type": "string",
+      "enum": ["operating_cash_flow", "equity_at_close"],
+      "default": "operating_cash_flow",
+      "description": "How the renovation budget (renovation_programs and unit_renovations costs) is funded. operating_cash_flow: spent as CapEx out of operating cash flow. equity_at_close: funded by equity at close, so it is excluded from operating cash flow (shown as equity_funded_capex) and must be included in purchase_assumptions.total_equity_basis (and total_unlevered_basis); a basis left out defaults to the usual basis plus the budget."
+    },
     "refi_event": { "$ref": "#/$defs/refi_event" },
     "concession_schedule": {
       "type": "array",

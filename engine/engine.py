@@ -22,6 +22,37 @@ from engine.property_tax import apply_property_tax_policy
 from engine.validator import validate_augmented_curves, validate_or_raise
 from engine.version import ENGINE_VERSION, SCHEMA_VERSION
 
+# How the renovation budget (renovation_programs and unit_renovations costs) is
+# funded. "operating_cash_flow" (the default) spends it out of operating cash
+# flow as CapEx. "equity_at_close" funds it with equity at close: it is kept out
+# of operating cash flow and belongs in the Day-0 equity outlay.
+RENOVATION_FUNDING_OPERATING = "operating_cash_flow"
+RENOVATION_FUNDING_EQUITY_AT_CLOSE = "equity_at_close"
+RENOVATION_FUNDING_MODES = (RENOVATION_FUNDING_OPERATING, RENOVATION_FUNDING_EQUITY_AT_CLOSE)
+
+
+def _equity_funded_purchase_assumptions(
+    purchase_assumptions: Optional[Dict[str, Any]],
+    funded: Decimal,
+) -> Optional[Dict[str, Any]]:
+    """Day-0 bases that include an equity-funded renovation budget.
+
+    The caller's ``total_equity_basis`` / ``total_unlevered_basis`` are taken as
+    stated: they must already include the budget (as for ``capex_upfront_funded``;
+    backsolve's priced case does). A basis the caller left out defaults to the
+    usual basis plus the budget, so the Day-0 outflow of the IRR and equity
+    multiple series matches the cash flows that exclude the funded CapEx.
+    """
+    if not purchase_assumptions or funded <= 0:
+        return purchase_assumptions
+    out = dict(purchase_assumptions)
+    if out.get("total_unlevered_basis") is None:
+        price = dec(out.get("purchase_price") or 0)
+        out["total_unlevered_basis"] = float(price + dec(out.get("closing_costs") or 0) + funded)
+    if out.get("total_equity_basis") is None:
+        out["total_equity_basis"] = float(dec(out.get("equity_contribution") or 0) + funded)
+    return out
+
 
 def _normalize_capital_stack(inputs: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Normalize debt inputs into a capital_stack[] array.
@@ -659,13 +690,22 @@ def run_underwriting(
         )
         capex_by_month = capex_result["by_month"]
 
-    # Add renovation costs to capex
+    # Add renovation costs to capex. With renovation_capex_funding
+    # "equity_at_close" the renovation budget is funded by equity at close: it
+    # stays out of operating cash flow (recorded as equity_funded_capex) and
+    # belongs in the Day-0 equity outlay (see _equity_funded_purchase_assumptions).
+    equity_funded_capex: Dict[str, float] = {}
+    renovation_funding = inputs.get("renovation_capex_funding") or RENOVATION_FUNDING_OPERATING
+    if renovation_funding not in RENOVATION_FUNDING_MODES:
+        raise ValueError(f"renovation_capex_funding must be one of {RENOVATION_FUNDING_MODES}")
     if renovation_result:
         capex_lookup = {row["month"]: row for row in capex_by_month}
         for reno_month in renovation_result["by_month"]:
             month = reno_month["month"]
             reno_cost = reno_month["renovation_cost"]
-            if reno_cost and reno_cost > 0:
+            if reno_cost and reno_cost > 0 and renovation_funding == RENOVATION_FUNDING_EQUITY_AT_CLOSE:
+                equity_funded_capex[month] = round(float(dec(equity_funded_capex.get(month, 0)) + dec(reno_cost)), 2)
+            elif reno_cost and reno_cost > 0:
                 capex_row = capex_lookup[month]
                 capex_row["total_capex"] = round(float(dec(capex_row["total_capex"]) + dec(reno_cost)), 2)
                 if "renovation_capex" in capex_row:
@@ -991,6 +1031,28 @@ def run_underwriting(
             if dfc > 0:
                 cf_m["debt_funded_capex"] = dfc
 
+    # Equity-funded renovation budget: shown on its months, never in the cash
+    # flow; the Day-0 bases include it (stated by the caller, else defaulted).
+    capex_funding_result = None
+    if renovation_funding == RENOVATION_FUNDING_EQUITY_AT_CLOSE:
+        funded_total = sum((dec(v) for v in equity_funded_capex.values()), Decimal("0"))
+        for cf_m in cashflow_result["by_month"]:
+            efc = equity_funded_capex.get(cf_m["month"], 0.0)
+            if efc > 0:
+                cf_m["equity_funded_capex"] = efc
+        inputs = {
+            **inputs,
+            "purchase_assumptions": _equity_funded_purchase_assumptions(
+                inputs.get("purchase_assumptions"), funded_total
+            ),
+        }
+        capex_funding_result = {
+            "renovation_capex_funding": RENOVATION_FUNDING_EQUITY_AT_CLOSE,
+            "equity_funded_renovation_budget": float(round2(funded_total)),
+            "excluded_from_operating_cash_flow": True,
+            "by_month": [{"month": m, "amount": v} for m, v in sorted(equity_funded_capex.items())],
+        }
+
     # Inject exit proceeds into cashflow (before metrics and fund waterfall)
     exit_result = compute_exit_proceeds(
         time_grid=time_grid,
@@ -1136,6 +1198,8 @@ def run_underwriting(
 
     if renovation_result:
         result["renovations"] = renovation_result
+    if capex_funding_result is not None:
+        result["capex_funding"] = capex_funding_result
 
     # Pass renovation_detail sidecar through untouched
     if inputs.get("renovation_detail"):

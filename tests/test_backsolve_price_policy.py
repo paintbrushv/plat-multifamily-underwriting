@@ -428,7 +428,9 @@ def test_house_revenue_policy_logs_worst_cohort_vacancy_without_applying_propert
     # own 0.30, which is neither lowered nor spread to a1.
     rates = {row["cohort_id"]: row["vacancy_rate"] for row in canonical["physical_vacancy_curve"]}
     assert rates == {"a1": 0.09, "b1": 0.30}
-    assert summary["physical_vacancy_rate_applied"] == 0.09
+    assert summary["physical_vacancy_floor"] == 0.09
+    # The summary reports the vacancy actually priced (unit-weighted), not the anchor.
+    assert summary["physical_vacancy_rate_applied"] == pytest.approx((0.09 + 0.30) / 2)
     assert summary["physical_vacancy_curve_applied"] == [
         {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2031-05", "vacancy_rate": 0.09},
         {"cohort_id": "b1", "start_period": "2026-06", "end_period": "2031-05", "vacancy_rate": 0.30},
@@ -540,6 +542,7 @@ def test_prepare_house_assumptions_preserves_multisegment_market_rent_curve():
         {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2027-05", "market_rent": 1100.0},
         {"cohort_id": "a1", "start_period": "2027-06", "end_period": "2028-05", "market_rent": 1133.0},
     ]
+    # Market rent at in-place: no loss-to-lease gap, so the floor is not imposed.
     assert prepared["loss_to_lease"] == [
         {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2027-05", "ltl_percent": 0.0},
         {"cohort_id": "a1", "start_period": "2027-06", "end_period": "2028-05", "ltl_percent": 0.0},
@@ -663,6 +666,10 @@ def test_prepare_house_assumptions_preserves_analyst_override_rent_caps():
 
 
 def test_prepare_house_assumptions_does_not_impose_ltl_on_capped_market_rents():
+    """A market rent capped at or below in-place leaves no loss-to-lease gap, so
+    the house LTL floor is not imposed (UPL-62 keeps this exemption: floors never
+    lower the analyst's input, and never add LTL where no gap exists). The
+    exemption is disclosed."""
     canonical = {
         "metadata": {
             "year_built": 1984,
@@ -770,6 +777,11 @@ def test_prepare_house_assumptions_does_not_impose_ltl_on_capped_market_rents():
     assert prepared["collection_loss_curve"][0]["loss_rate"] == 0.011
     assert prepared["concession_schedule"][0]["amount"] == 0.011
     assert policy_summary["loss_to_lease_rate_applied"] == 0.0
+    assert not [o for o in policy_summary["policy_overrides"] if o.get("assumption") == "loss_to_lease"]
+    assert not [f for f in policy_summary["guardrails"]["findings"] if f["key"] == "loss_to_lease"]
+    exempt = policy_summary["guardrails"]["exemptions"]
+    assert [(e["cohort_id"], e["status"], e["market_rent"], e["in_place_rent"], e["kept"]) for e in exempt] == [
+        ("b3", "exempt_no_gap", 1465.0, 1627.2, [0.0])]
     assert policy_summary["collection_loss_rate_applied"] == 0.011
     assert policy_summary["year1_concessions_rate_applied"] == 0.011
 

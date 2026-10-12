@@ -204,7 +204,8 @@ def test_pricing_leaves_values_at_or_above_floor_untouched(minimal_deal_inputs):
          lambda d: d.update(concession_schedule=[{
              "concession_id": "c", "start_month": "2026-07", "end_month": "2027-06",
              "concession_type": "free_months", "amount": 0.06, "applies_to_cohort": "ALL"}]),
-         lambda d: [(r["concession_type"], r["amount"]) for r in d["concession_schedule"]] == [("pct_rent", 0.0075)]),
+         # A free_months row keeps its type: raised to the floor's months equivalent (0.75% x 12).
+         lambda d: [(r["concession_type"], r["amount"]) for r in d["concession_schedule"]] == [("free_months", 0.09)]),
         ("insurance_per_unit",
          lambda d: next(r for r in d["opex_table"] if r["category_name"] == "Insurance").update(base_value=40_000),
          lambda d: next(r for r in d["opex_table"] if r["category_name"] == "Insurance")["base_value"] == 60_000.0),
@@ -234,12 +235,81 @@ def test_each_floor_type(minimal_deal_inputs, key, mutate, check):
 
 
 def test_ltl_floor_skips_cohorts_without_a_market_gap(minimal_deal_inputs):
+    """No loss-to-lease gap (market rent at or below in-place, e.g. a capped
+    market rent): the floor is neither warned nor imposed, the entered rows are
+    kept, and the exemption is disclosed. A cohort with a gap is floored per
+    segment, and with no row it gets one at the floor."""
     deal = _below_floor_deal(minimal_deal_inputs)
+    deal["loss_to_lease"] = [
+        {"cohort_id": "1BR", "start_period": "2026-07", "end_period": "2027-06", "ltl_percent": 0.04},
+        {"cohort_id": "1BR", "start_period": "2027-07", "end_period": "2031-06", "ltl_percent": 0.0},
+    ]
+    deal["market_rent_curve"][0]["market_rent"] = 1100  # 1BR in-place 1200: capped market rent
+    warned = enforce_floors(copy.deepcopy(deal), mode="underwrite", profile=PROFILE, keys=("loss_to_lease",))
+    exemptions: list = []
+    findings = enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("loss_to_lease",),
+                              context={"exemptions": exemptions})
+    assert [(f["cohort_id"], f["start_period"], f["original"]) for f in findings] == [("2BR", "2026-07", 0.0)]
+    assert [(f["cohort_id"], f["original"]) for f in warned] == [("2BR", 0.0)]
+    assert deal["loss_to_lease"] == [
+        {"cohort_id": "1BR", "start_period": "2026-07", "end_period": "2027-06", "ltl_percent": 0.04},
+        {"cohort_id": "1BR", "start_period": "2027-07", "end_period": "2031-06", "ltl_percent": 0.0},
+        {"cohort_id": "2BR", "start_period": "2026-07", "end_period": "2031-06", "ltl_percent": 0.01},
+    ]
+    assert [(e["cohort_id"], e["status"], e["market_rent"], e["in_place_rent"], e["kept"]) for e in exemptions] == [
+        ("1BR", "exempt_no_gap", 1100.0, 1200.0, [0.0])]
+    assert enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("loss_to_lease",)) == []
+
+    # A no-gap cohort alone raises no warning; its entry discloses the exemption.
+    deal["market_rent_curve"][1]["market_rent"] = 1500  # 2BR at in-place
     deal["loss_to_lease"] = [dict(r, ltl_percent=0.0) for r in deal["loss_to_lease"]]
-    deal["market_rent_curve"][1]["market_rent"] = 1400  # 2BR in-place 1500: capped market rent
-    findings = enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("loss_to_lease",))
-    assert [f["cohort_id"] for f in findings] == ["1BR"]
-    assert [r["ltl_percent"] for r in deal["loss_to_lease"]] == [0.01, 0.0]
+    resolved = resolve_assumptions(deal, deal_profile=PROFILE)
+    entry = resolved["assumptions"]["entries"]["loss_to_lease"]
+    assert "guardrail" not in entry
+    assert "exempt_no_gap" in entry["basis"] and "1BR, 2BR" in entry["basis"]
+    assert not [i for i in validate_deal(resolved).issues
+                if i.code == "GUARDRAIL_BELOW_FLOOR" and "loss_to_lease" in i.path]
+    assert resolve_assumptions(resolved) == resolved
+
+
+def test_concession_floor_keeps_the_schedule_and_raises_year1_rows_only(minimal_deal_inputs):
+    deal = _below_floor_deal(minimal_deal_inputs)
+    deal["concession_schedule"] = [
+        {"concession_id": "lease_up", "start_month": "2026-07", "end_month": "2027-12",
+         "concession_type": "pct_rent", "amount": 0.004, "applies_to_cohort": "ALL"},
+        {"concession_id": "specials_2br", "start_month": "2026-07", "end_month": "2026-12",
+         "concession_type": "pct_rent", "amount": 0.02, "applies_to_cohort": "2BR"},
+        {"concession_id": "later", "start_month": "2028-01", "end_month": "2031-06",
+         "concession_type": "free_months", "amount": 0.03, "applies_to_cohort": "ALL"},
+    ]
+    overrides: list = []
+    findings = enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("concessions",),
+                              context={"policy_overrides": overrides})
+    # Only the year-1 row below the floor is raised; it is split at the year-1
+    # boundary so its later months keep the analyst's 0.4%. Later rows are kept.
+    assert deal["concession_schedule"] == [
+        {"concession_id": "lease_up", "start_month": "2026-07", "end_month": "2027-06",
+         "concession_type": "pct_rent", "amount": 0.0075, "applies_to_cohort": "ALL"},
+        {"concession_id": "lease_up_after_year1", "start_month": "2027-07", "end_month": "2027-12",
+         "concession_type": "pct_rent", "amount": 0.004, "applies_to_cohort": "ALL"},
+        {"concession_id": "specials_2br", "start_month": "2026-07", "end_month": "2026-12",
+         "concession_type": "pct_rent", "amount": 0.02, "applies_to_cohort": "2BR"},
+        {"concession_id": "later", "start_month": "2028-01", "end_month": "2031-06",
+         "concession_type": "free_months", "amount": 0.03, "applies_to_cohort": "ALL"},
+    ]
+    assert [(f["concession_id"], f["original"], f["applied"], f["split_at"]) for f in findings] == [
+        ("lease_up", 0.004, 0.0075, "2027-06")]
+    assert [(o["input"], o["assumption"], o["original"], o["applied"]) for o in overrides] == [
+        ("concession_schedule", "concessions", 0.004, 0.0075)]
+    assert enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("concessions",)) == []
+
+    # No row covers year 1: a year-1 pct_rent row at the floor is added; later rows stay.
+    deal["concession_schedule"] = [deal["concession_schedule"][-1]]
+    findings = enforce_floors(deal, mode="pricing", profile=PROFILE, keys=("concessions",))
+    assert [f["original"] for f in findings] == [0.0]
+    assert deal["concession_schedule"][1:] == [
+        {"concession_id": "house_year1_concessions", "start_month": "2026-07", "end_month": "2027-06",
+         "concession_type": "pct_rent", "amount": 0.0075, "applies_to_cohort": "ALL"}]
 
 
 def test_analyst_insurance_override_waives_the_insurance_floor(minimal_deal_inputs):
@@ -341,11 +411,15 @@ def test_backsolve_solved_canonical_carries_pricing_assumptions(pricing_deal):
     assert {r["vacancy_rate"] for r in case["physical_vacancy_curve"]} >= {0.05}
     assert entries["replacement_reserve_per_unit"]["value"] == pytest.approx(
         case["replacement_reserves"][0]["annual_amount"] / 100)
-    assert entries["collection_loss"]["value"] == case["collection_loss_curve"][0]["loss_rate"] == 0.02
+    # Collection loss keeps its curve: the year-1 0.2% segment is raised to the
+    # 0.75% floor and the later 2% segment is kept (no flattening to the worst rate).
+    assert [r["loss_rate"] for r in case["collection_loss_curve"]] == [0.0075, 0.02]
+    assert entries["collection_loss"]["value"] == case["collection_loss_curve"][0]["loss_rate"]
     assert entries["concessions"]["value"] == case["concession_schedule"][0]["amount"] == 0.0075
     # The enforced floors are shown.
     enforced = {k for k, e in entries.items() if (e.get("guardrail") or {}).get("action") == "enforced"}
-    assert enforced == {"physical_vacancy", "concessions", "r_and_m_per_unit", "replacement_reserve_per_unit"}
+    assert enforced == {"physical_vacancy", "collection_loss", "concessions", "r_and_m_per_unit",
+                        "replacement_reserve_per_unit"}
     assert entries["r_and_m_per_unit"]["guardrail"]["original"] == 750.0
     assert entries["physical_vacancy"]["guardrail"]["segments"] == [
         {"cohort_id": "1BR", "start_period": "2027-07", "end_period": "2031-06", "original": 0.03, "applied": 0.05},
@@ -460,7 +534,13 @@ def _shown_as_analyst_edits(case, original):
 
 
 def _assert_pricing_labels(result, original):
-    """Every value backsolve's pricing set is labeled by who set it and disclosed."""
+    """Every value backsolve's pricing set is labeled by who set it and disclosed.
+
+    The house floors only raise (UPL-62): no input is rewritten as a pricing
+    normalization. Every raise is a ``policy_overrides`` entry with original and
+    applied values, and its assumption entry carries the floor's source and an
+    ``enforced`` guardrail record.
+    """
     case = result["case"]
     entries = case["assumptions"]["entries"]
     overrides = result["summary"]["policy_summary"]["policy_overrides"]
@@ -468,40 +548,45 @@ def _assert_pricing_labels(result, original):
     for key in backsolve.PRICING_POLICY_KEYS:
         assert entries[key]["source"] == "house:backsolve_policy", key
         assert entries[key]["override"] == {"value": entries[key]["value"], "note": guardrails.PRICING_POLICY_NOTE}
-    # Each normalization that changed an input is in policy_overrides with original and applied,
-    # and its entry carries house:pricing_normalization unless a floor was enforced on it.
-    normalized = {}
-    for override in overrides:
-        if override.get("normalization"):
-            assert override["source"] == "house:pricing_normalization"
-            assert override["original"] != override["applied"]
-            normalized[backsolve.PRICING_NORMALIZATIONS[override["input"]][1]] = override
-    labeled = {k for k, e in entries.items() if e["source"] == "house:pricing_normalization"}
+    assert not [o for o in overrides if "normalization" in o]
+    raised = {o["assumption"] for o in overrides if o.get("guardrail") == "house_floor"}
     enforced = {k for k, e in entries.items() if (e.get("guardrail") or {}).get("action") == "enforced"}
-    assert set(normalized) - enforced <= labeled
-    assert {k for k in labeled if not k.startswith("opex.")} <= set(normalized)
+    assert raised == enforced
+    for override in overrides:
+        if override.get("guardrail") == "house_floor":
+            assert {"original", "applied", "floor", "floor_source"} <= set(override)
+            assert override["applied"] >= override["original"]
+    for key in enforced:
+        assert entries[key]["source"] == entries[key]["guardrail"]["floor_source"], key
+    # Only the house box-score rebase (vacancy, loss to lease) and opex lines set
+    # by pricing preparation are labeled as a pricing normalization.
+    labeled = {k for k, e in entries.items() if e["source"] == "house:pricing_normalization"}
+    assert {k for k in labeled if not k.startswith("opex.")} <= {"physical_vacancy", "loss_to_lease"}
     for key in labeled:
         assert entries[key]["override"]["note"] == guardrails.PRICING_NORMALIZATION_NOTE
         assert entries[key]["review_required"] is True
     # The labels are stable: re-resolving the solved canonical changes nothing.
     assert resolve_assumptions(case, mode="pricing") == case
-    return entries, normalized
+    return entries, {o["assumption"]: o for o in overrides if o.get("guardrail") == "house_floor"}
 
 
-def test_backsolve_labels_what_its_pricing_policy_and_normalizations_set(pricing_deal):
+def test_backsolve_labels_what_its_pricing_policy_and_floors_set(pricing_deal):
     result = _solve(pricing_deal)
-    entries, normalized = _assert_pricing_labels(result, pricing_deal)
+    entries, raised = _assert_pricing_labels(result, pricing_deal)
     case = result["case"]
     # The policy's explicit exit cap, fees and closing costs.
     assert entries["exit_cap_rate"]["source"] == "house:backsolve_policy"
     assert "explicit policy value" in entries["exit_cap_rate"]["basis"]
     assert entries["annual_partnership_expenses"]["value"] == case["fund_assumptions"]["annual_partnership_expenses"]
     assert "DEFAULTS['acquisition_fee_pct']" in entries["acquisition_fee_pct"]["basis"]
-    # Collection loss (two rows -> one ALL row at the worst 2%) and loss to lease are rewritten.
-    assert set(normalized) == {"collection_loss", "loss_to_lease"}
-    assert entries["collection_loss"]["source"] == "house:pricing_normalization"
-    assert normalized["collection_loss"]["applied"] == case["collection_loss_curve"]
-    assert [r["loss_rate"] for r in normalized["collection_loss"]["original"]] == [0.002, 0.02]
+    # Collection loss is floored per segment, not flattened: the 0.2% year-1
+    # segment is raised to 0.75% and the 2% segment is kept.
+    assert entries["collection_loss"]["source"] == "house:vintage_1980s"
+    assert (raised["collection_loss"]["original"], raised["collection_loss"]["applied"]) == (0.002, 0.0075)
+    assert [r["loss_rate"] for r in case["collection_loss_curve"]] == [0.0075, 0.02]
+    # Loss to lease (3%, above the 1% floor) is the analyst's, never re-derived.
+    assert {r["ltl_percent"] for r in case["loss_to_lease"]} == {0.03}
+    assert entries["loss_to_lease"]["source"] == pricing_deal["assumptions"]["entries"]["loss_to_lease"]["source"]
     # Concessions were raised by the floor: the guardrail label stands.
     assert entries["concessions"]["source"] == "house:vintage_1980s"
     # The real estate tax line is reassessed by the property-tax module at the priced price.
@@ -517,21 +602,27 @@ def test_backsolve_labels_what_its_pricing_policy_and_normalizations_set(pricing
     assert top_up["override"]["note"] == guardrails.PRICING_FLOOR_LINE_NOTE
 
 
-def test_reserves_above_the_vintage_reserve_are_a_disclosed_normalization(minimal_deal_inputs):
-    """Backsolve sets reserves to the vintage reserve even when the analyst's are higher
-    (a pricing normalization, unchanged here): it is labeled and listed, not shown as an edit."""
+def test_reserves_above_the_vintage_reserve_are_never_lowered(minimal_deal_inputs):
+    """UPL-62: reserves are max(analyst, vintage reserve). The analyst's $1,500/unit
+    is priced as entered (the legacy pricing forced it down to $1,000)."""
     deal = _below_floor_deal(minimal_deal_inputs)
     deal["opex_table"] = [r for r in deal["opex_table"] if r["calculation_type"] != "percent_egr"]
     deal["replacement_reserves"] = [dict(r, annual_amount=150_000) for r in deal["replacement_reserves"]]
     deal = resolve_assumptions(deal, deal_profile=PROFILE)
     result = _solve(deal)
-    entries, normalized = _assert_pricing_labels(result, deal)
-    reserves = normalized["replacement_reserve_per_unit"]
-    assert reserves["normalization"] == "reserves_set_to_vintage_reserve"
-    assert [r["annual_amount"] for r in reserves["original"]] == [150_000.0]
-    assert reserves["applied"] == result["case"]["replacement_reserves"]
-    assert entries["replacement_reserve_per_unit"]["source"] == "house:pricing_normalization"
-    assert entries["replacement_reserve_per_unit"]["value"] == 1000.0
+    entries, raised = _assert_pricing_labels(result, deal)
+    assert [r["annual_amount"] for r in result["case"]["replacement_reserves"]] == [150_000.0]
+    assert "replacement_reserve_per_unit" not in raised
+    assert entries["replacement_reserve_per_unit"]["value"] == 1500.0
+    assert entries["replacement_reserve_per_unit"]["source"] == deal["assumptions"]["entries"][
+        "replacement_reserve_per_unit"]["source"]
+    assert not [o for o in result["summary"]["policy_summary"]["policy_overrides"]
+                if o.get("input") == "replacement_reserves"]
+    # The summary reports the reserve priced, and the floor separately.
+    summary = result["summary"]["policy_summary"]
+    assert summary["replacement_reserve_per_unit"] == 1500.0
+    assert summary["replacement_reserve_floor_per_unit"] == 1000.0
+    assert summary["replacement_reserves_applied"] == result["case"]["replacement_reserves"]
 
 
 @pytest.mark.parametrize("slug, strategy, target, max_price", [
@@ -547,10 +638,17 @@ def test_library_backsolve_cases_carry_pricing_labels(slug, strategy, target, ma
         benchmark=BENCHMARK, min_price="1000000.00", max_price=max_price,
     )
     assert result["status"] == "converged"
-    entries, normalized = _assert_pricing_labels(result, deal)
-    assert entries["loss_to_lease"]["source"] == "house:pricing_normalization"
-    assert normalized["loss_to_lease"]["normalization"] == "ltl_rederived_from_market_vs_in_place"
-    assert entries["concessions"]["source"] == "house:pricing_normalization"
+    entries, raised = _assert_pricing_labels(result, deal)
+    before = deal["assumptions"]["entries"]
+    # Loss to lease, concessions, collection loss and reserves are the resolved
+    # values or a floor the guardrail raised: never a normalization.
+    for key in ("loss_to_lease", "concessions", "collection_loss", "replacement_reserve_per_unit"):
+        expected = raised[key]["floor_source"] if key in raised else before[key]["source"]
+        assert entries[key]["source"] == expected, key
+    # Later concession rows are kept as resolved.
+    first_end = deal["concession_schedule"][0]["end_month"]
+    later = [r for r in deal["concession_schedule"] if r["start_month"] > first_end]
+    assert later and all(r in result["case"]["concession_schedule"] for r in later)
     assert entries["opex.real_estate_taxes.base"]["source"] == "house:property_tax_module"
     # The exit cap came from the canonical, not the policy: its label is unchanged.
     assert entries["exit_cap_rate"]["source"] != "house:backsolve_policy"
