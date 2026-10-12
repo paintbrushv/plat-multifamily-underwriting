@@ -267,9 +267,9 @@ def parse_rent_roll(
         bedrooms, bathrooms = _resolve_beds_baths(sample, cohort_key)
         inference = bed_bath_inference.get(cohort_key)
         if inference is not None:
+            # The code gave the bedrooms only; the baths are a house default.
             bed_bath_inference[cohort_key] = {**inference, "cohort_id": cohort_id}
-            if not inference["baths_from_code"]:
-                flags.append(f"bathrooms_assumed_for_cohort_{cohort_id}")
+            flags.append(f"bathrooms_assumed_for_cohort_{cohort_id}")
 
         cohort_dict: dict[str, Any] = {
             "cohort_id": cohort_id,
@@ -477,9 +477,6 @@ def _bed_bath_from_unit_type_code(unit_type: str) -> tuple[int, float] | None:
     beds = _beds_from_unit_type_code(unit_type)
     if beds is None:
         return None
-    floorplan = _letter_floorplan_bed_bath(unit_type)
-    if floorplan is not None and floorplan["bedrooms"] == beds:
-        return beds, floorplan["bathrooms"]
     return beds, _default_baths(beds)
 
 
@@ -491,17 +488,16 @@ def _default_baths(beds: int) -> float:
 # Yardi unit types often carry the property code: "<code>_B2P". The prefix
 # is stripped before letter-floorplan inference (A=1BR, B=2BR, C=3BR, D=4BR).
 _PROPERTY_CODE_PREFIX = re.compile(r"^[A-Za-z0-9]+_(?=[A-Za-z])")
-_LETTER_FLOORPLAN = re.compile(r"^([A-D])(\d+)?([A-Z]*)$")
+_LETTER_FLOORPLAN = re.compile(r"^([A-D])(?:\d+)?[A-Z]*$")
 
 
 def _letter_floorplan_bed_bath(unit_type: Any) -> dict[str, Any] | None:
-    """Beds and baths for a letter floorplan code such as ``A1``, ``B2P`` or ``<code>_B1G``.
+    """Bedrooms for a letter floorplan code such as ``A1``, ``B2P`` or ``<code>_B3G``.
 
-    The letter gives the bedrooms. The digit is read as the bath count only
-    when it is a plausible one (1 to the bedroom count): ``B1`` = 2/1,
-    ``B2`` = 2/2, ``A1`` = 1/1. Otherwise (``A2``, ``B3``, no digit) the bath
-    count is the house default (1 up to 1BR, else 2) and ``baths_from_code``
-    is False so the caller can flag it for review.
+    The letter gives the bedrooms (A=1, B=2, C=3, D=4). The trailing digit is
+    a plan variant, not a bath count (a "B3" plan can be 2BR/1BA), so the code
+    states no baths: the bath count is the house default (1 up to 1BR, else 2)
+    and the caller flags it for review.
     """
     if unit_type is None:
         return None
@@ -510,16 +506,14 @@ def _letter_floorplan_bed_bath(unit_type: Any) -> dict[str, Any] | None:
     match = _LETTER_FLOORPLAN.match(code)
     if not match:
         return None
-    beds = _LETTER_FLOORPLAN_BEDS[match.group(1).upper()]
-    digit = int(match.group(2)) if match.group(2) else None
-    baths_from_code = digit is not None and 1 <= digit <= beds
+    beds = _LETTER_FLOORPLAN_BEDS[match.group(1)]
     return {
         "unit_type": raw,
         "floorplan_code": code,
         "source": "letter_floorplan_code",
         "bedrooms": beds,
-        "bathrooms": float(digit) if baths_from_code else _default_baths(beds),
-        "baths_from_code": baths_from_code,
+        "bathrooms": _default_baths(beds),
+        "bathrooms_basis": "house default (1 bath up to 1BR, else 2); the floorplan code states no bath count",
     }
 
 
