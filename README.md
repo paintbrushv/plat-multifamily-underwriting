@@ -158,9 +158,13 @@ python runs/ingest_deal.py --property-id SYN-A \
   beats `--immediate-capex` / `--recurring-capex-per-unit`. A deal built
   before 2000 without a PCA is flagged for review (`CAPEX_PCA_MISSING`). A PCA
   recurring capex below the vintage band is warned at ingest and raised to the
-  band in backsolve pricing. NOI, the going-in cap rate, exit value and DSCR
-  are before capex; cash flow, cash-on-cash, IRR and the equity multiple are
-  after it.
+  band in backsolve pricing. NOI, the going-in cap rate and exit value are
+  before capex; cash flow, cash-on-cash, IRR and the equity multiple are after
+  it. DSCR and agency loan sizing use underwritten NCF, NOI less the same
+  charge, as agency lenders do (`loan_sizing_noi_basis`: `ncf_after_capex_charge`
+  by default, or `ncf_after_lender_reserve` / `noi_before_capex` as an
+  override); the NOI-based DSCR is reported beside it
+  (`metrics.dscr.noi_before_capex`).
 - `--deferred-maintenance` also raises the house minimums for physical
   vacancy, collection loss, year-1 concessions and R&M to the upper part of
   their vintage bands (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and

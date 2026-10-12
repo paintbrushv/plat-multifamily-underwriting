@@ -273,8 +273,32 @@ Every candidate price carries the canonical's capital plan (ADR 0003 §3):
 `recurring_capex_growth`, `recurring_capex_floor_per_unit`,
 `replacement_reserve_per_unit`, `replacement_reserve_floor_per_unit`,
 `binding_year_1` and `below_noi_capex_charge` (the engine's per-analysis-year
-recurring capex, reserve, charge and the bucket that binds). The agency loan
-is still sized on NOI before capex.
+recurring capex, reserve, charge and the bucket that binds).
+
+### Loan sizing on underwritten NCF
+
+Agency lenders size on NOI less replacement reserves (ADR 0003 decision i).
+At every candidate price the agency loan's 1.25x DSCR constraint is sized on
+the projected year's NOI (all-equity preview at that price) less the
+deduction its `loan_sizing_noi_basis` names:
+
+| Basis | Sizing cash flow |
+| --- | --- |
+| `ncf_after_capex_charge` (house default, `HOUSE_LOAN_SIZING_NOI_BASIS`) | NOI - max(recurring capex, lender reserve), the charge the cash flow deducts |
+| `ncf_after_lender_reserve` | NOI - the lender replacement reserve only |
+| `noi_before_capex` | NOI |
+
+The policy's `loan_sizing_noi_basis` wins, else the canonical's
+`loan_sizing_noi_basis` (an analyst assumption), else the house default; an
+explicit policy value is written into the priced case and labeled
+`house:backsolve_policy`. A charge that consumes the NOI sizes no loan. The
+65% LTV constraint is unchanged, so an LTV-bound candidate is unaffected.
+`summary.loan_sizing` discloses `basis`, `source`, `noi_used`,
+`below_noi_deduction`, `sizing_cash_flow`, `required_dscr`,
+`sizing_method` and `loan_amount` at the solved price (also kept in the case's
+`metadata.property_summary.loan_sizing`). `summary.minimum_dscr` is on the
+same basis (`minimum_dscr_basis`), with `minimum_dscr_noi_before_capex`
+beside it. The CLI takes `--loan-sizing-noi-basis`.
 
 The summary discloses `coc_basis` (`basis`, `source`, `analysis_year`,
 `months`, `rule`, `free_cf`, `equity_basis`, and `last_renovation_month` when
@@ -283,9 +307,10 @@ renovations set the year) and `renovation_funding` (`renovation_capex_funding`,
 and `achieved_coc_pct` are on the selected basis; `cash_on_cash_year_1_persisted`
 stays the Year-1 figure. The CLI takes `--coc-basis`.
 
-All fields in `DEFAULTS`, plus `year_built`, `exit_cap_rate` and `coc_basis`,
-can be explicitly overridden. Unknown keys, unsupported versions, an unknown
-`coc_basis`, non-finite values, invalid dates, invalid iteration limits, and
+All fields in `DEFAULTS`, plus `year_built`, `exit_cap_rate`, `coc_basis` and
+`loan_sizing_noi_basis`, can be explicitly overridden. Unknown keys,
+unsupported versions, an unknown `coc_basis` or `loan_sizing_noi_basis`,
+non-finite values, invalid dates, invalid iteration limits, and
 sub-cent price bounds refuse before underwriting. An exit cap must come from the policy or canonical inputs.
 Optional market-vacancy evidence must be supplied in
 `metadata.property_summary.market_vacancy_benchmark` with `rate`, `as_of`, and

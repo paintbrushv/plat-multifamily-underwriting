@@ -124,6 +124,7 @@ key:
 | `house:deferred_capex` | `HOUSE_IMMEDIATE_CAPEX_DEFAULT`: nothing budgeted at close without PCA or analyst evidence |
 | `house:deferred_capex_placeholder` | `default_deferred_capex_placeholder_per_unit`: deferred maintenance flagged with no PCA and no analyst figure, one year of the vintage economic CapEx band high end per unit at close (review_required) |
 | `house:r_and_m_payroll_review` | The R&M floor's payroll review (`r_and_m_payroll_credit`): the payroll credit toward the R&M floor, $0 unless the T12 labels maintenance labor in payroll and payroll per unit is above `HOUSE_PAYROLL_BENCHMARK_PER_UNIT`. A disclosure: flagged only in the ambiguous case (§5) |
+| `house:loan_sizing_noi_basis` | `HOUSE_LOAN_SIZING_NOI_BASIS`: agency loan sizing and DSCR on underwritten NCF, NOI less the below-NOI capex charge (§3) |
 | `house:opex_growth_table` | The house per-category opex growth table (also the 3% real estate tax growth and the recurring capex growth, `HOUSE_RECURRING_CAPEX_GROWTH` = the R&M rate) |
 | `house:property_tax_module` | `engine/property_tax.py`: the real estate tax line reassessed at the purchase price |
 | `house:management_fee_pct_egr` | The house management fee as a percent of EGR |
@@ -192,6 +193,7 @@ How each key combines sources:
 | `recurring_capex_per_unit` | Bucket 2, year-1 $/unit/year (`capital_plan.recurring_capex.per_unit_annual`), below NOI. PCA (`deal:pca`) > analyst > `house:recurring_capex_vintage` (the vintage economic CapEx band: low end for a stabilized deal, midpoint for value-add, high end when `deal_profile.deferred_maintenance` is true) > the $250 reserve when the vintage is unknown (`house:replacement_reserve`, review_required). A PCA outranks an analyst value already in the canonical at a first resolution (the analyst value is kept as a candidate); an explicit override or later edit still wins and shows the PCA as its default. Built before 2000 with no PCA: `review_required` stays on (even under an override), the validator warns `CAPEX_PCA_MISSING` and the ingest gate adds the intake flag `capex_pca_missing_pre_2000_review`. The retired `economic_capex_per_unit` key is accepted as an alias, and its old opt-in `capex_schedule` row is migrated here (removed from the schedule, so it is charged once). |
 | `recurring_capex_growth` | Bucket 2 growth (`capital_plan.recurring_capex.growth_rate`): `HOUSE_RECURRING_CAPEX_GROWTH` = `OPEX_GROWTH_REPAIRS_MAINTENANCE` (3%), `house:opex_growth_table`, applied from analysis year 2 like opex. |
 | `exit_cap_rate` | Exit caps track entry caps. Analyst, else entry-anchored: the going-in cap rate at the price being modeled (engine year-1 NOI / purchase price; trailing T12 NOI only when the engine cannot run the canonical) plus `HOUSE_EXIT_CAP_SPREAD` (50 bps), `house:exit_cap_spread`, review_required. It is re-measured whenever the price changes: backsolve recomputes it at every candidate price unless the analyst or an explicit policy set it. Steal exception, which is rare: only when a submarket or MSA `market_cap_rate` (the exit-year value) is available and the going-in cap exceeds it by more than `HOUSE_STEAL_THRESHOLD` (150 bps) does the exit compress toward market + spread, never more than `HOUSE_MAX_EXIT_COMPRESSION` (100 bps) below going-in + spread; the basis says "Steal: going-in X vs market Y". Without market data there is never compression, and a going-in cap at or below market still exits at entry + spread. `HOUSE_EXIT_CAP_GOING_IN_MAX` (25%) guards the going-in cap. Only when there is no usable price to anchor to: the market cap rate, else the OM's exit cap, else the engine default. Every source is a candidate, and the entry's `detail` records the calculation and the market reference (`detail.market`), so a re-resolution without market data applies the same steal test. |
+| `loan_sizing_noi_basis` | The cash flow agency loan sizing and DSCR use (top-level `loan_sizing_noi_basis`, categorical). Analyst, else `HOUSE_LOAN_SIZING_NOI_BASIS` = `ncf_after_capex_charge` (`house:loan_sizing_noi_basis`, review_required, never written): NOI less the below-NOI capex charge, max(recurring capex, lender reserve), as agency lenders size on NOI less replacement reserves. `ncf_after_lender_reserve` deducts the lender reserve only; `noi_before_capex` is NOI. The engine reports `metrics.dscr` on it with the NOI-based DSCR beside it (`metrics.dscr.noi_before_capex`); backsolve sizes every candidate price on it (an explicit policy `loan_sizing_noi_basis` wins over the canonical's). |
 | `value_add.renovation_premium` | Comp evidence (renovated vs classic effective rent) if present. Otherwise it is required, and the run is flagged when it is missing. |
 
 ### 4. Curves, not scalars; granularity
@@ -665,17 +667,14 @@ completed (f):
       `replacement_reserve_floor` beside it and `results.capital_plan` showing
       the buckets, the charge by analysis year and which one binds.
 
-   NOI stays before capex: year-1 NOI, the going-in cap rate, yield on cost,
-   exit value (forward NOI / exit cap), DSCR (NOI / debt service) and agency
-   loan sizing are before capex; unlevered and levered cash flow,
-   cash-on-cash, IRR and the equity multiple are after the below-NOI charge,
-   with bucket 1 in the Day-0 outlay. In pricing the vintage band is a floor
+   NOI stays before capex: year-1 NOI, the going-in cap rate, yield on cost
+   and exit value (forward NOI / exit cap) are before capex; unlevered and
+   levered cash flow, cash-on-cash, IRR and the equity multiple are after the
+   below-NOI charge, with bucket 1 in the Day-0 outlay. DSCR and agency loan
+   sizing were before capex too; decision (k) moves them to underwritten NCF. In pricing the vintage band is a floor
    (§5). The register shows the three buckets side by side
    (`build_register()["capital_plan"]` and a panel in `assumptions.html`).
    This lowers prices, most for older value-add deals.
-
-Three decisions on deferred maintenance and PCA evidence:
-
 9. **(i) Deferred maintenance minimums, a placeholder at close, and the band
    floor over a PCA.** `deal_profile.deferred_maintenance` used to move only
    recurring capex to the high end of the vintage band. Now:
@@ -776,6 +775,25 @@ Three decisions on deferred maintenance and PCA evidence:
     ("Maintenance Wages") is payroll and no longer counts toward the R&M
     basis. The synthetic library deals carry $1,150-$1,500/unit of payroll,
     below the benchmark, so no credit applies and their prices do not move.
+
+11. **(k) Loan sizing on underwritten NCF.** Agency lenders size on NOI less
+   replacement reserves, so the house sizes the DSCR constraint on NOI less
+   the same below-NOI capex charge the cash flow deducts, max(recurring
+   capex, lender reserve), and reports DSCR on that NCF
+   (`metrics.dscr.basis`), with the NOI-based DSCR beside it
+   (`metrics.dscr.noi_before_capex`). The basis is the overridable
+   assumption `loan_sizing_noi_basis` (§3): `ncf_after_capex_charge`
+   (`HOUSE_LOAN_SIZING_NOI_BASIS`), `ncf_after_lender_reserve` or
+   `noi_before_capex`. Backsolve sizes every candidate price on it, from the
+   projected year of the all-equity preview at that price, and discloses it
+   (`summary.loan_sizing`); `results.capital_plan.metric_basis` names it. A
+   charge that consumes the NOI sizes no loan rather than falling back to
+   LTV. Where 1.25x DSCR binds the loan is smaller; where 65% LTV binds
+   nothing changes. With a going-in cap below the debt constant (negative
+   leverage) a smaller loan raises cash-on-cash, so a DSCR-bound solve can
+   price higher.
+
+Three decisions on deferred maintenance and PCA evidence:
 
 ## Consequences
 
