@@ -8,16 +8,18 @@ results into curves the engine reads:
     A per-year vector written to ``growth_assumptions.annual_growth_rates``
     (element ``k`` is the increase entering analysis year ``k + 2``) and its
     first element to the scalar ``annual_growth_rate``. Years with forecast
-    coverage come from ``rent_growth_forecast`` (submarket, else MSA),
+    coverage come from ``rent_growth_forecast`` (submarket, else MSA; a
+    submarket series with no annual coverage falls back to the MSA one),
     annualized with ``engine.market_data.annualize``. After the horizon the
     rate glides linearly over ``HOUSE_RENT_GROWTH_GLIDE_YEARS`` to the long-run
     rate: the MSA ``rent_growth_long_run`` if a provider has one, else
-    ``HOUSE_LONG_RUN_RENT_GROWTH``.
+    ``HOUSE_LONG_RUN_RENT_GROWTH``. A canonical without ``growth_assumptions``
+    gets the section created from this vector.
 ``physical_vacancy``
     Current physical vacancy (rent roll) moving linearly to stabilized vacancy
     over the deal type's stabilization window, then flat. Stabilized vacancy is
-    ``vacancy_stabilized`` (submarket, else MSA), else the midpoint of the
-    house vintage typical band. Written as monthly segments per cohort.
+    ``vacancy_stabilized`` (submarket, else MSA), else the house value
+    max(vintage typical-band midpoint, house vacancy floor for the strategy). Written as monthly segments per cohort.
 ``loss_to_lease``
     Each cohort's rent-roll loss to lease (market vs in-place) burning off
     linearly over ``HOUSE_LTL_BURN_OFF_MONTHS`` to the house vintage LTL floor.
@@ -32,7 +34,9 @@ results into curves the engine reads:
     ``bad_debt_typical_low``, 2.0% when the year built is unknown).
 ``exit_cap_rate``
     The exit-year ``market_cap_rate`` (submarket, else MSA) when an exit is
-    modeled, else resolver v1 behavior (OM, engine default).
+    modeled, else the OM rate, else the going-in cap rate (T12 NOI / price)
+    plus ``HOUSE_EXIT_CAP_SPREAD`` (``house:exit_cap_spread``), else the
+    engine default.
 
 Analyst overrides keep resolver v1 semantics and always win. A curve already
 in a canonical that the resolver did not write is recorded as an analyst
@@ -79,6 +83,7 @@ from engine.assumptions.resolver import (
     _Current,
     _exit_cap_default,
     _fallback,
+    _house_exit_cap,
     _ltl_candidates,
     _num,
     _read_concessions,
@@ -325,12 +330,37 @@ def _forecast_years(ctx: _Context, pick: MarketPick, years: int) -> list[float]:
     return out
 
 
+def _covered_forecast(ctx: _Context, length: int) -> tuple[Optional[MarketPick], list[float], str]:
+    """The first forecast with annual coverage: the submarket pick, else an MSA forecast.
+
+    A submarket series whose quarters do not cover an analysis year falls back
+    to the MSA forecast instead of skipping straight to the long-run rate.
+    """
+    pick = market_pick(ctx, "rent_growth_forecast")
+    if pick is None:
+        return None, [], ""
+    covered = _forecast_years(ctx, pick, length)
+    if covered or pick.level != "submarket":
+        return pick, covered, ""
+    msa = [o for o in market_observations(ctx, "rent_growth_forecast") if not o.geo.submarket]
+    msa += market_observations(ctx, "rent_growth_forecast", msa_only=True)
+    for observation in msa:
+        candidate = MarketPick("rent_growth_forecast", observation, "msa")
+        years = _forecast_years(ctx, candidate, length)
+        if years:
+            note = (
+                f"The submarket rent_growth_forecast ({pick.observation.provenance.provider}) has no "
+                "annual coverage of the analysis years, so the MSA forecast is used. "
+            )
+            return candidate, years, note
+    return pick, [], ""
+
+
 def rent_growth_vector(ctx: _Context) -> _Choice:
     """The per-year rent-growth vector for this deal (ADR 0003 §3)."""
     length = max(1, analysis_years(ctx) - 1)
     long_run, long_run_source, long_run_basis, long_run_pick = _long_run(ctx)
-    forecast = market_pick(ctx, "rent_growth_forecast") if ctx.start else None
-    covered = _forecast_years(ctx, forecast, length) if forecast is not None else []
+    forecast, covered, fallback_note = _covered_forecast(ctx, length) if ctx.start else (None, [], "")
 
     vector = covered[:length]
     glide_years = int(house.HOUSE_RENT_GROWTH_GLIDE_YEARS)
@@ -352,7 +382,7 @@ def rent_growth_vector(ctx: _Context) -> _Choice:
             f"Increases entering analysis years 2-{n + 1} from the {forecast.level} rent_growth_forecast "
             f"({observation.provenance.provider}, as of {forecast.as_of or 'unknown'}), annualized to "
             f"analysis years; then a linear glide over {glide_years} years to the {long_run_basis}. "
-            f"{convention}"
+            f"{fallback_note}{convention}"
         )
         return _Choice(forecast.source, vector, basis, as_of=forecast.as_of, confidence=observation.confidence)
     reason = (
@@ -372,7 +402,9 @@ def rent_growth_vector(ctx: _Context) -> _Choice:
 def _read_rent_growth(ctx: _Context) -> _Current:
     growth = ctx.canonical.get("growth_assumptions")
     if not isinstance(growth, Mapping):
-        return _Current(NO_SECTION)
+        # No growth section (e.g. a hand-authored canonical): the resolver creates
+        # one from the resolved rent growth rather than leaving growth unmodeled.
+        return _Current(PLACEHOLDER)
     vector = growth.get("annual_growth_rates")
     if isinstance(vector, list) and vector:
         values = [_num(v) if _num(v) is not None else v for v in vector]
@@ -386,7 +418,7 @@ def _read_rent_growth(ctx: _Context) -> _Current:
             return _Current(PRESENT, scalar)
         return _Current(PRESENT, values)
     if "annual_growth_rate" not in growth:
-        return _Current(ABSENT)
+        return _Current(PLACEHOLDER)
     value = growth["annual_growth_rate"]
     if value is None:
         return _Current(PLACEHOLDER)
@@ -644,15 +676,33 @@ def _stabilized_vacancy(ctx: _Context) -> Optional[tuple[float, str, str, Option
         return value, pick.source, (
             f"{pick.level} stabilized vacancy {value:.2%} from {pick.observation.provenance.provider}"
         ), pick
+    house_value = house_stabilized_vacancy(ctx)
+    if house_value is None:
+        return None
+    return house_value[0], house_vintage_source(ctx.bucket), house_value[1], None
+
+
+def house_stabilized_vacancy(ctx: _Context) -> Optional[tuple[float, str]]:
+    """House stabilized vacancy: max(vintage typical-band midpoint, house vacancy floor).
+
+    The floor is ``default_physical_vacancy_rate`` for the deal's vintage and
+    strategy (the guardrail floor), so a house-only deal is never below its own
+    floor. The floors themselves are unchanged.
+    """
     typical = house.typical_physical_vacancy_rate(ctx.year_built)
+    floor = house.default_physical_vacancy_rate(ctx.year_built, strategy=ctx.strategy)
     if typical is None:
         return None
     guardrails = house.revenue_guardrails(ctx.year_built, strategy=ctx.strategy)
     low, high = guardrails["physical_vacancy_typical_low"], guardrails["physical_vacancy_typical_high"]
-    return float(typical), house_vintage_source(ctx.bucket), (
-        f"house {ctx.bucket} vintage typical vacancy {float(typical):.2%} "
-        f"(midpoint of {float(low):.2%}-{float(high):.2%}; year built {ctx.year_built})"
-    ), None
+    value = max(typical, floor) if floor is not None else typical
+    basis = (
+        f"house {ctx.bucket} vintage stabilized vacancy {float(value):.2%} = max(typical-band midpoint "
+        f"{float(typical):.2%} of {float(low):.2%}-{float(high):.2%}, house vacancy floor "
+        f"{float(floor if floor is not None else typical):.2%} for the {ctx.strategy} strategy; "
+        f"year built {ctx.year_built})"
+    )
+    return _r(float(value)), basis
 
 
 def _vacancy_default(ctx: _Context, state: str) -> _Choice:
@@ -688,13 +738,13 @@ def _vacancy_default(ctx: _Context, state: str) -> _Choice:
 
 def _vacancy_candidates_v4(ctx: _Context) -> list[dict[str, Any]]:
     out = _vacancy_candidates(ctx)
-    typical = house.typical_physical_vacancy_rate(ctx.year_built)
-    if typical is not None:
+    house_value = house_stabilized_vacancy(ctx)
+    if house_value is not None:
         out.append(
             _candidate(
                 house_vintage_source(ctx.bucket),
-                float(typical),
-                f"House {ctx.bucket} vintage typical stabilized vacancy (midpoint of the typical band).",
+                house_value[0],
+                f"House stabilized vacancy: {house_value[1]}.",
             )
         )
     return out
@@ -940,8 +990,9 @@ _read_exit_scalar = _scalar_reader("exit_assumptions", "exit_cap_rate")
 
 def _read_exit_cap(ctx: _Context) -> _Current:
     current = _read_exit_scalar(ctx)
-    # A modeled exit without a cap rate takes the market rate when one exists.
-    if current.state == ABSENT and _market_exit_cap(ctx) is not None:
+    # A modeled exit without a cap rate takes the market rate when one exists,
+    # else the going-in cap rate plus the house spread (ADR 0003 §3).
+    if current.state == ABSENT and (_market_exit_cap(ctx) is not None or _house_exit_cap(ctx) is not None):
         return _Current(PLACEHOLDER)
     return current
 

@@ -236,6 +236,13 @@ def test_resolved_assumptions_fall_in_the_expected_bands(slug):
     assert canonical["exit_assumptions"]["exit_cap_rate"] == entries["exit_cap_rate"]["value"]
     _in(bands["insurance_per_unit"], entries["insurance_per_unit"]["value"], "insurance per unit")
     _in(bands["r_and_m_per_unit"], entries["r_and_m_per_unit"]["value"], "R&M per unit")
+    # The house vintage reserve is written when the documents carry none.
+    reserve = entries["replacement_reserve_per_unit"]["value"]
+    _in(bands["replacement_reserve_per_unit"], reserve, "reserve per unit")
+    assert canonical["replacement_reserves"][0]["annual_amount"] == pytest.approx(reserve * sum_units(canonical))
+    closing = canonical["purchase_assumptions"]
+    assert closing["closing_costs"] == pytest.approx(
+        closing["purchase_price"] * float(house.DEFAULT_PURCHASE_CLOSING_COST_PCT), abs=0.01)
 
 
 @pytest.mark.parametrize("slug", SLUGS)
@@ -248,10 +255,13 @@ def test_opex_growth_per_category_falls_in_the_expected_bands(slug):
     rows = {row["category_name"]: row for row in canonical["opex_table"]}
     for name, entry in categories.items():
         _in(bands[name], entry["value"], f"{name} growth")
-        if name == "Real Estate Taxes":  # the property-tax module owns tax growth
-            assert entry["source"] == "house:property_tax_module" and "growth_rate" not in rows[name]
-        else:
-            assert rows[name]["growth_rate"] == entry["value"]
+        assert rows[name]["growth_rate"] == entry["value"]
+        if name == "Real Estate Taxes":  # 3% a year after the purchase reassessment
+            assert entry["source"] == "house:opex_growth_table"
+            assert entry["value"] == float(house.HOUSE_RE_TAX_GROWTH_AFTER_REASSESSMENT)
+    # The T12 management fee is entered as a percent of EGR (T12 fee / T12 EGI).
+    fee = rows["Property Management Fee"]
+    assert fee["calculation_type"] == "percent_egr" and fee["growth_rate"] == 0.0
 
 
 # ── engine run ───────────────────────────────────────────────────────────
@@ -361,7 +371,9 @@ def test_backsolve_enforces_floors_and_its_case_is_stable_on_re_resolve(slug):
     # Every floor the solve enforced is recorded on its entry and in policy_overrides.
     enforced = {k for k, e in entries.items() if (e.get("guardrail") or {}).get("action") == "enforced"}
     summary = result["summary"]["policy_summary"]
-    assert enforced and "replacement_reserve_per_unit" in enforced
+    # The underwrite already carries the house vintage reserve, so pricing has none to enforce.
+    assert "replacement_reserve_per_unit" not in enforced
+    assert all(_entries(canonical)[k]["guardrail"]["action"] == "warned" for k in enforced)
     assert {f["key"] for f in summary["guardrails"]["findings"]} == enforced
     assert {o["assumption"] for o in summary["policy_overrides"] if "assumption" in o} == enforced
     for key in enforced:

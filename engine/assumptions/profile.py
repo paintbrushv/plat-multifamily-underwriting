@@ -19,6 +19,9 @@ DEAL_TYPE_STRATEGY = {
 
 ASSET_CLASSES = ("A", "B", "C")
 STAR_TIERS = ("1_2", "3", "4_5")
+# asset_class -> the CoStar star tier market data is read at when the profile
+# names no star_tier (class A ~ 4 & 5 Star, B ~ 3 Star, C ~ 1 & 2 Star).
+ASSET_CLASS_STAR_TIER = {"A": "4_5", "B": "3", "C": "1_2"}
 _MSA_FIELDS = ("cbsa_code", "name", "metro_slug")
 _SUBMARKET_FIELDS = ("name", "source_id")
 
@@ -84,6 +87,9 @@ class DealProfile:
             raise ValueError(f"deal_profile.asset_class must be one of {ASSET_CLASSES}")
         if self.star_tier is not None and self.star_tier not in STAR_TIERS:
             raise ValueError(f"deal_profile.star_tier must be one of {STAR_TIERS}")
+        if self.star_tier is None and self.asset_class is not None:
+            # Recorded on the profile, so to_dict() and later resolutions carry it.
+            object.__setattr__(self, "star_tier", ASSET_CLASS_STAR_TIER[self.asset_class])
 
     @property
     def strategy(self) -> str:

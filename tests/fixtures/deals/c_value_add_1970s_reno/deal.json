@@ -186,7 +186,9 @@
       "exit_cap_rate": "market:synthetic",
       "insurance_per_unit": "deal:t12",
       "r_and_m_per_unit": "deal:t12",
-      "replacement_reserve_per_unit": "engine_fallback",
+      "replacement_reserve_per_unit": "house:vintage_1970s",
+      "purchase_closing_cost_pct": "house:backsolve_policy",
+      "renovation_premium": "analyst",
       "turn_cost_per_unit": "house:vintage_1970s",
       "sale_cost_percent": "analyst"
     },
@@ -248,6 +250,10 @@
       "r_and_m_per_unit": [
         1300,
         1400
+      ],
+      "replacement_reserve_per_unit": [
+        2125,
+        2125
       ]
     },
     "opex_growth": {
@@ -292,12 +298,12 @@
         0.05
       ],
       "Real Estate Taxes": [
-        0.0,
-        0.0
-      ],
-      "Property Management Fee": [
         0.03,
         0.03
+      ],
+      "Property Management Fee": [
+        0.0,
+        0.0
       ]
     },
     "results": {
@@ -321,8 +327,7 @@
     "guardrail_warnings": [
       "physical_vacancy",
       "concessions",
-      "r_and_m_per_unit",
-      "replacement_reserve_per_unit"
+      "r_and_m_per_unit"
     ]
   }
 }
