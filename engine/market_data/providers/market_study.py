@@ -32,11 +32,23 @@ Layouts read (verified against the feeder source):
    ``os.pathsep``-separated).
 
 Geography: a ``Geo.metro_slug`` maps to CoStar file prefixes ``<slug>``,
-``<slug>_usa`` and any alias (see ``DEFAULT_METRO_ALIASES``). A matching
-``submarket`` selects one file; otherwise every file of the metro is combined
-(rates and rents weighted by ``inventory_units``; unit counts summed) and the
-returned ``Observation.geo`` has no submarket. A missing star tier falls back
-to ``All`` and the returned geo says so.
+``<slug>_usa`` and any alias (see ``DEFAULT_METRO_ALIASES``). Without a metro
+slug, ``Geo.cbsa_code`` is mapped to one through the feeder's
+``agents/configs/*.yaml`` (``notes.msa_code`` / ``notes.metro_slug``), then
+``DEFAULT_CBSA_METROS``. A matching ``submarket`` selects one file; submarket
+names compare on letters and digits only, so ``"Lewisville/Flower Mound"``
+matches both ``<metro>_lewisville_flower_mound`` (``transform_costar_excel.py``)
+and the older ``<metro>_lewisvilleflower_mound`` naming. Otherwise every file
+of the metro is combined (rates and rents weighted by ``inventory_units``;
+unit counts summed), the returned ``Observation.geo`` has no submarket and
+``attributes["submarket_requested"]`` names the submarket that was not found.
+A missing star tier falls back to ``All`` and the returned geo says so.
+
+Availability: the root must exist, the ``market`` extra must be installed and
+the root must hold at least one feeder output (a CoStar parquet, an ensemble
+forecast, or a configured comps.json); otherwise ``unavailable_reason`` says
+which. ``diagnose(geo)`` reports the inventory and the geography match for the
+market-data status block and ``runs/market_data_doctor.py``.
 
 As-of: a quarter's value counts as known from the first day of that quarter
 (the feeder publishes QTD/EST rows for the current quarter). Scalar metrics
@@ -67,7 +79,7 @@ from engine.market_data._util import (
     tier_label,
     tier_slug,
 )
-from engine.market_data.paths import market_study_root
+from engine.market_data.paths import feeder_root
 from engine.market_data.types import CONFIDENCE_LEVELS, Geo, Observation, Provenance
 
 COMPS_ENV = "PLAT_MARKET_STUDY_COMPS"
@@ -100,6 +112,26 @@ _EVIDENCE_CONFIDENCE = {
 }
 _RANK = {"low": 0, "medium": 1, "high": 2}
 
+# Public CBSA codes -> generic metro slugs, used when a geography has a CBSA
+# code but no metro slug. The feeder's agents/configs/*.yaml come first.
+DEFAULT_CBSA_METROS: dict[str, str] = {"19100": "dallas_tx"}
+
+# The metrics this provider can serve (renovation_premium and
+# rent_growth_long_run have no feeder output).
+SERVES = (
+    "rent_growth_forecast", "effective_rent_by_bed", "vacancy_current", "vacancy_stabilized",
+    "concession_rate", "supply_risk", "market_cap_rate",
+)
+COSTAR_GLOB = "data/paid/costar-submarket*/*.parquet"
+ENSEMBLE_GLOB = "reports/**/forecasts/model_diagnostics_<tier>.json + v2_ensemble_<tier>.csv"
+_CONFIG_MSA_RE = re.compile(r"""^\s*msa_code:\s*["']?(\d{5})["']?\s*(?:#.*)?$""", re.MULTILINE)
+_CONFIG_SLUG_RE = re.compile(r"""^\s*metro_slug:\s*["']?([A-Za-z0-9_]+)["']?\s*(?:#.*)?$""", re.MULTILINE)
+
+
+def compact(value: object) -> str:
+    """Letters and digits only: ``"Lewisville/Flower Mound"`` -> ``lewisvilleflowermound``."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
 
 def bed_key(unit_type: object) -> str | None:
     """``"Studio"``/``"0BR"`` -> ``studio``; ``"2BR"``/``"2 Bed"``/``"2x2"`` -> ``2br``."""
@@ -124,9 +156,17 @@ class PlatMarketStudyAgentProvider:
         comps_paths: Sequence[str | Path] | None = None,
         metro_aliases: Mapping[str, Iterable[str]] | None = None,
         env: Mapping[str, str] | None = None,
+        root_origin: str | None = None,
     ) -> None:
         env = os.environ if env is None else env
-        self.root = Path(root).expanduser() if root is not None else market_study_root(env)
+        if root is not None:
+            self.root = Path(root).expanduser()
+            self.root_origin = root_origin or "explicit root"
+        else:
+            found = feeder_root("market_study", env)
+            self.root, self.root_origin = found.path, found.origin
+        # metric -> "ExcType: message" of the last exception get() swallowed.
+        self.errors: dict[str, str] = {}
         if comps_paths is None:
             raw = env.get(COMPS_ENV) or ""
             comps_paths = [p for p in raw.split(os.pathsep) if p]
@@ -140,9 +180,20 @@ class PlatMarketStudyAgentProvider:
     @property
     def unavailable_reason(self) -> str | None:
         if not self.root.is_dir():
-            return f"plat-market-study-agent root not found: {self.root} (set PLAT_MARKET_STUDY_ROOT)"
+            return (
+                f"plat-market-study-agent root not found: {self.root} ({self.root_origin}); "
+                "set PLAT_MARKET_STUDY_ROOT or market_study_root in the user config"
+            )
         ok, reason = parquet_support()
-        return None if ok else reason
+        if not ok:
+            return reason
+        if not (self._costar_files() or self._diagnostics_files() or self._existing_comps()):
+            return (
+                f"plat-market-study-agent root {self.root} holds no feeder outputs: no CoStar parquet "
+                f"({COSTAR_GLOB}), no ensemble forecast ({ENSEMBLE_GLOB}) and no comps.json "
+                f"({COMPS_ENV}); generate them in the feeder repository"
+            )
+        return None
 
     def available(self) -> bool:
         return self.unavailable_reason is None
@@ -152,7 +203,8 @@ class PlatMarketStudyAgentProvider:
             return None
         try:
             return self._get(metric, geo, as_of)
-        except Exception:  # noqa: BLE001 - a provider never raises for bad data
+        except Exception as exc:  # noqa: BLE001 - a provider never raises for bad data
+            self.errors[metric] = f"{type(exc).__name__}: {exc}"
             return None
 
     def _get(self, metric: str, geo: Geo, as_of: date | None) -> Observation | None:
@@ -165,13 +217,150 @@ class PlatMarketStudyAgentProvider:
             return self._costar(metric, geo, as_of)
         return None  # renovation_premium and unknown metrics: no feeder output
 
+    # -- diagnostics -----------------------------------------------------
+    def diagnose(self, geo: Geo) -> dict[str, Any]:
+        """What this root holds and how ``geo`` matches it (reads no parquet).
+
+        Keys: ``root``, ``root_origin``, ``root_found``, ``serves``,
+        ``inventory``, ``geography``, ``matched`` (any output for the metro),
+        ``errors`` (exceptions ``get`` swallowed, by metric) and ``summary``
+        (one sentence on what is missing, None when nothing is).
+        """
+        out: dict[str, Any] = {
+            "root": str(self.root),
+            "root_origin": self.root_origin,
+            "root_found": self.root.is_dir(),
+            "serves": list(SERVES),
+            "errors": dict(self.errors),
+            "matched": False,
+        }
+        if not out["root_found"]:
+            out["summary"] = f"root not found: {self.root} ({self.root_origin})"
+            return out
+        files = self._costar_files()
+        diagnostics = self._diagnostics_files()
+        comps = self._existing_comps()
+        metro, via = self._metro_slug(geo)
+        prefixes = self._metro_slugs(geo)
+        metro_stems: list[str] = []
+        prefix_used: str | None = None
+        for prefix in sorted(prefixes, key=len, reverse=True):
+            metro_stems = self._metro_stems(files, prefix)
+            if metro_stems:
+                prefix_used = prefix
+                break
+        _, stem = self._select_files(geo, files)
+        ensemble_metros: dict[str, list[str]] = {}
+        for path in diagnostics:
+            try:
+                meta = (json.loads(path.read_text(encoding="utf-8")).get("meta") or {})
+            except (OSError, ValueError, AttributeError):
+                continue
+            ensemble_metros.setdefault(slugify(meta.get("metro_slug")), []).append(str(path))
+        ensemble_match = sorted(p for slug in prefixes for p in ensemble_metros.get(slug, []))
+        comps_match = []
+        for path in comps:
+            try:
+                subject = (json.loads(path.read_text(encoding="utf-8")).get("subject") or {})
+            except (OSError, ValueError, AttributeError):
+                continue
+            if slugify(subject.get("metro_slug")) in prefixes:
+                comps_match.append(str(path))
+        out["inventory"] = {
+            "costar_parquet_files": len(files),
+            "costar_dirs": sorted({str(p.parent) for p in files.values()}),
+            "ensemble_forecasts": len(diagnostics),
+            "ensemble_metros": sorted(m for m in ensemble_metros if m),
+            "comps_configured": [str(p) for p in self.comps_paths],
+            "comps_found": [str(p) for p in comps],
+        }
+        out["geography"] = {
+            "metro_slug": metro,
+            "metro_via": via,
+            "file_prefixes": prefixes,
+            "costar_prefix_matched": prefix_used,
+            "costar_files_for_metro": len(metro_stems),
+            "submarket_requested": geo.submarket,
+            "submarket_file": stem,
+            "submarkets_available": [s[len(prefix_used) + 1:] for s in metro_stems] if prefix_used else [],
+            "ensemble_files": ensemble_match,
+            "comps_files": comps_match,
+        }
+        out["matched"] = bool(metro_stems or ensemble_match or comps_match)
+
+        ok, reason = parquet_support()
+        problems: list[str] = []
+        if not ok:
+            problems.append(str(reason))
+        if not (files or diagnostics or comps):
+            problems.append(
+                f"the root holds no feeder outputs: no CoStar parquet ({COSTAR_GLOB}), no ensemble "
+                f"forecast ({ENSEMBLE_GLOB}), no comps.json ({COMPS_ENV})"
+            )
+        elif metro is None:
+            problems.append(
+                "the geography has no metro slug"
+                + (f" and CBSA {geo.cbsa_code} is not mapped to one" if geo.cbsa_code else "")
+            )
+        else:
+            if not metro_stems:
+                problems.append(
+                    f"no CoStar parquet for metro {metro} (file prefixes {', '.join(prefixes)}; "
+                    f"{len(files)} parquet file(s) under {COSTAR_GLOB})"
+                )
+            elif geo.submarket and stem is None:
+                problems.append(
+                    f"submarket {geo.submarket!r} not found among the {len(metro_stems)} CoStar "
+                    f"submarket file(s) for {prefix_used}; the metro aggregate is used"
+                )
+            if not ensemble_match:
+                problems.append(f"no ensemble forecast for metro {metro} under reports/**/forecasts/")
+        out["summary"] = "; ".join(problems) or None
+        return out
+
     # -- geography -------------------------------------------------------
+    def _cbsa_metros(self) -> dict[str, str]:
+        """CBSA code -> metro slug: the feeder's agents/configs/*.yaml, then the defaults."""
+        out: dict[str, str] = {}
+        config_dir = self.root / "agents" / "configs"
+        if config_dir.is_dir():
+            for path in sorted(config_dir.glob("*.yaml")):
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                msa, slug = _CONFIG_MSA_RE.search(text), _CONFIG_SLUG_RE.search(text)
+                if msa and slug:
+                    out.setdefault(msa.group(1), slug.group(1))
+        for code, slug in DEFAULT_CBSA_METROS.items():
+            out.setdefault(code, slug)
+        return out
+
+    def _metro_slug(self, geo: Geo) -> tuple[str | None, str | None]:
+        """(metro slug, how it was found: ``metro_slug`` or ``cbsa_code``)."""
+        if geo.metro_slug:
+            return slugify(geo.metro_slug), "metro_slug"
+        if geo.cbsa_code:
+            slug = self._cbsa_metros().get(str(geo.cbsa_code).strip())
+            if slug:
+                return slugify(slug), "cbsa_code"
+        return None, None
+
     def _metro_slugs(self, geo: Geo) -> list[str]:
-        if not geo.metro_slug:
+        slug, _ = self._metro_slug(geo)
+        if not slug:
             return []
-        slug = slugify(geo.metro_slug)
         out = [slug, f"{slug}_usa", *self.metro_aliases.get(slug, ())]
         return list(dict.fromkeys(out))
+
+    def _diagnostics_files(self) -> list[Path]:
+        reports = self.root / "reports"
+        if not reports.is_dir():
+            return []
+        return sorted(p for p in reports.rglob("model_diagnostics_*.json") if p.parent.name == "forecasts")
+
+    def _existing_comps(self) -> list[Path]:
+        return [p for p in self.comps_paths if p.is_file()]
 
     def _costar_files(self) -> dict[str, Path]:
         paid = self.root / "data" / "paid"
@@ -185,18 +374,29 @@ class PlatMarketStudyAgentProvider:
                 files.setdefault(path.stem, path)
         return files
 
-    def _select_files(self, geo: Geo) -> tuple[list[Path], str | None]:
+    @staticmethod
+    def _metro_stems(files: Mapping[str, Path], prefix: str) -> list[str]:
+        return [s for s in sorted(files) if s.startswith(prefix + "_")]
+
+    def _select_files(
+        self, geo: Geo, files: Mapping[str, Path] | None = None
+    ) -> tuple[list[Path], str | None]:
         """(files, submarket stem or None for a metro aggregate)."""
-        files = self._costar_files()
+        files = self._costar_files() if files is None else files
         prefixes = self._metro_slugs(geo)
-        if geo.submarket:
-            sub = slugify(geo.submarket)
-            candidates = [sub] + [f"{p}_{sub}" for p in prefixes]
-            for stem in candidates:
-                if stem in files and (not prefixes or any(stem.startswith(p + "_") for p in prefixes)):
-                    return [files[stem]], stem
-        for prefix in prefixes:
-            matched = [files[s] for s in sorted(files) if s.startswith(prefix + "_")]
+        wanted = compact(geo.submarket)
+        if wanted:
+            if prefixes:
+                for prefix in sorted(prefixes, key=len, reverse=True):
+                    for stem in self._metro_stems(files, prefix):
+                        if compact(stem[len(prefix) + 1:]) == wanted:
+                            return [files[stem]], stem
+            else:
+                for stem in sorted(files):
+                    if compact(stem) == wanted:
+                        return [files[stem]], stem
+        for prefix in sorted(prefixes, key=len, reverse=True):
+            matched = [files[s] for s in self._metro_stems(files, prefix)]
             if matched:
                 return matched, None
         return [], None
@@ -248,6 +448,8 @@ class PlatMarketStudyAgentProvider:
         value: Any = None
         horizon = "current"
         attributes: dict[str, Any] = {"star_tier": tier}
+        if geo.submarket and stem is None:
+            attributes["submarket_requested"] = geo.submarket
         row_q: str | None = None
 
         def latest(fn) -> tuple[Any, str | None]:
