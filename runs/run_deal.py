@@ -21,7 +21,9 @@ Steps:
     4. Write into --output-dir:
          canonical.json   the exact inputs that were run
          validation.json  the validation report
-         results.json     the engine results
+         results.json     the engine results, with metadata.market_data_status
+                          (the canonical's market-data status block: each
+                          provider, its root, and every slot that fell back)
          assumptions.json the assumptions sheet (when the canonical has an
                           assumptions section)
          assumptions.html the assumption register: every assumption, its
@@ -29,7 +31,7 @@ Steps:
                           condition)
          underwriting.xlsx with --xlsx: the underwriting workbook, including
                           the "Assumptions" tab
-    5. Print the key metrics.
+    5. Print the key metrics and the market-data status.
 
 Exit codes: 0 ok, 1 validation failure (including an engine refusal), 2 bad
 input (missing or unreadable canonical or overrides, unusable override).
@@ -60,6 +62,7 @@ from engine.assumptions.sheet import (  # noqa: E402
     write_assumptions_json,
 )
 from engine.ingest.ingestion_pipeline import sync_ingest_gate_assumptions  # noqa: E402
+from engine.market_data.diagnostics import disabled_status, status_lines  # noqa: E402
 
 EXIT_OK = 0
 EXIT_VALIDATION = 1
@@ -217,6 +220,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"Refusing to run: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
 
+    status = market_data_status_of(canonical)
+    results.setdefault("metadata", {})["market_data_status"] = status
     print(f"Results: {_write_json(out_dir / RESULTS_NAME, results)}")
     if has_assumptions(canonical):
         print(f"Assumptions sheet: {write_assumptions_json(canonical, out_dir / ASSUMPTIONS_NAME)}")
@@ -232,7 +237,21 @@ def run(args: argparse.Namespace) -> int:
     print(f"\nKey metrics: {deal_id}")
     for label, value, kind in key_metrics(results):
         print(f"  {label:<30} {_fmt(value, kind)}")
+    print()
+    for line in status_lines(status, indent=""):
+        print(line)
     return EXIT_OK
+
+
+def market_data_status_of(canonical: dict[str, Any]) -> dict[str, Any]:
+    """The canonical's recorded market-data status, or a block saying none was recorded."""
+    status = _get(canonical, "assumptions", "market_data_status")
+    if isinstance(status, dict):
+        return status
+    return disabled_status(
+        "the canonical records no market-data status (resolved with --no-market-data "
+        "or before the status block existed)"
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -380,6 +380,21 @@
       "properties": {
         "resolver_version": { "type": "string", "const": "plat.assumptions/1" },
         "mode": { "type": "string", "enum": ["underwrite", "pricing"] },
+        "market_data_status": {
+          "type": "object",
+          "description": "ADR 0003 §7. Which market-data provider supplied what for the deal's geography, each provider's root and availability, and every market slot that fell back and why (engine.market_data.diagnostics). Display only; the engine ignores it.",
+          "required": ["status_version", "enabled", "summary"],
+          "properties": {
+            "status_version": { "type": "string" },
+            "enabled": { "type": "boolean" },
+            "summary": { "type": "string" },
+            "geography": { "type": ["object", "null"] },
+            "config": { "type": "object" },
+            "providers": { "type": "array", "items": { "type": "object" } },
+            "metrics": { "type": "object" },
+            "slots": { "type": "object" }
+          }
+        },
         "entries": {
           "type": "object",
           "propertyNames": { "pattern": "^[a-z][a-z0-9_.]*$" },

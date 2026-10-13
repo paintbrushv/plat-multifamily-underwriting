@@ -2331,10 +2331,79 @@ def resolve_assumptions(
     restore_pricing_labels(entries, prior_entries)
     # ── end slice 6 hook ──
 
+    # No silent market fallback: say which provider had what, and append the
+    # reason to every market-reading entry no provider supplied.
+    status = _market_data_status(ctx, specs, entries, prior_section.get("market_data_status"))
+
     out["deal_profile"] = profile.to_dict()
     out["assumptions"] = {
         "resolver_version": RESOLVER_VERSION,
         "mode": mode,
         "entries": entries,
     }
+    if status is not None:
+        out["assumptions"]["market_data_status"] = status
     return out
+
+
+def _carries_market_provenance(entry: Mapping[str, Any]) -> bool:
+    """Whether an entry still records market data (a kept candidate or the exit cap's reference)."""
+    if any(str(c.get("source", "")).startswith(MARKET_PREFIX)
+           for c in entry.get("candidates") or [] if isinstance(c, Mapping)):
+        return True
+    detail = entry.get("detail")
+    market = detail.get("market") if isinstance(detail, Mapping) else None
+    return isinstance(market, Mapping) and str(market.get("source", "")).startswith(MARKET_PREFIX)
+
+
+def _market_data_status(
+    ctx: _Context,
+    specs: tuple[_Spec, ...],
+    entries: dict[str, Any],
+    prior: Any,
+) -> Optional[dict[str, Any]]:
+    """The market-data status block (``engine.market_data.diagnostics``), or None.
+
+    With a registry the block is measured now (from the per-run lookups the
+    keys already made). Without one (backsolve's re-resolution, overrides
+    applied with ``--no-market-data``) the last recorded block is kept. Either
+    way, each market-reading entry no provider supplied, and whose value is
+    not market-sourced, gets the block's fallback note on its basis and a
+    ``detail.market_data`` record.
+    """
+    from engine.market_data.diagnostics import MSA_ONLY, market_data_status
+
+    curves = _curves()
+    if ctx.market is not None:
+        slots = {spec.key: spec.market_metrics for spec in specs if spec.market_metrics}
+        status = market_data_status(
+            ctx.market,
+            curves.profile_geo(ctx.profile),
+            slots=slots,
+            lookup=lambda metric: curves.market_observations(ctx, metric, msa_only=metric in MSA_ONLY),
+        )
+    elif isinstance(prior, Mapping):
+        status = deepcopy(dict(prior))
+    else:
+        return None
+    for key, record in (status.get("slots") or {}).items():
+        entry = entries.get(key)
+        if not isinstance(entry, dict) or not isinstance(record, dict):
+            continue
+        record["entry_source"] = entry.get("source")
+        note = record.get("note")
+        source = str(entry.get("source", ""))
+        # Deal evidence and analyst values outrank market data: only a house or
+        # engine fallback stands where market data would have.
+        if not note or not (source.startswith(HOUSE_PREFIX) or source == SOURCE_ENGINE_FALLBACK):
+            continue
+        if _carries_market_provenance(entry):
+            # A market value or reference kept from an earlier resolution.
+            record["kept_from_prior_resolution"] = True
+            continue
+        if note not in str(entry.get("basis", "")):
+            entry["basis"] = f"{entry.get('basis', '')} {note}".strip()
+        detail = dict(entry.get("detail") or {})
+        detail["market_data"] = {"supplied": False, "metrics": list(record.get("metrics") or []), "note": note}
+        entry["detail"] = detail
+    return status
