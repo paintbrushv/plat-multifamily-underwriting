@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import CurveLookup, dec, find_curve_value, month_id, round2
 
+# Decimal constants of the per-cohort, per-month loops, built once.
+_ZERO = Decimal("0")
+_ONE = Decimal("1")
+_TWELVE = Decimal("12")
+
 
 @dataclass(frozen=True)
 class BaseRentMonthResult:
@@ -36,7 +41,7 @@ def _compute_concession_for_cohort(
 
     Concessions stack additively when multiple apply to the same cohort/month.
     """
-    total = Decimal("0")
+    total = _ZERO
     mid = month_id(month)
     for entry in concession_schedule:
         start = month_id(entry["start_month"])
@@ -51,7 +56,7 @@ def _compute_concession_for_cohort(
         amount = dec(entry["amount"])
         if ctype == "free_months":
             # N free months on 12-month lease = N/12 reduction of billed rent
-            total += billed_after_vacancy * (amount / Decimal("12"))
+            total += billed_after_vacancy * (amount / _TWELVE)
         elif ctype == "fixed_dollar":
             total += amount * occupied_units
         elif ctype == "pct_rent":
@@ -111,10 +116,10 @@ def compute_base_rent(
 
     by_month: List[BaseRentMonthResult] = []
     for month in time_grid.month_ids:
-        market_total = Decimal("0")
-        inplace_total = Decimal("0")
-        billed_after_vacancy_total = Decimal("0")
-        concession_total = Decimal("0")
+        market_total = _ZERO
+        inplace_total = _ZERO
+        billed_after_vacancy_total = _ZERO
+        concession_total = _ZERO
 
         for cohort_id in cohort_ids:
             # Determine unit count: dynamic overrides static
@@ -124,14 +129,14 @@ def compute_base_rent(
             elif cohort_id in cohort_lookup:
                 unit_count = dec(cohort_lookup[cohort_id]["unit_count"])
             else:
-                unit_count = Decimal("0")
+                unit_count = _ZERO
 
             market_rent = mr_by_cohort[cohort_id](month)
             ltl = ltl_by_cohort[cohort_id](month)
             vacancy = vac_by_cohort[cohort_id](month)
 
-            inplace_rent = market_rent * (Decimal("1") - ltl)
-            occupied_units = unit_count * (Decimal("1") - vacancy)
+            inplace_rent = market_rent * (_ONE - ltl)
+            occupied_units = unit_count * (_ONE - vacancy)
             billed_after_vacancy = inplace_rent * occupied_units
 
             # Concession deduction (per-cohort, after vacancy)
@@ -147,7 +152,7 @@ def compute_base_rent(
 
         billed_after_concessions = billed_after_vacancy_total - concession_total
         cl_rate = cl_rate_by_month[month]
-        net_rent = billed_after_concessions * (Decimal("1") - cl_rate)
+        net_rent = billed_after_concessions * (_ONE - cl_rate)
 
         by_month.append(
             BaseRentMonthResult(

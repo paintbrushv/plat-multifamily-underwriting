@@ -6,6 +6,10 @@ from functools import lru_cache
 from typing import List, Optional
 
 
+_CENT = Decimal("0.01")
+_BASIS_POINT = Decimal("0.0001")
+
+
 def dec(value) -> Decimal:
     if isinstance(value, Decimal):
         return value
@@ -13,13 +17,13 @@ def dec(value) -> Decimal:
 
 
 def round2(value: Decimal) -> float:
-    q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    q = value.quantize(_CENT, rounding=ROUND_HALF_UP)
     return float(q)
 
 
 def round4(value: Decimal) -> float:
     """4 decimal places for rates/percentages (e.g. 0.0525 = 5.25%)."""
-    q = value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    q = value.quantize(_BASIS_POINT, rounding=ROUND_HALF_UP)
     return float(q)
 
 
