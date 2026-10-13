@@ -58,6 +58,7 @@ STABILIZED_KEYS = {
     "purchase_closing_cost_pct",
     "loan_closing_costs",
     "loan_sizing_noi_basis",
+    "exit_noi_window",
 }
 
 FULL_ECONOMICS = dict(

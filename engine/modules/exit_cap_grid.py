@@ -7,8 +7,9 @@ exit cap at the modeled price). Each point PINS its exit cap at base + offset:
 it is never re-anchored to a price, so a stress point does not drift with a
 re-measured going-in cap.
 
-The exit cap only changes the reversion (gross sale price = forward NOI / exit
-cap, and the sale costs on it); the operating cash flows, the debt and the
+The exit cap only changes the reversion (gross sale price = exit NOI / exit
+cap, and the sale costs on it; the exit NOI is the run's, forward by default,
+ADR 0003 decision n); the operating cash flows, the debt and the
 loan payoff do not move. Each point therefore reuses the base case's cash flow
 series and shifts only the exit month (and exit year) by the change in net
 reversion, then recomputes IRR and the equity multiple with the same functions
@@ -26,8 +27,8 @@ from engine.modules.util import dec, round2
 
 RULE = (
     "Each point is pinned: exit cap = the base exit cap as run + offset, never re-anchored to a price. The base "
-    "case's cash flows are reused; only the reversion moves: exit value = forward NOI / exit cap, less sale "
-    "costs; the loan payoff is unchanged."
+    "case's cash flows are reused; only the reversion moves: exit value = exit NOI (the run's window, forward "
+    "by default) / exit cap, less sale costs; the loan payoff is unchanged."
 )
 
 
@@ -76,7 +77,7 @@ def compute_exit_cap_grid(
     if base_cap <= 0:
         return None
     sale_cost_pct = dec(exit_assumptions.get("sale_cost_percent", 0.02))
-    forward_noi = dec(exit_result["forward_noi"])
+    exit_noi = dec(exit_result.get("exit_noi", exit_result.get("forward_noi")))
     exit_month_idx = int(exit_result["exit_month_idx"])
     exit_year = str(exit_result["exit_month"])[:4]
     unlevered_basis, equity_basis = day0_bases(purchase_assumptions)
@@ -86,7 +87,7 @@ def compute_exit_cap_grid(
     )
 
     def reversion(cap: Decimal) -> tuple[Decimal, Decimal]:
-        gross = forward_noi / cap
+        gross = exit_noi / cap
         return gross, gross * sale_cost_pct
 
     base_gross, base_costs = reversion(base_cap)
@@ -122,7 +123,9 @@ def compute_exit_cap_grid(
         "rule": RULE,
         "purchase_price": (purchase_assumptions or {}).get("purchase_price"),
         "exit_month": exit_result["exit_month"],
-        "forward_noi": float(round2(forward_noi)),
+        # The NOI every point is valued on, and its window (the run's exit NOI).
+        "forward_noi": float(round2(exit_noi)),
+        "exit_noi_window": exit_result.get("exit_noi_window"),
         # Does not move with the exit cap: shown once, not per point.
         "cash_on_cash_year_1": cash_on_cash_year_1,
         "points": points,

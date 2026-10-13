@@ -15,7 +15,13 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from engine.underwriting_policy import PRIMARY_COC_TARGET_PCT
+from engine.underwriting_policy import (
+    EXIT_NOI_WINDOW_FORWARD,
+    EXIT_NOI_WINDOW_TRAILING,
+    EXIT_NOI_WINDOWS,
+    HOUSE_EXIT_NOI_WINDOW,
+    PRIMARY_COC_TARGET_PCT,
+)
 from engine.modules import loan_sizing
 from engine.modules.analysis_years import aggregate_analysis_years
 from engine.modules.time_grid import TimeGrid
@@ -26,6 +32,23 @@ from engine.modules.util import calculate_irr, dec, month_id, round2, round4
 _calculate_irr = calculate_irr
 
 
+def _window_disclosure(rows: List[Dict[str, Any]], basis: str, requested: str) -> Dict[str, Any]:
+    return {
+        "start": str(rows[0]["month"])[:7] if rows else None,
+        "end": str(rows[-1]["month"])[:7] if rows else None,
+        "months": len(rows),
+        "basis": basis,
+        "requested": requested,
+    }
+
+
+def _annualized_noi(rows: List[Dict[str, Any]]) -> Decimal:
+    total = sum((dec(r.get("net_operating_income", 0)) for r in rows), Decimal("0"))
+    if len(rows) >= 12:
+        return total
+    return total * Decimal("12") / Decimal(len(rows))
+
+
 def compute_exit_proceeds(
     time_grid: TimeGrid,
     cashflow_by_year: List[Dict[str, Any]],
@@ -33,10 +56,27 @@ def compute_exit_proceeds(
     purchase_assumptions: Optional[Dict[str, Any]] = None,
     exit_assumptions: Optional[Dict[str, Any]] = None,
     cashflow_by_month: Optional[List[Dict[str, Any]]] = None,
+    projected_noi_by_month: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Compute exit / sale proceeds as a standalone helper.
 
-    Returns dict with: exit_month, exit_month_idx, forward_noi,
+    The exit value is the exit NOI over the exit cap (NOI before capex). The
+    exit NOI window is ``exit_assumptions.noi_window`` (ADR 0003 decision n):
+
+    - ``forward`` (house default): the 12 months after the exit month, as a
+      buyer prices the asset. Months past the analysis end come from
+      ``projected_noi_by_month`` (the engine projects one year beyond the
+      analysis for NOI only); fewer than 12 available are annualized. With no
+      month after the exit available (no projection supplied) the trailing
+      window is used, and the disclosure says so.
+    - ``trailing``: the 12 months ending at and including the exit month,
+      annualized when fewer exist.
+
+    ``forward_noi_override`` (e.g. RedIQ's reversion NOI) wins over both.
+
+    Returns dict with: exit_month, exit_month_idx, exit_noi (the NOI valued),
+    forward_noi (the same value, kept for consumers of the earlier name),
+    exit_noi_window ({start, end, months, basis, requested}),
     gross_sale_price, sale_costs, loan_payoff, net_sale_proceeds.
     """
     if not exit_assumptions:
@@ -45,6 +85,11 @@ def compute_exit_proceeds(
     exit_cap_rate = dec(exit_assumptions.get("exit_cap_rate", 0.05))
     sale_cost_percent = dec(exit_assumptions.get("sale_cost_percent", 0.02))
     exit_month = exit_assumptions.get("exit_month")
+    noi_window = exit_assumptions.get("noi_window") or HOUSE_EXIT_NOI_WINDOW
+    if noi_window not in EXIT_NOI_WINDOWS:
+        raise ValueError(
+            f"Unknown exit_assumptions.noi_window: {noi_window!r} (expected one of {', '.join(EXIT_NOI_WINDOWS)})"
+        )
 
     if exit_month:
         exit_month = month_id(exit_month)
@@ -57,45 +102,60 @@ def compute_exit_proceeds(
         exit_month = time_grid.month_ids[-1]
         exit_month_idx = len(time_grid.month_ids) - 1
 
-    # Forward NOI for exit valuation.  When an explicit override is provided
-    # (e.g., RedIQ's ReversionNOI), use it directly.  Otherwise, fall back to
-    # trailing 12-month NOI from the cashflow.
+    # The exit NOI. An explicit override (e.g., RedIQ's ReversionNOI) is used
+    # directly; otherwise the window's months of the cash flow, carried past
+    # the analysis end by the projection.
     forward_noi_override = exit_assumptions.get("forward_noi_override")
+    window: Dict[str, Any]
     if forward_noi_override is not None:
-        forward_noi = dec(forward_noi_override)
+        exit_noi = dec(forward_noi_override)
+        window = {"start": None, "end": None, "months": None, "basis": "override", "requested": noi_window}
     elif cashflow_by_month:
-        # Sum trailing 12 months of monthly NOI
-        start_idx = max(0, exit_month_idx - 11)
-        trailing = cashflow_by_month[start_idx:exit_month_idx + 1]
-        trailing_noi = sum(dec(m.get("net_operating_income", 0)) for m in trailing)
-        n_months = len(trailing)
-        if n_months >= 12:
-            forward_noi = trailing_noi
-        elif n_months > 0:
-            # Annualize partial-year data
-            forward_noi = trailing_noi * Decimal("12") / Decimal(str(n_months))
+        hold = list(cashflow_by_month[:exit_month_idx + 1])
+        after = list(cashflow_by_month[exit_month_idx + 1:])
+        if len(after) < 12 and projected_noi_by_month:
+            last = str(cashflow_by_month[-1]["month"])[:7]
+            after += [row for row in projected_noi_by_month if str(row["month"])[:7] > last]
+        forward_rows = after[:12]
+        trailing_rows = hold[-12:]
+        if noi_window == EXIT_NOI_WINDOW_FORWARD and forward_rows:
+            rows, basis = forward_rows, EXIT_NOI_WINDOW_FORWARD
         else:
-            forward_noi = Decimal("0")
+            rows, basis = trailing_rows, EXIT_NOI_WINDOW_TRAILING
+        exit_noi = _annualized_noi(rows) if rows else Decimal("0")
+        window = _window_disclosure(rows, basis, noi_window)
     else:
-        # Fallback: year-based calculation
-        forward_noi = Decimal("0")
+        # Fallback without monthly cash flow: a calendar year of NOI (trailing).
+        exit_noi = Decimal("0")
         exit_year = exit_month[:4]
         exit_year_months = [m for m in time_grid.month_ids if m.startswith(exit_year)]
+        used_year: Optional[str] = None
 
         if len(exit_year_months) >= 12:
             exit_year_data = next((y for y in cashflow_by_year if y["year"] == exit_year), None)
-            forward_noi = dec(exit_year_data.get("net_operating_income", 0)) if exit_year_data else Decimal("0")
+            if exit_year_data:
+                exit_noi = dec(exit_year_data.get("net_operating_income", 0))
+                used_year = exit_year
         else:
             prior_year = str(int(exit_year) - 1)
             prior_year_data = next((y for y in cashflow_by_year if y["year"] == prior_year), None)
             if prior_year_data:
-                forward_noi = dec(prior_year_data.get("net_operating_income", 0))
-            elif cashflow_by_year:
-                forward_noi = dec(cashflow_by_year[-2].get("net_operating_income", 0)) if len(cashflow_by_year) > 1 else Decimal("0")
+                exit_noi = dec(prior_year_data.get("net_operating_income", 0))
+                used_year = prior_year
+            elif len(cashflow_by_year) > 1:
+                exit_noi = dec(cashflow_by_year[-2].get("net_operating_income", 0))
+                used_year = str(cashflow_by_year[-2]["year"])
+        window = {
+            "start": f"{used_year}-01" if used_year else None,
+            "end": f"{used_year}-12" if used_year else None,
+            "months": 12 if used_year else 0,
+            "basis": EXIT_NOI_WINDOW_TRAILING,
+            "requested": noi_window,
+        }
 
     # Gross sale price
     if exit_cap_rate > 0:
-        gross_sale_price = forward_noi / exit_cap_rate
+        gross_sale_price = exit_noi / exit_cap_rate
     else:
         gross_sale_price = Decimal("0")
 
@@ -138,7 +198,10 @@ def compute_exit_proceeds(
     return {
         "exit_month": exit_month,
         "exit_month_idx": exit_month_idx,
-        "forward_noi": round2(forward_noi),
+        "exit_noi": round2(exit_noi),
+        # The earlier name of exit_noi, kept for its consumers.
+        "forward_noi": round2(exit_noi),
+        "exit_noi_window": window,
         "gross_sale_price": round2(gross_sale_price),
         "sale_costs": round2(sale_costs),
         "loan_payoff": round2(loan_payoff),
@@ -510,6 +573,7 @@ def compute_metrics(
     exit_assumptions: Optional[Dict[str, Any]] = None,
     fund_by_year: Optional[List[Dict[str, Any]]] = None,
     dscr_basis: Optional[str] = None,
+    projected_noi_by_month: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Compute investment performance metrics.
@@ -525,6 +589,10 @@ def compute_metrics(
             (``engine/modules/loan_sizing.py``); None is the house default,
             underwritten NCF after the below-NOI capex charge. The NOI-based
             DSCR is always reported beside it (``dscr.noi_before_capex``).
+        projected_noi_by_month: NOI rows for the months past the analysis end
+            (the engine's one-year projection), so a forward exit NOI window
+            (``exit_assumptions.noi_window``) can reach past the exit. See
+            ``compute_exit_proceeds``.
 
     Returns:
         Dict with irr, equity_multiple, dscr, cash_on_cash, exit, yields
@@ -566,6 +634,7 @@ def compute_metrics(
         purchase_assumptions=purchase_assumptions,
         exit_assumptions=exit_assumptions,
         cashflow_by_month=cashflow_by_month,
+        projected_noi_by_month=projected_noi_by_month,
     )
     net_sale_proceeds = dec(exit_result.get("net_sale_proceeds", 0))
     exit_month_idx = exit_result.get("exit_month_idx", len(time_grid.month_ids) - 1)

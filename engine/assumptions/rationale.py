@@ -171,6 +171,13 @@ SOURCE_RATIONALES: dict[str, str] = {
         "capex and the lender reserve), so an older building that needs more capital carries a smaller loan. "
         "The NOI-based coverage is shown beside it, and the analyst can choose another basis."
     ),
+    "house:exit_noi_window": (
+        "A buyer prices a property on the income it will earn after the purchase, not on what it earned "
+        "before, so the house values the exit on forward NOI: the projected NOI for the year after the sale "
+        "over the exit cap rate. That year is built the same way as the hold (rent growth, vacancy and credit "
+        "at their stabilized levels, expense growth), but only the sale price uses it; the hold's cash flows "
+        "still end at the sale. The analyst can value the exit on the trailing year instead."
+    ),
     "house:deferred_capex": (
         "Without a property condition assessment or an analyst budget there is no evidence of what must "
         "be fixed at closing, so nothing is budgeted at close and the entry is flagged. Inspect the asset "

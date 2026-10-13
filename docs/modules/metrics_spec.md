@@ -83,9 +83,13 @@ cash_on_cash_year = annual_leveraged_cf / initial_equity
 ### Exit Calculations
 
 ```python
-# Projected sale price using forward NOI
-forward_noi = trailing_12_month_noi  # or stabilized NOI
-gross_sale_price = forward_noi / exit_cap_rate
+# Projected sale price on the exit NOI (ADR 0003 decision n).
+# exit_assumptions.noi_window = "forward" (default): the projected NOI for the
+# 12 months after the exit month (the engine projects one year past the
+# analysis end for NOI only); "trailing": the 12 months ending at the exit
+# month. forward_noi_override, when set, wins over both.
+exit_noi = forward_12_month_noi  # or trailing_12_month_noi, or the override
+gross_sale_price = exit_noi / exit_cap_rate
 
 # Net proceeds
 sale_costs = gross_sale_price * sale_cost_percent
@@ -125,7 +129,10 @@ net_sale_proceeds = gross_sale_price - sale_costs - loan_payoff
     },
     "exit": {
       "exit_month": "2030-12",
+      "exit_noi": 850000,
       "forward_noi": 850000,
+      "exit_noi_window": {"start": "2031-01", "end": "2031-12", "months": 12,
+                          "basis": "forward", "requested": "forward"},
       "gross_sale_price": 15454545.45,
       "sale_costs": 309090.91,
       "loan_payoff": 9500000.00,

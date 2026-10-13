@@ -103,13 +103,21 @@ nothing. The CLI summary prints the exit cap and how it was set.
 `summary.exit_cap_sensitivity` (also `results.exit_cap_sensitivity`) reports
 the solved case at `HOUSE_EXIT_CAP_SENSITIVITY_OFFSETS_BPS` (-50, -25, 0, +25,
 +50, +75, +100, +150 bps) around the solved exit cap: `{base_exit_cap_rate,
-offsets_bps, rule, purchase_price, exit_month, forward_noi,
+offsets_bps, rule, purchase_price, exit_month, forward_noi, exit_noi_window,
 cash_on_cash_year_1, points}`, each point `{offset_bps, exit_cap_rate,
 exit_value, sale_costs, net_sale_proceeds, unlevered_irr, levered_irr,
 unlevered_em, levered_em, is_base}`. Each point pins its exit cap at the solved
 price: an entry-anchored exit cap is not re-measured per point. The 0 bps point
 is the solved case; year-1 cash-on-cash does not move with the exit cap and is
 shown once. The CLI prints levered IRR across the grid.
+
+Every point, like the solved case, is valued on the case's exit NOI
+(`forward_noi` here; `results.metrics.exit.exit_noi`): by default forward NOI,
+the projected NOI for the 12 months after the exit month (ADR 0003 decision
+(n); `exit_noi_window` names the months), or the trailing 12 months when the
+canonical sets `exit_assumptions.noi_window: trailing`. The exit NOI window
+does not change cash-on-cash or the going-in cap, so a cash-on-cash solve
+prices the same on either window; only the IRRs at the solved price move.
 
 Floors compare annual dollars: opex lines are annualized from their
 `calculation_type` first, and a floor replaces the analyst's matching line

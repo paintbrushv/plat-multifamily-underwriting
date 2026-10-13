@@ -791,11 +791,13 @@ completed (f):
    charge that consumes the NOI sizes no loan rather than falling back to
    LTV. A DSCR-sized stabilized refinance (`refi_event`) uses the same basis
    on forward NOI, as lenders underwrite a refi on forward NCF: the projected
-   NOI for the 12 months from the refi month (annualized when fewer remain in
-   the analysis) less the same forward year's deduction, so NOI and deduction
-   cover the same months (`results.refi`: `noi_used`, `below_noi_deduction`,
-   `sizing_cash_flow`, `sizing_noi_basis`, `deduction_window`, and
-   `noi_window` with its `start`, `end`, `months` and `forward`). An
+   NOI for the 12 months from the refi month less the same forward year's
+   deduction, so NOI and deduction cover the same months (`results.refi`:
+   `noi_used`, `below_noi_deduction`, `sizing_cash_flow`, `sizing_noi_basis`,
+   `deduction_window`, and `noi_window` with its `start`, `end`, `months` and
+   `forward`). Near the end of the analysis the window was annualized from
+   the months left; since decision n it continues into the engine's
+   projected year past the analysis end (`noi_projected_months`). An
    LTV-sized refi values the property on the same forward NOI over the cap
    rate, before capex like the exit value. `refi_event.noi_window` is
    `forward` by default; `trailing` opts into the `noi_months` before the
@@ -832,6 +834,38 @@ completed (f):
     (`summary.exit_cap_sensitivity`) and CLI report the grid at the solved
     price. The scenario, tornado and portfolio stress runs already pin the
     exit cap they set (they run the engine without re-resolving).
+14. **(n) Exit valued on forward NOI (UPL-95).** A buyer prices the asset on
+    the income it will earn, so the exit value is the projected NOI for the
+    12 months after the exit month over the exit cap (NOI before capex, as
+    before; sale costs unchanged). Previously the engine labeled its exit
+    NOI `forward_noi` but summed the 12 months ending at the exit month,
+    because the analysis grid ends at the exit. The engine now projects one
+    more year past the analysis end for NOI only
+    (`EXIT_NOI_PROJECTION_MONTHS`), rebuilding revenue, opex and utility
+    recovery with the same code as the hold: the rent growth vector (its
+    last value repeating), every curve that reaches the analysis end
+    (vacancy, loss to lease, collection loss, concessions, programs) at its
+    terminal value, opex growth by line from the analysis start (so real
+    estate tax keeps its growth after the reassessment) and the management
+    fee on EGI. An analyst-authored rent curve stays authoritative over its
+    own months; past them its terminal rent grows at the deal's growth.
+    Renovation programs stop at the analysis end. The projected months never
+    enter the hold's cash flows, debt, capital plan charge, DSCR or
+    cash-on-cash: only the reversion moves, and with it the IRRs and equity
+    multiples. The going-in cap stays year-1 NOI / price, so the
+    entry-anchored exit cap is unchanged, and a cash-on-cash backsolve
+    solves the same price (its IRRs at that price rise with forward NOI on a
+    growing deal). `metrics.exit` discloses `exit_noi` (with `forward_noi`
+    kept as an alias) and `exit_noi_window` (`start`, `end`, `months`,
+    `basis`: `forward`, `trailing` or `override`, and the `requested`
+    window); the exit-cap grid values every point on the same NOI.
+    `exit_assumptions.noi_window` is an overridable assumption
+    (`exit_noi_window`, house default `HOUSE_EXIT_NOI_WINDOW` = `forward`,
+    source `house:exit_noi_window`); `trailing` reproduces the previous
+    valuation exactly, and `forward_noi_override` still wins over both. A
+    stabilized refi whose forward year runs past the analysis end (decision
+    k) now reads the projected months for its NOI and below-NOI deduction
+    instead of annualizing the months left (`results.refi.noi_projected_months`).
 
 Three decisions on deferred maintenance and PCA evidence:
 

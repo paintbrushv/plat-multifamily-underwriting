@@ -428,12 +428,16 @@ def size_refi_loan(
     *,
     noi_basis: Optional[str] = None,
     charge_by_month: Optional[List[Dict[str, Any]]] = None,
+    projected_by_month: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Size a permanent loan from stabilized NOI and compute refi proceeds.
 
     The sizing NOI is forward NOI: the projected NOI for the 12 months from
-    the trigger month, annualized when fewer remain in the analysis, as a
-    lender underwrites a refi on forward NCF. ``refi_event.noi_window =
+    the trigger month, as a lender underwrites a refi on forward NCF. Near the
+    end of the analysis the window continues into ``projected_by_month`` (the
+    engine's one-year NOI projection past the analysis end, ADR 0003 decision
+    n; its rows carry the below-NOI charge too) and is annualized only when
+    fewer than 12 months are available even then. ``refi_event.noi_window =
     "trailing"`` opts into the ``noi_months`` (default 12) before the trigger
     month instead. DSCR sizing uses the ``loan_sizing_noi_basis`` (ADR 0003
     §3; ``None`` is the house default, underwritten NCF after the below-NOI
@@ -452,6 +456,9 @@ def size_refi_loan(
         charge_by_month: Optional below-NOI charge rows (``month``,
             ``replacement_reserves``, ``replacement_reserve_floor``) that
             override the cash flow's, for the lender-reserve basis.
+        projected_by_month: Optional NOI rows (with their below-NOI charge)
+            for the months after the cash flow ends; only the forward window
+            reads them.
 
     Returns:
         Dict with:
@@ -465,6 +472,8 @@ def size_refi_loan(
             used), sizing_noi_basis and deduction_window
           - noi_window: ``start``/``end`` months of the NOI window, its
             ``months`` (annualized when under 12) and ``forward``
+          - noi_projected_months: how many of the forward window's months
+            come from the projection past the analysis end
     """
     trigger_month = refi_event["trigger_month"][:7]  # Normalize to YYYY-MM
     sizing_method = refi_event["sizing_method"]
@@ -486,10 +495,16 @@ def size_refi_loan(
     if trigger_idx is None:
         raise ValueError(f"refi_event trigger_month {trigger_month} not found in cashflow")
 
-    # The forward year: the 12 months from the refi month, fewer near the end
-    # of the analysis. Both the sizing NOI (by default) and the below-NOI
-    # deduction are taken over it.
-    forward = cashflow_by_month[trigger_idx:trigger_idx + 12]
+    # The forward year: the 12 months from the refi month, continued into the
+    # projection past the analysis end; fewer only without one. Both the
+    # sizing NOI (by default) and the below-NOI deduction are taken over it.
+    forward = list(cashflow_by_month[trigger_idx:trigger_idx + 12])
+    projected_months = 0
+    if len(forward) < 12 and projected_by_month:
+        last = str(cashflow_by_month[-1]["month"])[:7]
+        beyond = [row for row in projected_by_month if str(row["month"])[:7] > last][:12 - len(forward)]
+        forward += beyond
+        projected_months = len(beyond)
 
     def _annualized_noi(rows: List[Dict[str, Any]]) -> Decimal:
         total = sum((dec(r.get("net_operating_income", 0)) for r in rows), Decimal("0"))
@@ -606,6 +621,7 @@ def size_refi_loan(
             if sizing_method == "dscr" and forward else None
         ),
         "noi_window": noi_window_disclosure,
+        "noi_projected_months": projected_months if noi_window == REFI_NOI_WINDOW_FORWARD else 0,
         "sizing_method": sizing_method,
         "trigger_month": trigger_month,
     }

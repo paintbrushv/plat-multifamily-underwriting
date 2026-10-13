@@ -166,10 +166,11 @@ python runs/ingest_deal.py --property-id SYN-A \
   override); the NOI-based DSCR is reported beside it
   (`metrics.dscr.noi_before_capex`). A DSCR-sized refinance (`refi_event`) and
   the feasibility DSCR floors use the same basis; the refinance sizes on
-  forward NOI, the 12 months from the refi month (annualized near the end of
-  the analysis), less the same year's charge, and an LTV-sized refinance
-  values the property on that forward NOI (`results.refi.noi_window`;
-  `refi_event.noi_window: trailing` opts into the trailing `noi_months`).
+  forward NOI, the 12 months from the refi month (reading the projected year
+  past the analysis end when it runs past it), less the same year's charge,
+  and an LTV-sized refinance values the property on that forward NOI
+  (`results.refi.noi_window`; `refi_event.noi_window: trailing` opts into the
+  trailing `noi_months`).
 - `--deferred-maintenance` also raises the house minimums for physical
   vacancy, collection loss, year-1 concessions and R&M to the upper part of
   their vintage bands (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and
@@ -188,6 +189,16 @@ python runs/ingest_deal.py --property-id SYN-A \
   around the exit cap it ran with (`HOUSE_EXIT_CAP_SENSITIVITY_OFFSETS_BPS`),
   each point pinned, with exit value, net sale proceeds, IRR and equity
   multiples per point.
+
+  The exit is valued on forward NOI, as a buyer prices it: the projected NOI
+  for the 12 months after the exit month over the exit cap (ADR 0003
+  decision (n)). The engine projects that year past the analysis end for NOI
+  only, with the hold's rent growth, curves at their terminal values and
+  opex growth; the hold's cash flows, DSCR and cash-on-cash still end at the
+  exit. `metrics.exit.exit_noi_window` shows the months used, and
+  `exit_assumptions.noi_window: trailing` (the `exit_noi_window` row of the
+  assumptions sheet) values the exit on the 12 months ending at the exit
+  month instead.
 
 **2. Review** `output/deal.assumptions.json` (one row per assumption: value,
 unit, source, basis, default, override, delta, guardrail). Rows sourced from

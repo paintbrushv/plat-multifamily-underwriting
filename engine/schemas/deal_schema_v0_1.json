@@ -899,7 +899,13 @@
         "exit_cap_rate": { "type": "number", "minimum": 0, "maximum": 1 },
         "sale_cost_percent": { "type": "number", "minimum": 0, "maximum": 1 },
         "exit_month": { "$ref": "#/$defs/month" },
-        "forward_noi_override": { "type": "number", "minimum": 0 }
+        "forward_noi_override": { "type": "number", "minimum": 0 },
+        "noi_window": {
+          "type": "string",
+          "enum": ["forward", "trailing"],
+          "default": "forward",
+          "description": "NOI the exit value is computed on (exit value = NOI / exit_cap_rate). House default 'forward': the projected NOI for the 12 months after exit_month (the engine projects that year for NOI only; hold cash flows end at the exit). 'trailing' opts into the 12 months ending at exit_month. forward_noi_override, when set, wins over both."
+        }
       }
     },
     "purchase_assumptions": {
