@@ -76,14 +76,24 @@ def test_explicit_time_varying_curve_is_not_grown_again(minimal_deal_inputs):
     prebuilt = _run(deal, 0.0)
     with_growth = _run(deal, 0.03)
 
-    assert with_growth["metrics"]["exit"] == prebuilt["metrics"]["exit"]
+    # Over the curve's own months growth is not stacked: the hold is identical.
+    assert with_growth["rent_growth"]["market_rent_curve"] == prebuilt["rent_growth"]["market_rent_curve"]
+    assert [m["net_operating_income"] for m in with_growth["cashflow"]["by_month"]] == [
+        m["net_operating_income"] for m in prebuilt["cashflow"]["by_month"]
+    ]
+    assert with_growth["metrics"]["noi"] == prebuilt["metrics"]["noi"]
     assert with_growth["rent_growth"]["applied_to_cohorts"] == []
     assert with_growth["rent_growth"]["explicit_curve_cohorts"] == ["1BR", "2BR"]
+    # The exit is valued on the year after the hold, past the authored curve: its
+    # terminal rent is carried forward at the deal's growth rate (ADR 0003 decision n).
+    assert with_growth["metrics"]["exit"]["exit_noi"] > prebuilt["metrics"]["exit"]["exit_noi"]
 
-    # The pre-built curve and the engine-expanded flat curve agree.
+    # The pre-built curve and the engine-expanded flat curve agree. The authored
+    # rents are rounded to the cent, and the projected year compounds from the
+    # rounded terminal rent, so allow a few cents a unit a month.
     expanded = _run(minimal_deal_inputs, 0.03)
     assert with_growth["metrics"]["exit"]["forward_noi"] == pytest.approx(
-        expanded["metrics"]["exit"]["forward_noi"], abs=1.0
+        expanded["metrics"]["exit"]["forward_noi"], abs=25.0
     )
 
 
