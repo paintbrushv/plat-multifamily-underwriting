@@ -17,6 +17,11 @@ from typing import Any, Dict, List, Optional
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, get_total_units, month_id, round2, parse_month
 
+# Decimal constants of the per-category, per-month loops, built once.
+_ZERO = Decimal("0")
+_ONE = Decimal("1")
+_TWELVE = Decimal("12")
+
 
 @dataclass(frozen=True)
 class OpexCategoryMonthResult:
@@ -52,12 +57,12 @@ def _compute_phased_growth(
     means 0% growth for year 1, then 2% growth from year 2 onward.
     """
     if effective_years <= 0:
-        return Decimal("1")
+        return _ONE
 
-    factor = Decimal("1")
+    factor = _ONE
     for yr in range(1, effective_years + 1):
         # Find the applicable phase for this year
-        rate = Decimal("0")
+        rate = _ZERO
         for phase in phases:
             if "through_year" in phase and yr <= phase["through_year"]:
                 rate = dec(phase["rate"])
@@ -65,13 +70,13 @@ def _compute_phased_growth(
             elif "from_year" in phase and yr >= phase["from_year"]:
                 rate = dec(phase["rate"])
                 # Don't break — later phases might override
-        factor *= (Decimal("1") + rate)
+        factor *= (_ONE + rate)
     return factor
 
 
 def _get_total_sqft(unit_cohorts: List[Dict[str, Any]]) -> Decimal:
     """Sum total square footage across all cohorts."""
-    total = Decimal("0")
+    total = _ZERO
     for c in unit_cohorts:
         unit_count = dec(c["unit_count"])
         sqft = dec(c.get("sqft", 0))
@@ -104,35 +109,35 @@ def _calculate_expense_for_month(
     if growth_phases:
         growth_factor = _compute_phased_growth(growth_phases, effective_growth_years)
     else:
-        growth_factor = (Decimal("1") + growth_rate) ** effective_growth_years
+        growth_factor = (_ONE + growth_rate) ** effective_growth_years
     adjusted_base = base_value * growth_factor
 
     # Calculate expense based on calculation type
     if calc_type == "fixed_annual":
         # base_value is total annual, spread evenly
-        expense = adjusted_base / Decimal("12")
+        expense = adjusted_base / _TWELVE
     elif calc_type == "fixed_monthly":
         # base_value is monthly amount
         expense = adjusted_base
     elif calc_type == "per_unit":
         # base_value is annual $/unit
-        expense = adjusted_base * total_units / Decimal("12")
+        expense = adjusted_base * total_units / _TWELVE
     elif calc_type == "per_unit_monthly":
         # base_value is monthly $/unit
         expense = adjusted_base * total_units
     elif calc_type == "per_sqft":
         # base_value is annual $/sqft
-        expense = adjusted_base * total_sqft / Decimal("12")
+        expense = adjusted_base * total_sqft / _TWELVE
     elif calc_type == "percent_egr":
         # base_value is percentage (0.04 = 4%)
         if revenue_for_month is None:
-            expense = Decimal("0")
+            expense = _ZERO
         else:
             expense = adjusted_base * revenue_for_month
     elif calc_type == "percent_rent":
         # Same as percent_egr for now (rent is primary revenue)
         if revenue_for_month is None:
-            expense = Decimal("0")
+            expense = _ZERO
         else:
             expense = adjusted_base * revenue_for_month
     else:
@@ -211,13 +216,19 @@ def compute_opex(
             )
             by_category_by_month.append(result)
 
+    # Each month's results in category order (the order the scans below used to
+    # filter them in), grouped once instead of rescanning every result per month.
+    results_by_month: Dict[str, List[OpexCategoryMonthResult]] = {}
+    for r in by_category_by_month:
+        results_by_month.setdefault(r.month, []).append(r)
+
     # Aggregate totals by month
     totals_by_month: List[Dict[str, Any]] = []
     for month in time_grid.month_ids:
-        month_results = [r for r in by_category_by_month if r.month == month]
-        total = sum((r.expense for r in month_results), Decimal("0"))
-        recoverable = sum((r.expense for r in month_results if r.recoverable), Decimal("0"))
-        non_recoverable = sum((r.expense for r in month_results if not r.recoverable), Decimal("0"))
+        month_results = results_by_month.get(month, [])
+        total = sum((r.expense for r in month_results), _ZERO)
+        recoverable = sum((r.expense for r in month_results if r.recoverable), _ZERO)
+        non_recoverable = sum((r.expense for r in month_results if not r.recoverable), _ZERO)
         totals_by_month.append(
             {
                 "month": month,
@@ -230,11 +241,13 @@ def compute_opex(
     # Aggregate totals by year
     totals_by_year: List[Dict[str, Any]] = []
     for year in time_grid.year_ids:
-        year_months = [m for m in time_grid.month_ids if m.startswith(year)]
-        year_results = [r for r in by_category_by_month if r.month in year_months]
-        total = sum((r.expense for r in year_results), Decimal("0"))
-        recoverable = sum((r.expense for r in year_results if r.recoverable), Decimal("0"))
-        non_recoverable = sum((r.expense for r in year_results if not r.recoverable), Decimal("0"))
+        # by_category_by_month is month-major, so this is its year slice in order.
+        year_results = [
+            r for m in time_grid.month_ids if m.startswith(year) for r in results_by_month.get(m, [])
+        ]
+        total = sum((r.expense for r in year_results), _ZERO)
+        recoverable = sum((r.expense for r in year_results if r.recoverable), _ZERO)
+        non_recoverable = sum((r.expense for r in year_results if not r.recoverable), _ZERO)
         totals_by_year.append(
             {
                 "year": year,

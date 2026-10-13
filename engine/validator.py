@@ -65,7 +65,55 @@ def _no_additional_properties(validator, aP, instance, schema):
         yield error
 
 
-StrictDraft202012Validator = extend(Draft202012Validator, {"additionalProperties": _no_additional_properties})
+class _NoFingerprint(Exception):
+    """A value ``_fingerprint`` does not cover: defer to jsonschema's own check."""
+
+
+def _fingerprint(value: Any) -> Any:
+    """A hashable key with ``equal(a, b)`` implying ``_fingerprint(a) == _fingerprint(b)``.
+
+    Mirrors ``jsonschema._utils.equal``: strings compare as strings, bools
+    never equal numbers, 1 equals 1.0, sequences compare element-wise and
+    mappings by key regardless of order.
+    """
+    if isinstance(value, str):
+        return ("s", value)
+    if value is True or value is False:
+        return ("b", value)
+    if value is None:
+        return ("z",)
+    if isinstance(value, (int, float)):
+        return ("n", value)
+    if isinstance(value, (list, tuple)):
+        return ("l", tuple(_fingerprint(item) for item in value))
+    if isinstance(value, dict):
+        return ("m", frozenset((key, _fingerprint(item)) for key, item in value.items()))
+    raise _NoFingerprint
+
+
+def _unique_items(validator, uI, instance, schema):
+    """``uniqueItems`` with a linear fast path for arrays whose items are all distinct.
+
+    jsonschema compares unsortable items (objects: every curve segment) pair
+    by pair, quadratic in the array. Distinct fingerprints prove the items
+    unique, so the check passes as jsonschema's would; on any fingerprint
+    collision, or a value without one, jsonschema's own check decides, with
+    its own error.
+    """
+    if uI and validator.is_type(instance, "array"):
+        try:
+            distinct = len({_fingerprint(item) for item in instance}) == len(instance)
+        except (_NoFingerprint, RecursionError, TypeError):
+            distinct = False
+        if distinct:
+            return
+    yield from Draft202012Validator.VALIDATORS["uniqueItems"](validator, uI, instance, schema)
+
+
+StrictDraft202012Validator = extend(
+    Draft202012Validator,
+    {"additionalProperties": _no_additional_properties, "uniqueItems": _unique_items},
+)
 
 
 def validate_schema(inputs: Dict[str, Any]) -> List[ValidationIssue]:

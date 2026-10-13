@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from typing import List, Optional
+
+
+_CENT = Decimal("0.01")
+_BASIS_POINT = Decimal("0.0001")
 
 
 def dec(value) -> Decimal:
@@ -12,17 +17,26 @@ def dec(value) -> Decimal:
 
 
 def round2(value: Decimal) -> float:
-    q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    q = value.quantize(_CENT, rounding=ROUND_HALF_UP)
     return float(q)
 
 
 def round4(value: Decimal) -> float:
     """4 decimal places for rates/percentages (e.g. 0.0525 = 5.25%)."""
-    q = value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    q = value.quantize(_BASIS_POINT, rounding=ROUND_HALF_UP)
     return float(q)
 
 
 def parse_month(value: str) -> date:
+    # Months are parsed millions of times per run (every curve lookup), from a
+    # handful of distinct strings: memoize str input. ``date`` is immutable, and
+    # a bad value still raises on every call (lru_cache does not cache errors).
+    if type(value) is str:
+        return _parse_month_cached(value)
+    return _parse_month(value)
+
+
+def _parse_month(value: str) -> date:
     value = value.strip()
     if len(value) == 7 and value[4] == "-":
         year = int(value[0:4])
@@ -38,9 +52,79 @@ def parse_month(value: str) -> date:
     return date(year, month, 1)
 
 
+_parse_month_cached = lru_cache(maxsize=4096)(_parse_month)
+
+
 def month_id(value: str) -> str:
-    d = parse_month(value)
+    """``YYYY-MM`` for a month or first-of-month date string (memoized for str input)."""
+    if type(value) is str:
+        return _month_id_cached(value)
+    return _month_id(value)
+
+
+def _month_id(value: str) -> str:
+    d = _parse_month(value)
     return f"{d.year:04d}-{d.month:02d}"
+
+
+_month_id_cached = lru_cache(maxsize=4096)(_month_id)
+
+
+class CurveLookup:
+    """One curve's ``start_period``/``end_period`` segments, looked up by month.
+
+    Equivalent to scanning ``rows`` for the one segment covering a month on
+    every call (a missing month raises ``KeyError``, overlapping segments raise
+    ``ValueError``), but each row's period is parsed once, on the first lookup,
+    and each month's value is computed once. Errors are never cached: a lookup
+    that raised raises again. A curve with a row whose period does not parse
+    is scanned row by row on every lookup, exactly as before, so it raises the
+    same error at the same lookup. ``rows`` must not change while in use.
+    """
+
+    __slots__ = ("_rows", "_value_field", "_segments", "_values")
+
+    def __init__(self, rows: List[dict], value_field: str):
+        self._rows = rows
+        self._value_field = value_field
+        self._segments: Optional[List[tuple]] = None  # None: not parsed yet; False: unparseable
+        self._values: dict = {}
+
+    def __call__(self, month: str) -> Decimal:
+        month = month_id(month)
+        values = self._values
+        if month in values:
+            return values[month]
+        segments = self._segments
+        if segments is None:
+            try:
+                segments = [(month_id(row["start_period"]), month_id(row["end_period"]), row) for row in self._rows]
+            except Exception:
+                segments = False
+            self._segments = segments
+        if segments is False:
+            matches = [
+                row
+                for row in self._rows
+                if month_id(row["start_period"]) <= month <= month_id(row["end_period"])
+            ]
+        else:
+            matches = [row for start, end, row in segments if start <= month <= end]
+        value_field = self._value_field
+        if not matches:
+            raise KeyError(f"Missing curve value for month={month} field={value_field}")
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous curve lookup for month={month}: {len(matches)} overlapping segments. "
+                f"Validator should have caught this; check augmented_curves invariants."
+            )
+        value = values[month] = dec(matches[0][value_field])
+        return value
+
+
+def find_curve_value(curve_rows: List[dict], month: str, value_field: str) -> Decimal:
+    """The value of the one segment of ``curve_rows`` covering ``month`` (see ``CurveLookup``)."""
+    return CurveLookup(curve_rows, value_field)(month)
 
 
 def get_total_units(unit_cohorts: List[dict]) -> Decimal:

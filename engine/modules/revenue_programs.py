@@ -4,24 +4,11 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from engine.modules.time_grid import TimeGrid
-from engine.modules.util import dec, month_id, round2
+from engine.modules.util import CurveLookup, dec, find_curve_value, month_id, round2
 
 
 def _find_curve_value(curve_rows: List[Dict[str, Any]], month: str, value_field: str) -> Decimal:
-    month = month_id(month)
-    matches = [
-        row
-        for row in curve_rows
-        if month_id(row["start_period"]) <= month <= month_id(row["end_period"])
-    ]
-    if not matches:
-        raise KeyError(f"Missing curve value for month={month} field={value_field}")
-    if len(matches) > 1:
-        raise ValueError(
-            f"Ambiguous curve lookup for month={month}: {len(matches)} overlapping segments. "
-            f"Validator should have caught this; check augmented_curves invariants."
-        )
-    return dec(matches[0][value_field])
+    return find_curve_value(curve_rows, month, value_field)
 
 
 def _program_is_active(program: Dict[str, Any], month: str) -> bool:
@@ -65,6 +52,8 @@ def compute_program_revenue(
         cid: [r for r in loss_to_lease or [] if r["cohort_id"] == cid]
         for cid in units_by_cohort
     }
+    mr_lookup = {cid: CurveLookup(rows, "market_rent") for cid, rows in mr_by_cohort.items()}
+    ltl_lookup = {cid: CurveLookup(rows, "ltl_percent") for cid, rows in ltl_by_cohort.items()}
 
     def current_unit_count(cohort_id: str, month: str) -> Decimal:
         if dynamic_unit_counts and cohort_id in dynamic_unit_counts:
@@ -76,8 +65,8 @@ def compute_program_revenue(
 
     def current_rent_for_cohort(cohort_id: str, month: str) -> Decimal:
         if mr_by_cohort.get(cohort_id) and ltl_by_cohort.get(cohort_id):
-            market_rent = _find_curve_value(mr_by_cohort[cohort_id], month, "market_rent")
-            ltl = _find_curve_value(ltl_by_cohort[cohort_id], month, "ltl_percent")
+            market_rent = mr_lookup[cohort_id](month)
+            ltl = ltl_lookup[cohort_id](month)
             return market_rent * (Decimal("1") - ltl)
         return rent_by_cohort.get(cohort_id, Decimal("0"))
 
@@ -95,19 +84,28 @@ def compute_program_revenue(
     adoption_by_program = {}
     for p in revenue_programs:
         adoption_by_program[p["program_id"]] = [r for r in program_adoption_curve if r["program_id"] == p["program_id"]]
+    adoption_lookup = {pid: CurveLookup(rows, "adoption_rate") for pid, rows in adoption_by_program.items()}
+
+    vacancy_lookup: Dict[Any, CurveLookup] = {}
+
+    def cohort_vacancy(cohort_id: Any) -> CurveLookup:
+        if cohort_id not in vacancy_lookup:
+            rows = [r for r in physical_vacancy_curve if r.get("cohort_id") == cohort_id]
+            vacancy_lookup[cohort_id] = CurveLookup(rows, "vacancy_rate")
+        return vacancy_lookup[cohort_id]
 
     capacity_by_program: Dict[str, Decimal] = {}
     for row in program_capacity or []:
         capacity_by_program[row["program_id"]] = dec(row["total_capacity"])
 
-    cl_programs = [r for r in collection_loss_curve if r["applies_to"] == "Programs"]
-    cl_all = [r for r in collection_loss_curve if r["applies_to"] == "ALL"]
+    cl_programs = CurveLookup([r for r in collection_loss_curve if r["applies_to"] == "Programs"], "loss_rate")
+    cl_all = CurveLookup([r for r in collection_loss_curve if r["applies_to"] == "ALL"], "loss_rate")
 
     def loss_rate_for_programs(month: str) -> Decimal:
         try:
-            return _find_curve_value(cl_programs, month, "loss_rate")
+            return cl_programs(month)
         except KeyError:
-            return _find_curve_value(cl_all, month, "loss_rate")
+            return cl_all(month)
 
     cl_rate_by_month = {m: loss_rate_for_programs(m) for m in time_grid.month_ids}
 
@@ -131,7 +129,7 @@ def compute_program_revenue(
                     raise KeyError(f"eligible_units must be 'ALL' or a valid cohort_id; got: {eligible_units_raw}")
                 eligible_units = units_by_cohort[eligible_units_raw]
 
-            adoption_rate = _find_curve_value(adoption_by_program[program["program_id"]], month, "adoption_rate")
+            adoption_rate = adoption_lookup[program["program_id"]](month)
             billable_units = eligible_units * adoption_rate
             if program["program_id"] in capacity_by_program:
                 billable_units = min(billable_units, capacity_by_program[program["program_id"]])
@@ -161,18 +159,16 @@ def compute_program_revenue(
                 vacancy_rate = Decimal("0")
                 if physical_vacancy_curve:
                     if eligible_units_raw != "ALL" and eligible_units_raw in units_by_cohort:
-                        cohort_vac = [r for r in physical_vacancy_curve if r.get("cohort_id") == eligible_units_raw]
                         try:
-                            vacancy_rate = _find_curve_value(cohort_vac, month, "vacancy_rate")
+                            vacancy_rate = cohort_vacancy(eligible_units_raw)(month)
                         except KeyError:
                             pass
                     elif total_units > 0:
                         # Weighted average vacancy across all cohorts
                         weighted_vac = Decimal("0")
                         for cid, cnt in units_by_cohort.items():
-                            cohort_vac = [r for r in physical_vacancy_curve if r.get("cohort_id") == cid]
                             try:
-                                v = _find_curve_value(cohort_vac, month, "vacancy_rate")
+                                v = cohort_vacancy(cid)(month)
                             except KeyError:
                                 v = Decimal("0")
                             weighted_vac += v * cnt
