@@ -119,6 +119,8 @@ def test_cli_and_api_share_solver_output(economy, tmp_path, monkeypatch):
         # The solved case carries a pricing-mode assumptions section (ADR 0003),
         # so the CLI also writes the assumptions sheet.
         "assumptions": str(tmp_path / "out/assumptions.json"),
+        # The assumption register page with the pricing header (UPL-97).
+        "assumptions_html": str(tmp_path / "out/assumptions.html"),
     }}
 
 

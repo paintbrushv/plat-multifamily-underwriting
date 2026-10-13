@@ -519,6 +519,58 @@ def test_html_escapes_every_injected_text(shapes_canonical):
     assert "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt; &amp; more" in html
 
 
+def _hostile_pricing_summary() -> dict:
+    """A backsolve summary whose every text field carries markup (UPL-97)."""
+    evil = "<script>alert('p')</script>"
+    return {
+        "status": '<b>converged</b>"',
+        "solved_purchase_price": "<img src=x onerror=alert(2)>",
+        "target_cash_on_cash_pct": 0.06,
+        "coc_basis": {"basis": "<i>basis</i>", "source": evil, "analysis_year": "<u>2</u>"},
+        "loan_amount": 1_000_000.0,
+        "loan_sizing": {"basis": "</td><td>sizing", "sizing_method": "<em>m</em>", "source": evil},
+        "exit_cap_calculation": {"mode": "<b>mode</b>", "steal": True, "compression": "<s>c</s>"},
+        "exit_cap_sensitivity": {"rule": "</table>injected", "points": [
+            {"offset_bps": 0, "exit_cap_rate": "<b>cap</b>", "levered_irr": 0.1, "is_base": True},
+        ]},
+        "policy_summary": {
+            "units": "<b>units</b>",
+            "guardrails": {"findings": [{
+                "key": '<i>k</i>" onclick="x', "action": "enforced", "floor": "<b>f</b>",
+                "floor_source": evil, "original": "<s>o</s>", "evidence": "</li><li>injected",
+            }]},
+            "policy_overrides": [{"input": evil, "action": "<b>act</b>", "original": "<q>", "applied": "</ul>"}],
+        },
+    }
+
+
+def test_html_escapes_every_injected_text_in_the_pricing_header(shapes_canonical):
+    from engine.assumptions.register_pricing import pricing_header
+
+    hostile = _hostile(shapes_canonical)
+    html = render_register_html(hostile, pricing=pricing_header(_hostile_pricing_summary(), canonical=hostile))
+    checker = _check(html)
+    assert checker.tags.count("script") == 1  # only the page's own filter script
+    assert 'class="pricing"' in html
+    for raw in ("<script>alert('p')", "<img", "<b>converged</b>", "<i>basis</i>", "</td><td>sizing",
+                "<em>m</em>", "<b>mode</b>", "</table>injected", "<b>cap</b>", "<b>units</b>", "<i>k</i>",
+                "<b>f</b>", "<s>o</s>", "</li><li>injected", "<b>act</b>", "<q>", "<s>c</s>", "<u>2</u>"):
+        assert raw not in html, raw
+    text = "".join(checker.text)
+    assert "<script>alert('p')</script>" in text
+    assert "</li><li>injected" in text and "<b>converged</b>" in text
+
+
+def test_run_deal_page_has_no_pricing_header(shapes_canonical):
+    """The register page without pricing data is unchanged (run_deal, ingest)."""
+    html = render_register_html(shapes_canonical)
+    assert html == render_register_html(shapes_canonical, pricing=None)
+    body = html.split("</style>", 1)[1]  # the stylesheet names the pricing classes
+    assert 'class="pricing"' not in body and "floor-enforced" not in body
+    assert "Enforced in pricing" not in body
+    assert "pricing" not in build_register(shapes_canonical)
+
+
 def test_html_and_register_are_deterministic(shapes_canonical, tmp_path):
     shuffled = copy.deepcopy(shapes_canonical)
     entries = shuffled["assumptions"]["entries"]
