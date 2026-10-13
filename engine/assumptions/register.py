@@ -781,6 +781,7 @@ def build_register(
     *,
     include_candidates: bool = True,
     filter: str = "all",
+    pricing: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """The assumption register of a canonical: a deterministic, JSON-serializable dict.
 
@@ -791,7 +792,9 @@ def build_register(
     ``summary`` always counts every entry; ``filter`` (one of ``FILTERS``)
     only narrows ``rows`` and ``groups``. ``include_candidates=False`` drops
     each row's candidate list (keeping ``candidate_count``) for a bounded
-    response.
+    response. ``pricing`` (``engine.assumptions.register_pricing.pricing_header``
+    of a backsolve summary) adds the pricing summary header as ``pricing``;
+    without it the register has no ``pricing`` key.
     """
     if filter not in FILTERS:
         raise ValueError(f"filter must be one of {FILTERS}")
@@ -810,7 +813,7 @@ def build_register(
         if keys:
             groups.append({"group": group, "keys": keys})
     profile = canonical.get("deal_profile")
-    return {
+    register = {
         "register_version": REGISTER_VERSION,
         "resolver_version": section.get("resolver_version"),
         "mode": section.get("mode"),
@@ -822,3 +825,6 @@ def build_register(
         "groups": groups,
         "rows": rows,
     }
+    if pricing is not None:
+        register["pricing"] = _jsonable(pricing)
+    return register
