@@ -507,15 +507,12 @@ def test_excel_account_code_first_layout_uses_next_text_label(tmp_path):
     path = tmp_path / "account_code_first.xlsx"
     wb.save(path)
 
-    result = parse_t12(path)
+    result, provenance = parse_t12_with_provenance(path)
 
-    names = {c["category_name"] for c in result}
-    assert "Salaries - Manager" in names
-    assert "Salaries - Asst. Manager" in names
-    manager = next(c for c in result if c["category_name"] == "Salaries - Manager")
-    asst = next(c for c in result if c["category_name"] == "Salaries - Asst. Manager")
-    assert manager["base_value"] == 330.0
-    assert asst["base_value"] == 180.0
+    # Salaries are payroll; each line is read by its text label, not its account code.
+    assert [(c["category_name"], c["base_value"]) for c in result] == [("Payroll", 510.0)]
+    assert [(line["label"], line["annual"]) for line in provenance["_line_amounts"]["Payroll"]] == [
+        ("Salaries - Manager", 330.0), ("Salaries - Asst. Manager", 180.0)]
 
 
 def test_excel_annualized_summary_columns_not_double_counted(tmp_path):

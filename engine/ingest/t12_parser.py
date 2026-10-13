@@ -137,6 +137,15 @@ def _is_payroll_benefit_insurance(lowered_label: str) -> bool:
     )
 
 
+# Salaries and wages are payroll whatever they pay for: "Repairs Salaries"
+# and "Grounds Salaries" are labor, not repairs or landscaping expense.
+_PAYROLL_WAGE_RE = re.compile(r"\b(?:salar(?:y|ies)|wages?)\b", re.IGNORECASE)
+
+
+def _is_payroll_line(lowered_label: str) -> bool:
+    return _is_payroll_benefit_insurance(lowered_label) or bool(_PAYROLL_WAGE_RE.search(lowered_label))
+
+
 @dataclass
 class OpexGroup:
     """One hierarchical subsection of an OpEx statement."""
@@ -214,7 +223,7 @@ def _normalize_category(raw_name: str) -> tuple[str, bool]:
     resolve to the most specific category.
     """
     lower = _LEADING_ACCOUNT_CODE_RE.sub("", raw_name.strip().lower())
-    if _is_payroll_benefit_insurance(lower):
+    if _is_payroll_line(lower):
         return "Payroll", False
     best: tuple[int, int, str, int] | None = None  # (pos, -len, canonical, recoverable_rank)
     for pattern, canonical, recoverable in _SORTED_CATEGORY_MAP:
@@ -269,7 +278,7 @@ def _text_indent_level(raw_text: str) -> int:
 def _matches_category_map(text: str) -> str | None:
     """Return the canonical _CATEGORY_MAP hit, or None on no match."""
     lower = _LEADING_ACCOUNT_CODE_RE.sub("", text.strip().lower())
-    if _is_payroll_benefit_insurance(lower):
+    if _is_payroll_line(lower):
         return "Payroll"
     best: tuple[int, int, str, bool] | None = None
     for pattern, canonical, recoverable in _SORTED_CATEGORY_MAP:
