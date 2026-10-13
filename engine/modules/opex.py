@@ -211,10 +211,16 @@ def compute_opex(
             )
             by_category_by_month.append(result)
 
+    # Each month's results in category order (the order the scans below used to
+    # filter them in), grouped once instead of rescanning every result per month.
+    results_by_month: Dict[str, List[OpexCategoryMonthResult]] = {}
+    for r in by_category_by_month:
+        results_by_month.setdefault(r.month, []).append(r)
+
     # Aggregate totals by month
     totals_by_month: List[Dict[str, Any]] = []
     for month in time_grid.month_ids:
-        month_results = [r for r in by_category_by_month if r.month == month]
+        month_results = results_by_month.get(month, [])
         total = sum((r.expense for r in month_results), Decimal("0"))
         recoverable = sum((r.expense for r in month_results if r.recoverable), Decimal("0"))
         non_recoverable = sum((r.expense for r in month_results if not r.recoverable), Decimal("0"))
@@ -230,8 +236,10 @@ def compute_opex(
     # Aggregate totals by year
     totals_by_year: List[Dict[str, Any]] = []
     for year in time_grid.year_ids:
-        year_months = [m for m in time_grid.month_ids if m.startswith(year)]
-        year_results = [r for r in by_category_by_month if r.month in year_months]
+        # by_category_by_month is month-major, so this is its year slice in order.
+        year_results = [
+            r for m in time_grid.month_ids if m.startswith(year) for r in results_by_month.get(m, [])
+        ]
         total = sum((r.expense for r in year_results), Decimal("0"))
         recoverable = sum((r.expense for r in year_results if r.recoverable), Decimal("0"))
         non_recoverable = sum((r.expense for r in year_results if not r.recoverable), Decimal("0"))
