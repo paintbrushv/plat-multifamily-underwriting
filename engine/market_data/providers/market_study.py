@@ -36,9 +36,9 @@ Geography: a ``Geo.metro_slug`` maps to CoStar file prefixes ``<slug>``,
 slug, ``Geo.cbsa_code`` is mapped to one through the feeder's
 ``agents/configs/*.yaml`` (``notes.msa_code`` / ``notes.metro_slug``), then
 ``DEFAULT_CBSA_METROS``. A matching ``submarket`` selects one file; submarket
-names compare on letters and digits only, so ``"Lewisville/Flower Mound"``
-matches both ``<metro>_lewisville_flower_mound`` (``transform_costar_excel.py``)
-and the older ``<metro>_lewisvilleflower_mound`` naming. Otherwise every file
+names compare on letters and digits only, so ``"North Lake/Flats"``
+matches both ``<metro>_north_lake_flats`` (``transform_costar_excel.py``)
+and the older ``<metro>_north_lakeflats`` naming. Otherwise every file
 of the metro is combined (rates and rents weighted by ``inventory_units``;
 unit counts summed), the returned ``Observation.geo`` has no submarket and
 ``attributes["submarket_requested"]`` names the submarket that was not found.
@@ -129,7 +129,7 @@ _CONFIG_SLUG_RE = re.compile(r"""^\s*metro_slug:\s*["']?([A-Za-z0-9_]+)["']?\s*(
 
 
 def compact(value: object) -> str:
-    """Letters and digits only: ``"Lewisville/Flower Mound"`` -> ``lewisvilleflowermound``."""
+    """Letters and digits only: ``"North Lake/Flats"`` -> ``northlakeflats``."""
     return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 

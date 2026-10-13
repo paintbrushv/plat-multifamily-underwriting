@@ -36,7 +36,28 @@ Default order: configured user/paid providers, then
 `plat_market_study_agent`, then `plat_supply_demand`. Override it with
 `PLAT_MARKET_DATA_PROVIDERS=name,name,...` or `default_registry({"providers": [...]})`.
 Parquet reading needs the `market` extra (`pip install ".[market]"`). Without
-it the feeder providers report `available() == False`.
+it the feeder providers report `available() == False`. A feeder provider is
+also unavailable when its root is missing or holds none of its output files
+(both feeders git-ignore their outputs); `unavailable_reason` says which.
+
+Feeder roots (`paths.feeder_root`): the environment variable, then
+`[market_data]` in the user config file (`PLAT_UNDERWRITING_CONFIG`, else
+`~/.config/plat-underwriting/config.toml`), then a sibling of the checkout,
+then a sibling of the main checkout of a git worktree. `default_registry`
+reads `providers`, `comps_paths` and `user_file` from the same table, below
+their environment variables.
+
+## Diagnostics
+
+Feeder providers implement `diagnose(geo)`: the root and where it came from,
+the inventory (CoStar parquet files, ensemble forecasts and their metros,
+comps files; metro configs and forecast metros), the geography match (metro
+slug and how it was found, the CoStar file prefix, the submarket file or the
+submarkets available, the forecast files), the exceptions `get` swallowed,
+and a one-line `summary` of what is missing. `diagnostics.market_data_status`
+combines them with every provider's observations into the status block the
+resolver records (`assumptions.market_data_status`), ingest and run_deal
+print, and `runs/market_data_doctor.py` shows for a geography.
 
 Feeder confidence is used when the feeder publishes one. The ensemble
 diagnostics give `confidence_level` High/Medium/Low. For comps, the

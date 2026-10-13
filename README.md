@@ -278,14 +278,82 @@ them. Neither feeder ships data, and this repository never holds licensed data.
 
 | Variable | Meaning |
 |---|---|
-| `PLAT_MARKET_STUDY_ROOT` | plat-market-study-agent outputs (default: sibling `../plat-market-study-agent`). |
-| `PLAT_SUPPLY_DEMAND_ROOT` | plat-supply-demand forecast parquet (default: sibling `../plat-supply-demand`). |
+| `PLAT_MARKET_STUDY_ROOT` | plat-market-study-agent outputs (default: see *Where the feeders are found*). |
+| `PLAT_SUPPLY_DEMAND_ROOT` | plat-supply-demand forecast parquet (same default rule). |
 | `PLAT_MARKET_DATA_PROVIDERS` | Provider order, comma-separated, e.g. `user_file,plat_market_study_agent,plat_supply_demand`. Default: configured user/paid providers, then the two feeders. |
 | `PLAT_MARKET_DATA_USER_FILE` | An analyst's own CSV/JSON of observations (`user_file` provider). |
+| `PLAT_MARKET_STUDY_COMPS` | comps.json files for the market-study provider, `os.pathsep`-separated. |
+| `PLAT_UNDERWRITING_CONFIG` | The user config file (default `$XDG_CONFIG_HOME/plat-underwriting/config.toml`, else `~/.config/plat-underwriting/config.toml`). |
 
-Without feeder data or a user file, the resolver uses house fallbacks and the
-assumptions sheet flags those rows for review (`house:*` source,
-`review_required: true`).
+**Where the feeders are found.** Each root is the first of: its environment
+variable; the user config file; a sibling of this checkout
+(`../plat-market-study-agent`, or the legacy `../market-study-agent`, and
+`../plat-supply-demand`); and, when this checkout is a git worktree (for
+example `<repo>/.claude/worktrees/<name>`), a sibling of the main checkout.
+Set the roots once in the user config file so they do not depend on where
+the checkout lives:
+
+```toml
+# ~/.config/plat-underwriting/config.toml
+[market_data]
+market_study_root = "/path/to/plat-market-study-agent"
+supply_demand_root = "/path/to/plat-supply-demand"
+# optional:
+# providers = ["user_file", "plat_market_study_agent", "plat_supply_demand"]
+# comps_paths = ["/path/to/deal/outputs/<run_id>/comps/comps.json"]
+# user_file = "/path/to/my_market.json"
+```
+
+Relative paths resolve against the file's folder. Environment variables win
+over the file. Reading it needs Python 3.11+ (or the `tomli` package).
+
+**Check the setup for a geography** before an ingest:
+
+```bash
+python runs/market_data_doctor.py --msa "Larkspur Synthetic MSA" --metro-slug larkspur_sx \
+  --submarket "Larkspur North" [--verbose] [--json]
+```
+
+It prints each provider (available or not and why, its root and where it
+came from, whether the geography matched, the metrics it supplies), each
+assumption slot (supplied by which provider and level, or FELL BACK), and
+for a feeder that supplied nothing, the feeder-repository steps that produce
+its files. It exits 0 when at least one slot is supplied, 1 when none is.
+
+**No silent fallback.** Ingest ends its summary with the same *Market data
+status* block and records it as `assumptions.market_data_status`;
+`runs/run_deal.py` prints it and copies it into `results.json` as
+`metadata.market_data_status`; the assumption register shows a *Market data*
+section. Every house or engine fallback that stands where market data would
+have applied gets a note on its basis (and `detail.market_data`), e.g.
+`Market data fell back: no provider supplied rent_growth_forecast or
+rent_growth_long_run for metro ..., CBSA ..., submarket '...'
+(plat_market_study_agent: ... root ... holds no feeder outputs ...;
+plat_supply_demand: ...)`. Without feeder data or a user file the resolver
+still uses those house fallbacks and the assumptions sheet flags them for
+review (`house:*` source, `review_required: true`).
+
+**The feeders ship no data.** Both feeder repositories git-ignore their
+outputs (`data/paid/` and `reports/*/` in plat-market-study-agent,
+`data/econometrics/forecasts/` in plat-supply-demand), so a fresh clone has
+none of the files below and every slot falls back until they are generated
+there (this repository never writes them):
+
+| Provider | File it reads (under the feeder root) | How the feeder produces it |
+|---|---|---|
+| `plat_market_study_agent` | `data/paid/costar-submarket*/<costar_metro_slug>_<submarket>.parquet` (vacancy, stabilized vacancy, concessions, market cap rate, rents by bed, supply) | `uv run python etl/transform_costar_excel.py --input <CoStar export .xlsx/.csv> --out-dir data/paid/costar-submarket` from a licensed CoStar Market Analytics submarket export |
+| `plat_market_study_agent` | `reports/**/forecasts/v2_ensemble_<tier>.csv` + `model_diagnostics_<tier>.json` (submarket rent-growth forecast) | `uv run python -m etl.submarket_forecast --config <property config.yaml>` (needs `notes.metro_slug`, `costar_submarket.parquet`, `outputs.report_path`) |
+| `plat_market_study_agent` | `comps.json` named by `PLAT_MARKET_STUDY_COMPS` (effective rent by bed) | `agents/runners/emit_comp_finder_envelope.py` (`<deal_root>/outputs/<run_id>/comps/comps.json`) |
+| `plat_supply_demand` | `data/econometrics/forecasts/<metro_id>/<metro_id>_forecast_<vintage>.parquet` (metro rent-growth forecast) | `econ forecast --metro <metro_id>`; reads `data/costar/processed/<costar_market_key>.csv` (licensed CoStar metro export) and FRED/BLS data (`FRED_API_KEY`, `BLS_API_KEY`; `--no-fetch` skips the fetch) |
+
+Geography matching: `--metro-slug` is the generic metro slug (the
+supply-demand `metro_id`, e.g. a `<city>_<state>` slug); the market-study
+provider also tries `<slug>_usa` and the CoStar aliases in
+`DEFAULT_METRO_ALIASES`. A bare CBSA code (`--msa 12345`) maps to a metro
+through the feeders' metro configs. Submarket names compare on letters and
+digits only, so `"North/South Lake"` matches `..._north_south_lake` and
+`..._northsouth_lake`. An unmatched submarket uses the metro aggregate, and
+the status block says so.
 
 **Feed your own market data** with the `user_file` provider: point
 `PLAT_MARKET_DATA_USER_FILE` at a JSON (or CSV) file of observations. Each
