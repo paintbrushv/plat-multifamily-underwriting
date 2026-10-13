@@ -16,8 +16,10 @@ All deals, names and market data are synthetic.
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
+import os
 import sys
 from decimal import Decimal
 from functools import lru_cache
@@ -759,3 +761,51 @@ def test_assumptions_match_the_golden_snapshot(slug):
         f"{slug}: the resolved assumptions differ from {path.name}. If the change is intended, "
         f"run `{dl.REGENERATE_HINT}` and review the diff."
     )
+
+
+# ── engine output snapshot (UPL-96) ──────────────────────────────────────
+
+OUTPUT_SNAPSHOT = dl.DEALS_DIR / "engine_output_snapshot.json"
+OUTPUT_SNAPSHOT_ENV = "PLAT_UPDATE_ENGINE_OUTPUT_SNAPSHOT"
+
+
+def _output_runs() -> dict[str, str]:
+    """Every library deal's full engine results, plus a backsolve of each strategy."""
+    runs = {f"run_underwriting:{slug}": _results(slug) for slug in SLUGS}
+    runs[f"backsolve_price:{STABILIZED}"] = _baseline_a()
+    runs[f"backsolve_price:{VALUE_ADD_RENO}"] = _deal_c_solve()
+    return runs
+
+
+def _digest(value) -> str:
+    return hashlib.sha256(json.dumps(value).encode("utf-8")).hexdigest()
+
+
+def _output_digests(text: str) -> dict[str, str]:
+    """SHA-256 of the whole results JSON and of each top-level section, in key order."""
+    document = json.loads(text)
+    return {"*": _digest(document), **{key: _digest(value) for key, value in document.items()}}
+
+
+def test_engine_outputs_match_the_committed_snapshot():
+    """Performance work must not move a single byte of output: the full results
+    JSON of every library deal, and of a cashflow and a value-add backsolve,
+    hashes to the committed snapshot (whole document and each top-level
+    section, so a failure names the sections that moved). If an output change
+    is intended, regenerate with
+    ``PLAT_UPDATE_ENGINE_OUTPUT_SNAPSHOT=1 pytest tests/test_deal_library.py -k snapshot``
+    and commit the snapshot with that change."""
+    actual = {name: _output_digests(text) for name, text in _output_runs().items()}
+    if os.environ.get(OUTPUT_SNAPSHOT_ENV) == "1":
+        OUTPUT_SNAPSHOT.write_text(json.dumps(actual, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        pytest.skip(f"rewrote {OUTPUT_SNAPSHOT.name}")
+    assert OUTPUT_SNAPSHOT.is_file(), f"missing {OUTPUT_SNAPSHOT.name}; set {OUTPUT_SNAPSHOT_ENV}=1 to write it"
+    expected = json.loads(OUTPUT_SNAPSHOT.read_text(encoding="utf-8"))
+    assert sorted(actual) == sorted(expected)
+    moved = {
+        name: sorted(key for key in set(actual[name]) | set(expected[name])
+                     if actual[name].get(key) != expected[name].get(key))
+        for name in actual
+    }
+    moved = {name: keys for name, keys in moved.items() if keys}
+    assert not moved, f"engine output differs from {OUTPUT_SNAPSHOT.name} in: {moved}"
