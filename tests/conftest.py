@@ -9,19 +9,34 @@ import pytest
 from engine.modules.time_grid import TimeGrid
 
 
+def _isolate_market_data(monkeypatch, empty) -> None:
+    for name in ("PLAT_MARKET_STUDY_ROOT", "PLAT_SUPPLY_DEMAND_ROOT"):
+        monkeypatch.setenv(name, str(empty / name.lower()))
+    # No user config file either (engine.market_data.paths.load_user_config).
+    monkeypatch.setenv("PLAT_UNDERWRITING_CONFIG", str(empty / "no-config.toml"))
+    for name in ("PLAT_MARKET_DATA_PROVIDERS", "PLAT_MARKET_DATA_USER_FILE", "PLAT_MARKET_STUDY_COMPS"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_market_data_session(tmp_path_factory):
+    """The same isolation for module- and session-scoped fixtures (they run
+    before the function-scoped fixture below)."""
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _isolate_market_data(monkeypatch, tmp_path_factory.getbasetemp() / "no-market-data")
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_market_data(monkeypatch, tmp_path_factory):
     """Point the market-data feeders at an empty directory for every test.
 
     Ingest uses ``engine.market_data.default_registry()`` by default, which
-    would otherwise read sibling feeder checkouts on a developer machine. Tests
-    that need market data pass a SyntheticProvider registry explicitly.
+    would otherwise read sibling feeder checkouts or the user config file on
+    a developer machine. Tests that need market data pass a SyntheticProvider
+    registry explicitly.
     """
-    empty = tmp_path_factory.getbasetemp() / "no-market-data"
-    for name in ("PLAT_MARKET_STUDY_ROOT", "PLAT_SUPPLY_DEMAND_ROOT"):
-        monkeypatch.setenv(name, str(empty / name.lower()))
-    for name in ("PLAT_MARKET_DATA_PROVIDERS", "PLAT_MARKET_DATA_USER_FILE", "PLAT_MARKET_STUDY_COMPS"):
-        monkeypatch.delenv(name, raising=False)
+    _isolate_market_data(monkeypatch, tmp_path_factory.getbasetemp() / "no-market-data")
 
 
 @pytest.fixture

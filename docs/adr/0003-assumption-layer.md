@@ -427,6 +427,36 @@ Providers:
 - The dangling `engine.market_data.costar_cap_rates` import is replaced by
   `market_cap_rate` through the registry.
 
+**Feeder discovery and no silent fallback (amendment).** A real ingest with
+both feeder roots set fell back to house defaults in every market slot with
+no word of why: both feeders git-ignore their outputs, so the roots existed
+but held no files, and the providers reported `available() == True` and
+returned `None`. The layer now says what happened:
+
+- Roots resolve: environment variable, then the user config file
+  (`[market_data]` in `$PLAT_UNDERWRITING_CONFIG`, else
+  `~/.config/plat-underwriting/config.toml`), then a sibling of the checkout,
+  then a sibling of the main checkout when the checkout is a git worktree.
+  Each root records where it came from.
+- A feeder provider is unavailable when its root holds no outputs, with a
+  reason naming the files it expected; `diagnose(geo)` reports the inventory
+  and the geography match; exceptions `get` swallows are recorded.
+- Matching: submarket names compare on letters and digits only (both CoStar
+  file namings match); a bare CBSA code maps to a metro through the feeders'
+  metro configs; an unmatched submarket uses the metro aggregate and says so.
+- `engine.market_data.diagnostics.market_data_status` builds a status block
+  (each provider; each market-reading assumption slot and what supplied it).
+  The resolver stores it as `assumptions.market_data_status` (kept on a
+  re-resolution without a registry) and appends a `Market data fell back:`
+  note, naming each provider, root and reason, to the basis and
+  `detail.market_data` of every house or engine fallback entry where market
+  data would have applied. Deal-evidence and analyst values, which outrank
+  market data, get no note. Ingest and `runs/run_deal.py` print the block,
+  run_deal copies it into `results.json` `metadata.market_data_status`, and
+  the register shows it. `runs/market_data_doctor.py` prints it for a
+  geography without a deal.
+- The engine still never calls a provider; the status block is display only.
+
 ### 8. Inspect and edit
 
 - Every run writes an assumptions sheet: `assumptions.json` and an Excel

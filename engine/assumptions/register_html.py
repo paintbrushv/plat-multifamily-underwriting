@@ -105,6 +105,8 @@ code, .key { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospa
 .capital ol { margin: 0; padding-left: 20px; }
 .capital li { margin: 2px 0; }
 .capital .binds { font-weight: 600; color: var(--accent); }
+.market ul { margin: 0; padding-left: 20px; }
+.market li { margin: 2px 0; }
 .pricing { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
   margin: 0 0 16px; }
 .pricing h2 { margin: 0 0 8px; }
@@ -533,6 +535,7 @@ def render_html(register: Mapping[str, Any]) -> str:
         )
     out.append("</div>")
     out.extend(_capital_plan_html(register.get("capital_plan")))
+    out.extend(_market_data_html(register.get("market_data")))
     out.append("</header>")
 
     counts = _chip_counts(rows)
@@ -582,6 +585,40 @@ def render_html(register: Mapping[str, Any]) -> str:
     out.append("</body>")
     out.append("</html>")
     return "\n".join(out) + "\n"
+
+
+def _market_data_html(status: Any) -> list[str]:
+    """Which market-data provider supplied what, and every market slot that fell back."""
+    if not isinstance(status, Mapping):
+        return []
+    out = [
+        '<section class="capital market" aria-label="Market data">',
+        "<h2>Market data</h2>",
+        f'<p class="meta">{_e(status.get("summary"))}</p>',
+        "<ul>",
+    ]
+    for report in status.get("providers") or []:
+        state = "available" if report.get("available") else "not available"
+        if report.get("matched") is not None:
+            state += ", geography matched" if report.get("matched") else ", geography not matched"
+        why = report.get("unavailable_reason") or report.get("summary")
+        root = f' <span class="src">{_e(report["root"])} ({_e(report.get("root_origin"))})</span>' if report.get("root") else ""
+        supplied = ", ".join(report.get("metrics_supplied") or []) or "nothing for this geography"
+        out.append(
+            f"<li><strong>{_e(report.get('name'))}</strong>: {_e(state)}; supplies {_e(supplied)}{root}"
+            + (f'<span class="meta">{_e(why)}</span>' if why else "")
+            + "</li>"
+        )
+    for key, slot in (status.get("slots") or {}).items():
+        if isinstance(slot, Mapping) and not slot.get("supplied") and not slot.get("kept_from_prior_resolution"):
+            out.append(
+                f'<li><a href="#a-{_e(key)}">{_e(key)}</a>: fell back to '
+                f"{_e(slot.get('entry_source') or 'deal evidence or house defaults')}"
+                f'<span class="meta">{_e(slot.get("note"))}</span></li>'
+            )
+    out.append("</ul>")
+    out.append("</section>")
+    return out
 
 
 def _capital_plan_html(plan: Any) -> list[str]:

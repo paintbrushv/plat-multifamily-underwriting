@@ -88,6 +88,11 @@ Assumption layer (ADR 0003):
     Market data (rent-growth forecast, stabilized vacancy, concession rate,
     market cap rate) comes from engine.market_data.default_registry(); pass
     --no-market-data to resolve from deal evidence and house policy only.
+    The summary ends with a "Market data status" block: each provider, its
+    root and where that root came from, whether the geography matched, the
+    metrics it supplied, and every assumption slot that fell back (also
+    recorded as assumptions.market_data_status and on each fallback entry's
+    basis). runs/market_data_doctor.py prints the same check for a geography.
 
 Exit codes: 0 on success; with --validate, 0 when validation passes (warnings
 allowed) and 1 when it fails (the output JSON is still written so the errors
@@ -254,6 +259,16 @@ def _capital_plan_kwargs(args: argparse.Namespace, pca: dict | None) -> dict:
         "immediate_capex_funding": args.immediate_capex_funding,
         "recurring_capex_per_unit": args.recurring_capex_per_unit,
     }
+
+
+def _market_data_status_lines(result: dict, *, no_market_data: bool) -> list[str]:
+    """The market-data status block: each provider, its root, and every slot that fell back."""
+    from engine.market_data.diagnostics import disabled_status, status_lines
+
+    status = (result.get("assumptions") or {}).get("market_data_status")
+    if no_market_data:
+        status = disabled_status("--no-market-data")
+    return status_lines(status, indent="  ")
 
 
 def _superseded_notes(args: argparse.Namespace, pca: dict | None) -> list[str]:
@@ -464,7 +479,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-market-data", action="store_true",
                    help="Resolve assumptions without market data. By default the market-data "
                         "registry (engine.market_data.default_registry) is used; missing feeder "
-                        "data falls through to deal evidence and house policy.")
+                        "data falls through to deal evidence and house policy, and the market "
+                        "data status block says which provider and root had nothing.")
     p.add_argument("--assumption-overrides", type=Path, default=None, metavar="PATH",
                    help="Analyst assumption overrides: a JSON object "
                         '{key: value | {"value": v, "note": "..."}}, an edited '
@@ -787,6 +803,9 @@ def main() -> int:
         print(line)
     for note in _superseded_notes(args, pca_evidence):
         print(f"    NOTE {note}")
+    if entries:
+        for line in _market_data_status_lines(result, no_market_data=args.no_market_data):
+            print(line)
 
     if not args.canonical_json and om_path_resolved:
         confidence = result["metadata"].get("om_extraction_confidence", "unknown")

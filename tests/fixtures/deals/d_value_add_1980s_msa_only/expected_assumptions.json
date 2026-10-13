@@ -343,7 +343,7 @@
     "value": null,
     "unit": "usd_per_unit_month",
     "source": "engine_fallback",
-    "basis": "No renovation program premium, comp evidence or market renovation_premium is available, and there is no house premium: the analyst must supply the premium. This value-add deal has no renovation_programs, so no premium is modeled: add a renovation program (or confirm the business plan has none).",
+    "basis": "No renovation program premium, comp evidence or market renovation_premium is available, and there is no house premium: the analyst must supply the premium. This value-add deal has no renovation_programs, so no premium is modeled: add a renovation program (or confirm the business plan has none). Market data fell back: no provider supplied renovation_premium for metro brindlewood_sx, submarket 'Brindlewood South' (synthetic: no value for renovation_premium at this geography). Check the setup with runs/market_data_doctor.py.",
     "as_of": null,
     "confidence": "low",
     "review_required": true,
@@ -353,7 +353,17 @@
     "override_note": null,
     "override_cohorts": null,
     "guardrail_status": null,
-    "extra": null
+    "extra": {
+      "detail": {
+        "market_data": {
+          "supplied": false,
+          "metrics": [
+            "renovation_premium"
+          ],
+          "note": "Market data fell back: no provider supplied renovation_premium for metro brindlewood_sx, submarket 'Brindlewood South' (synthetic: no value for renovation_premium at this geography). Check the setup with runs/market_data_doctor.py."
+        }
+      }
+    }
   },
   {
     "key": "exit_cap_rate",

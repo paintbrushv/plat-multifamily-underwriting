@@ -23,6 +23,12 @@ the metro configs. Submarket and star tier are ignored and the returned
 ``Observation.geo`` is the metro. As-of: the latest vintage whose quarter
 starts on or before ``as_of``. The feeder publishes no confidence, so
 confidence is ``"medium"``.
+
+Availability: the root must exist, the ``market`` extra must be installed and
+at least one forecast parquet must exist (the forecasts directory is
+git-ignored in the feeder; ``econ forecast --metro <metro_id>`` writes it).
+``diagnose(geo)`` reports the metro configs, the metros with forecasts and
+the geography match for the market-data status block.
 """
 
 from __future__ import annotations
@@ -44,10 +50,11 @@ from engine.market_data._util import (
     slugify,
 )
 from engine.market_data.metrics import METRICS
-from engine.market_data.paths import supply_demand_root
+from engine.market_data.paths import feeder_root
 from engine.market_data.types import Geo, Observation, Provenance
 
 SOURCE_LABEL = "plat-supply-demand econometric ensemble forecast"
+FORECAST_GLOB = "data/econometrics/forecasts/<metro_id>/<metro_id>_forecast_<vintage>.parquet"
 _MSA_RE = re.compile(r"""^msa_code:\s*["']?(\d{5})["']?\s*(?:#.*)?$""", re.MULTILINE)
 _METRO_ID_RE = re.compile(r"""^metro_id:\s*["']?([A-Za-z0-9_]+)["']?\s*(?:#.*)?$""", re.MULTILINE)
 
@@ -55,20 +62,54 @@ _METRO_ID_RE = re.compile(r"""^metro_id:\s*["']?([A-Za-z0-9_]+)["']?\s*(?:#.*)?$
 class PlatSupplyDemandProvider:
     name = "plat_supply_demand"
 
-    def __init__(self, root: str | Path | None = None, *, env: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+        root_origin: str | None = None,
+    ) -> None:
         env = os.environ if env is None else env
-        self.root = Path(root).expanduser() if root is not None else supply_demand_root(env)
+        if root is not None:
+            self.root = Path(root).expanduser()
+            self.root_origin = root_origin or "explicit root"
+        else:
+            found = feeder_root("supply_demand", env)
+            self.root, self.root_origin = found.path, found.origin
+        # metric -> "ExcType: message" of the last exception get() swallowed.
+        self.errors: dict[str, str] = {}
 
     @property
     def forecasts_dir(self) -> Path:
         return self.root / "data" / "econometrics" / "forecasts"
 
+    def _forecast_metros(self) -> dict[str, list[Path]]:
+        """metro_id -> its forecast parquet files under ``forecasts_dir``."""
+        if not self.forecasts_dir.is_dir():
+            return {}
+        out: dict[str, list[Path]] = {}
+        for directory in sorted(d for d in self.forecasts_dir.iterdir() if d.is_dir()):
+            files = sorted(directory.glob(f"{directory.name}_forecast_*.parquet"))
+            if files:
+                out[directory.name] = files
+        return out
+
     @property
     def unavailable_reason(self) -> str | None:
         if not self.root.is_dir():
-            return f"plat-supply-demand root not found: {self.root} (set PLAT_SUPPLY_DEMAND_ROOT)"
+            return (
+                f"plat-supply-demand root not found: {self.root} ({self.root_origin}); "
+                "set PLAT_SUPPLY_DEMAND_ROOT or supply_demand_root in the user config"
+            )
         ok, reason = parquet_support()
-        return None if ok else reason
+        if not ok:
+            return reason
+        if not self._forecast_metros():
+            return (
+                f"plat-supply-demand root {self.root} holds no forecast parquet "
+                f"({FORECAST_GLOB}); run `econ forecast --metro <metro_id>` in the feeder repository"
+            )
+        return None
 
     def available(self) -> bool:
         return self.unavailable_reason is None
@@ -78,8 +119,62 @@ class PlatSupplyDemandProvider:
             return None
         try:
             return self._forecast(geo, as_of)
-        except Exception:  # noqa: BLE001 - a provider never raises for bad data
+        except Exception as exc:  # noqa: BLE001 - a provider never raises for bad data
+            self.errors[metric] = f"{type(exc).__name__}: {exc}"
             return None
+
+    # -- diagnostics -----------------------------------------------------
+    def diagnose(self, geo: Geo) -> dict[str, Any]:
+        """What this root holds and how ``geo`` matches it (reads no parquet)."""
+        out: dict[str, Any] = {
+            "root": str(self.root),
+            "root_origin": self.root_origin,
+            "root_found": self.root.is_dir(),
+            "serves": ["rent_growth_forecast"],
+            "errors": dict(self.errors),
+            "matched": False,
+        }
+        if not out["root_found"]:
+            out["summary"] = f"root not found: {self.root} ({self.root_origin})"
+            return out
+        configs = self._cbsa_to_metro()
+        forecasts = self._forecast_metros()
+        metro_id = self._metro_id(geo)
+        via = None
+        if metro_id is not None:
+            via = "metro_slug" if geo.metro_slug and slugify(geo.metro_slug) == metro_id else "cbsa_code"
+        elif geo.metro_slug:
+            metro_id, via = slugify(geo.metro_slug), "metro_slug"
+        files = forecasts.get(metro_id or "", [])
+        out["inventory"] = {
+            "metro_configs": {code: metro for code, metro in sorted(configs.items())},
+            "forecast_metros": sorted(forecasts),
+            "forecasts_dir": str(self.forecasts_dir),
+        }
+        out["geography"] = {
+            "metro_id": metro_id,
+            "metro_via": via,
+            "forecast_files": [str(p) for p in files],
+            "submarket": "ignored (metro-level forecasts only)",
+        }
+        out["matched"] = bool(files)
+        ok, reason = parquet_support()
+        problems: list[str] = []
+        if not ok:
+            problems.append(str(reason))
+        if metro_id is None:
+            problems.append(
+                "the geography has no metro slug"
+                + (f" and CBSA {geo.cbsa_code} is in no econometrics/config/metros/*.yaml" if geo.cbsa_code else "")
+            )
+        elif not files:
+            where = self.forecasts_dir / metro_id
+            problems.append(
+                f"no forecast parquet for metro {metro_id} ({where}/{metro_id}_forecast_<vintage>.parquet); "
+                f"run `econ forecast --metro {metro_id}` in the feeder repository"
+            )
+        out["summary"] = "; ".join(problems) or None
+        return out
 
     # -- geography -------------------------------------------------------
     def _cbsa_to_metro(self) -> dict[str, str]:

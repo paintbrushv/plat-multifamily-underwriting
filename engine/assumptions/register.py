@@ -827,4 +827,8 @@ def build_register(
     }
     if pricing is not None:
         register["pricing"] = _jsonable(pricing)
+    status = section.get("market_data_status")
+    if isinstance(status, Mapping):
+        # Which provider supplied what, and every market slot that fell back.
+        register["market_data"] = _jsonable(status)
     return register
