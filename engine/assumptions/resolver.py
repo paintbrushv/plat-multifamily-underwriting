@@ -67,6 +67,7 @@ from engine.assumptions.registry import (
     HOUSE_BACKSOLVE_POLICY,
     HOUSE_DEFERRED_CAPEX,
     HOUSE_DEFERRED_CAPEX_PLACEHOLDER,
+    HOUSE_EXIT_NOI_WINDOW,
     HOUSE_LOAN_SIZING_NOI_BASIS,
     HOUSE_PREFIX,
     HOUSE_R_AND_M_PAYROLL_REVIEW,
@@ -1453,7 +1454,12 @@ def _fee_spec(name: str, section: str, field_name: str, unit: str, *, ingest_fil
 # canonical's top-level ``loan_sizing_noi_basis``; absent, the engine applies
 # the house default, so the default is never written.
 LOAN_SIZING_KEY = "loan_sizing_noi_basis"
-CATEGORICAL_KEYS = {LOAN_SIZING_KEY: house.LOAN_SIZING_NOI_BASES}
+# The exit NOI window (ADR 0003 decision n): exit_assumptions.noi_window.
+EXIT_NOI_WINDOW_KEY = "exit_noi_window"
+CATEGORICAL_KEYS = {
+    LOAN_SIZING_KEY: house.LOAN_SIZING_NOI_BASES,
+    EXIT_NOI_WINDOW_KEY: house.EXIT_NOI_WINDOWS,
+}
 
 
 def _read_loan_sizing_basis(ctx: _Context) -> _Current:
@@ -1485,6 +1491,32 @@ def _loan_sizing_candidates(ctx: _Context) -> list[dict[str, Any]]:
     return [_candidate(
         HOUSE_LOAN_SIZING_NOI_BASIS, house.HOUSE_LOAN_SIZING_NOI_BASIS,
         "engine/underwriting_policy.HOUSE_LOAN_SIZING_NOI_BASIS.",
+    )]
+
+
+# ── exit NOI window (ADR 0003 decision n) ────────────────────────────────
+# A categorical assumption: the NOI the exit is valued on. The canonical's
+# ``exit_assumptions.noi_window``; absent, the engine applies the house default
+# (forward), so the default is never written.
+
+
+def _exit_noi_window_default(ctx: _Context, state: str) -> _Choice:
+    window = house.HOUSE_EXIT_NOI_WINDOW
+    return _Choice(
+        HOUSE_EXIT_NOI_WINDOW,
+        window,
+        f"House exit NOI window {window!r} (HOUSE_EXIT_NOI_WINDOW): the exit value is the projected NOI for the "
+        "12 months after the exit month over the exit cap, as a buyer prices the asset on forward income. The "
+        "engine projects that year for NOI only; the hold's cash flows end at the exit. Alternative: 'trailing' "
+        "(the 12 months ending at the exit month).",
+        confidence="medium",
+    )
+
+
+def _exit_noi_window_candidates(ctx: _Context) -> list[dict[str, Any]]:
+    return [_candidate(
+        HOUSE_EXIT_NOI_WINDOW, house.HOUSE_EXIT_NOI_WINDOW,
+        "engine/underwriting_policy.HOUSE_EXIT_NOI_WINDOW.",
     )]
 
 
@@ -1764,6 +1796,15 @@ def _base_specs() -> tuple[_Spec, ...]:
             default=_loan_sizing_default,
             gather=_loan_sizing_candidates,
             patch_paths=((LOAN_SIZING_KEY,),),
+        ),
+        _Spec(
+            key=EXIT_NOI_WINDOW_KEY,
+            unit="enum",
+            read=_scalar_reader("exit_assumptions", "noi_window"),
+            write=_scalar_writer("exit_assumptions", "noi_window"),
+            default=_exit_noi_window_default,
+            gather=_exit_noi_window_candidates,
+            patch_paths=(("exit_assumptions", "noi_window"),),
         ),
     )
 

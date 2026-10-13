@@ -492,6 +492,23 @@
     "extra": null
   },
   {
+    "key": "exit_noi_window",
+    "value": "forward",
+    "unit": "enum",
+    "source": "house:exit_noi_window",
+    "basis": "House exit NOI window 'forward' (HOUSE_EXIT_NOI_WINDOW): the exit value is the projected NOI for the 12 months after the exit month over the exit cap, as a buyer prices the asset on forward income. The engine projects that year for NOI only; the hold's cash flows end at the exit. Alternative: 'trailing' (the 12 months ending at the exit month).",
+    "as_of": null,
+    "confidence": "medium",
+    "review_required": true,
+    "default_value": "forward",
+    "delta": null,
+    "override_value": null,
+    "override_note": null,
+    "override_cohorts": null,
+    "guardrail_status": null,
+    "extra": null
+  },
+  {
     "key": "opex.insurance.base",
     "value": 67200.0,
     "unit": "usd_per_year",

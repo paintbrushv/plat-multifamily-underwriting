@@ -843,6 +843,24 @@ HOUSE_STEAL_FULL_COMPRESSION_EXCESS = HOUSE_STEAL_THRESHOLD + Decimal("0.0200")
 # to the downside: a tighter exit is the less likely error for an older asset.
 HOUSE_EXIT_CAP_SENSITIVITY_OFFSETS_BPS = (-50, -25, 0, 25, 50, 75, 100, 150)
 
+# ── Exit NOI window (ADR 0003 decision n) ────────────────────────────────
+# HOUSE POLICY. A buyer prices the asset on the income it will earn, so the
+# exit is valued on forward NOI: the projected NOI for the 12 months after the
+# exit month. The analysis ends at the exit, so the engine projects one more
+# year for NOI only (the rent growth vector, the curves at their terminal
+# values, opex growth), and nothing past the exit enters the hold's cash flows.
+# The window is an overridable assumption (``exit_assumptions.noi_window``):
+#
+# - forward: the 12 months after the exit month (default, market convention)
+# - trailing: the 12 months ending at the exit month (the engine's convention
+#   before this decision)
+EXIT_NOI_WINDOW_FORWARD = "forward"
+EXIT_NOI_WINDOW_TRAILING = "trailing"
+EXIT_NOI_WINDOWS = (EXIT_NOI_WINDOW_FORWARD, EXIT_NOI_WINDOW_TRAILING)
+HOUSE_EXIT_NOI_WINDOW = EXIT_NOI_WINDOW_FORWARD
+# Months the engine projects past the analysis end for the buyer's year.
+EXIT_NOI_PROJECTION_MONTHS = 12
+
 
 def house_exit_cap_rate(
     going_in_cap_rate: Decimal | float,

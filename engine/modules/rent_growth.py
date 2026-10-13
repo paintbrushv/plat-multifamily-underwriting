@@ -161,6 +161,39 @@ def _apply_monthly_compound_vector(
     return base_rent * growth_factor, growth_factor - Decimal("1")
 
 
+def growth_factor(
+    growth_assumptions: Optional[Dict[str, Any]],
+    current_month: str,
+    growth_start: str,
+) -> Decimal:
+    """Cumulative market rent growth factor at ``current_month``, as ``generate_rent_curves`` grows rent.
+
+    The property-level vector (``annual_growth_rates``) wins over the scalar
+    ``annual_growth_rate``; ``growth_type`` picks annual or monthly
+    compounding; ``step_only`` (and no growth) is 1. Step increases are not
+    included.
+    """
+    growth = growth_assumptions or {}
+    growth_type = growth.get("growth_type", "annual_compound")
+    vector = growth_rate_vector(growth)
+    one = Decimal("1")
+    if vector is not None and growth_type == "annual_compound":
+        factor, _ = _apply_annual_compound_vector(one, vector, current_month, growth_start)
+    elif vector is not None and growth_type == "monthly_compound":
+        factor, _ = _apply_monthly_compound_vector(one, vector, current_month, growth_start)
+    elif growth_type == "annual_compound":
+        factor, _ = _apply_annual_compound_growth(
+            one, dec(growth.get("annual_growth_rate") or 0), current_month, growth_start
+        )
+    elif growth_type == "monthly_compound":
+        factor, _ = _apply_monthly_compound_growth(
+            one, dec(growth.get("annual_growth_rate") or 0), current_month, growth_start
+        )
+    else:  # step_only
+        factor = one
+    return factor
+
+
 def _apply_step_increases(
     base_rent: Decimal,
     step_increases: List[Dict[str, Any]],

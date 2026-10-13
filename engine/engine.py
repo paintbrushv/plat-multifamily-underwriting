@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from engine import underwriting_policy as house
 from engine.modules.analysis_years import aggregate_analysis_years
 from engine.modules.capex import compute_capex
 from engine.modules.capital_plan import (
@@ -16,14 +17,14 @@ from engine.modules.capital_plan import (
 from engine.modules import loan_sizing
 from engine.modules.exit_cap_grid import compute_exit_cap_grid
 from engine.modules.cashflow import compute_cashflow
-from engine.modules.debt import compute_debt, compute_preferred_equity, size_refi_loan
+from engine.modules.debt import REFI_NOI_WINDOW_FORWARD, compute_debt, compute_preferred_equity, size_refi_loan
 from engine.modules.fund_waterfall import compute_fund_waterfall
 from engine.modules.metrics import compute_cash_on_cash, compute_exit_proceeds, compute_metrics
 from engine.modules.opex import compute_opex
 from engine.modules.renovations import compute_renovations
 from engine.modules.revenue import compute_base_rent
 from engine.modules.revenue_programs import compute_program_revenue
-from engine.modules.rent_growth import generate_rent_curves, growth_rate_vector
+from engine.modules.rent_growth import generate_rent_curves, growth_factor, growth_rate_vector
 from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec, month_id, round2
 from engine.property_tax import apply_property_tax_policy
@@ -549,6 +550,354 @@ def _apply_growth_assumptions(
     return new_curve, disclosure
 
 
+def _build_operations(
+    time_grid: TimeGrid,
+    inputs: Dict[str, Any],
+    *,
+    validate_augmented: bool,
+) -> Dict[str, Any]:
+    """Revenue, opex and utility recovery by month on ``time_grid``: what NOI is built from.
+
+    The hold run and the NOI projection past the analysis end (ADR 0003
+    decision n, ``_noi_projection``) both build their operations here, so the
+    projected year follows exactly the hold's conventions. ``inputs`` carries
+    the market rent curve before rent growth is applied; the returned
+    ``inputs`` carries the grown curve.
+    """
+    # Rent growth - expand growth_assumptions into the market rent curve before
+    # renovation cohorts inherit it.
+    grown_mr_curve, rent_growth_disclosure = _apply_growth_assumptions(time_grid, inputs)
+    inputs = {**inputs, "market_rent_curve": grown_mr_curve}
+
+    # Renovation module - compute before revenue so dynamic unit counts are available
+    renovation_result = None
+    dynamic_unit_counts = None
+    augmented_cohorts = list(inputs["unit_cohorts"])
+    augmented_mr_curve = list(inputs["market_rent_curve"])
+    augmented_ltl = list(inputs["loss_to_lease"])
+    augmented_vac = list(inputs["physical_vacancy_curve"])
+
+    unit_renovations = inputs.get("unit_renovations", [])
+    if inputs.get("renovation_programs") or unit_renovations:
+        (
+            renovation_result,
+            dynamic_unit_counts,
+            output_cohort_entries,
+            output_mr_curve,
+            output_ltl,
+            output_vac,
+        ) = _build_renovation_context(time_grid, inputs, unit_renovations=unit_renovations)
+
+        augmented_cohorts.extend(output_cohort_entries)
+        augmented_mr_curve.extend(output_mr_curve)
+        augmented_ltl.extend(output_ltl)
+        augmented_vac.extend(output_vac)
+
+        # Post-augmentation validation: catch cohort_id collisions or overlapping
+        # segments introduced by _build_renovation_context (e.g., the cohort-collision bug
+        # where output_cohort collides with an existing canonical cohort_id).
+        if validate_augmented:
+            augmented_report = validate_augmented_curves(
+                augmented_mr_curve, augmented_ltl, augmented_vac
+            )
+            if augmented_report.status != "PASS":
+                messages = "\n".join(
+                    f"{i.code} {i.path}: {i.message}" for i in augmented_report.issues
+                )
+                raise ValueError(
+                    f"Augmented-curve validation failed after renovation context build:\n{messages}"
+                )
+
+    # Revenue module - base rent
+    base_rent = compute_base_rent(
+        time_grid=time_grid,
+        unit_cohorts=augmented_cohorts,
+        market_rent_curve=augmented_mr_curve,
+        loss_to_lease=augmented_ltl,
+        physical_vacancy_curve=augmented_vac,
+        collection_loss_curve=inputs["collection_loss_curve"],
+        dynamic_unit_counts=dynamic_unit_counts,
+        concession_schedule=inputs.get("concession_schedule"),
+    )
+
+    # Revenue module - programs
+    programs = compute_program_revenue(
+        time_grid=time_grid,
+        unit_cohorts=augmented_cohorts,
+        revenue_programs=inputs["revenue_programs"],
+        program_adoption_curve=inputs["program_adoption_curve"],
+        program_capacity=inputs.get("program_capacity"),
+        collection_loss_curve=inputs["collection_loss_curve"],
+        physical_vacancy_curve=inputs["physical_vacancy_curve"],
+        market_rent_curve=augmented_mr_curve,
+        loss_to_lease=augmented_ltl,
+        dynamic_unit_counts=dynamic_unit_counts,
+    )
+
+    # Combine revenue totals
+    revenue_totals = []
+    by_month_rent = {row["month"]: row for row in base_rent["by_month"]}
+    by_month_programs = {row["month"]: row for row in programs["by_month"]}
+    for month in time_grid.month_ids:
+        rent = by_month_rent[month]["net_rent"]
+        prog = by_month_programs[month]["net_programs"]
+        revenue_totals.append({
+            "month": month,
+            "net_rent": rent,
+            "net_programs": prog,
+            "net_total_revenue": round(rent + prog, 2),
+        })
+
+    # OpEx module
+    opex_by_month = [{"month": m, "total_opex": 0, "recoverable_opex": 0} for m in time_grid.month_ids]
+    opex_result = {"totals_by_month": opex_by_month, "totals_by_year": [], "by_category_by_month": []}
+    if inputs.get("opex_table"):
+        opex_result = compute_opex(
+            time_grid=time_grid,
+            unit_cohorts=inputs["unit_cohorts"],
+            opex_table=inputs["opex_table"],
+            revenue_by_month=revenue_totals,
+        )
+        opex_by_month = opex_result["totals_by_month"]
+
+    # Utility recovery from utility_recovery_rules. Absent rules recover $0;
+    # multiple configured rules are applied by category instead of silently
+    # using only the first rule for every recoverable expense.
+    utility_recovery_by_month = _compute_utility_recovery_by_month(
+        time_grid=time_grid,
+        utility_recovery_rules=inputs.get("utility_recovery_rules"),
+        opex_by_category_by_month=opex_result.get("by_category_by_month", []),
+    )
+    return {
+        "inputs": inputs,
+        "rent_growth": rent_growth_disclosure,
+        "renovation_result": renovation_result,
+        "base_rent": base_rent,
+        "programs": programs,
+        "revenue_totals": revenue_totals,
+        "opex_result": opex_result,
+        "opex_by_month": opex_by_month,
+        "utility_recovery_by_month": utility_recovery_by_month,
+    }
+
+
+def _add_months(month: str, n: int) -> str:
+    year, mon = int(month[:4]), int(month[5:7])
+    index = year * 12 + (mon - 1) + n
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
+# Period-segment lists the projection carries past the analysis end at their
+# terminal value: (canonical key, start field, end field, fields that identify
+# a curve within the list). A list without identifying fields is one curve.
+_PROJECTED_SEGMENTS: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = (
+    ("loss_to_lease", "start_period", "end_period", ("cohort_id",)),
+    ("physical_vacancy_curve", "start_period", "end_period", ("cohort_id",)),
+    ("collection_loss_curve", "start_period", "end_period", ("applies_to",)),
+    ("revenue_programs", "start_period", "end_period", ("program_id",)),
+    ("program_adoption_curve", "start_period", "end_period", ("program_id",)),
+    ("concession_schedule", "start_month", "end_month", ("concession_id", "applies_to_cohort", "concession_type")),
+    ("replacement_reserves", "start_period", "end_period", ()),
+)
+
+
+def _carry_segments(
+    rows: List[Dict[str, Any]],
+    start_field: str,
+    end_field: str,
+    group_fields: Tuple[str, ...],
+    end: str,
+    new_end: str,
+) -> List[Dict[str, Any]]:
+    """``rows`` with the segment of each curve that covers ``end`` carried to ``new_end``.
+
+    A segment is carried only up to the month before a later segment of the
+    same curve, so no two segments overlap. Open-ended rows (no end) and rows
+    that already reach ``new_end`` are kept as they are.
+    """
+    out = [dict(row) for row in rows]
+
+    def key(row: Dict[str, Any]) -> Tuple[Any, ...]:
+        return tuple(row.get(f) for f in group_fields)
+
+    for row in out:
+        if not row.get(end_field) or not row.get(start_field):
+            continue
+        row_start, row_end = month_id(row[start_field]), month_id(row[end_field])
+        if not (row_start <= end <= row_end) or row_end >= new_end:
+            continue
+        later = [
+            month_id(other[start_field]) for other in out
+            if other is not row and other.get(start_field) and key(other) == key(row)
+            and month_id(other[start_field]) > row_end
+        ]
+        limit = _add_months(min(later), -1) if later else new_end
+        if limit > row_end:
+            row[end_field] = limit
+    return out
+
+
+def _carry_market_rent_curve(
+    curve: List[Dict[str, Any]],
+    growth: Optional[Dict[str, Any]],
+    analysis_start: str,
+    end: str,
+    new_end: str,
+) -> List[Dict[str, Any]]:
+    """The market rent curve carried past the analysis end.
+
+    A flat cohort (one rent: the shape the engine grows) keeps its segment,
+    carried to ``new_end``; ``_apply_growth_assumptions`` then grows it over
+    the longer grid exactly as over the hold. An analyst-authored curve is
+    authoritative over its own months; past them its terminal rent is carried
+    forward at the deal's growth (``growth_assumptions``, the vector's last
+    value repeating), so the projected year grows as a flat cohort's would.
+    """
+    by_cohort: Dict[str, List[Dict[str, Any]]] = {}
+    for seg in curve:
+        by_cohort.setdefault(seg["cohort_id"], []).append(seg)
+    growth_start = month_id((growth or {}).get("growth_start_month") or analysis_start)
+    out: List[Dict[str, Any]] = []
+    for cid, segs in by_cohort.items():
+        if len({dec(s["market_rent"]) for s in segs}) == 1:
+            out.extend(_carry_segments(segs, "start_period", "end_period", (), end, new_end))
+            continue
+        out.extend(dict(s) for s in segs)
+        covering = [s for s in segs if month_id(s["start_period"]) <= end <= month_id(s["end_period"])]
+        if not covering:
+            continue
+        last = covering[0]
+        last_month = month_id(last["end_period"])
+        later = [month_id(s["start_period"]) for s in segs if month_id(s["start_period"]) > last_month]
+        limit = _add_months(min(later), -1) if later else new_end
+        base = dec(last["market_rent"])
+        base_factor = growth_factor(growth, last_month, growth_start)
+        month = _add_months(last_month, 1)
+        while month <= limit:
+            factor = growth_factor(growth, month, growth_start)
+            row = {
+                "cohort_id": cid,
+                "start_period": month,
+                "end_period": month,
+                "market_rent": round2(base * factor / base_factor) if base_factor else float(base),
+            }
+            if last.get("target_monthly_rent_source") is not None:
+                row["target_monthly_rent_source"] = last["target_monthly_rent_source"]
+            out.append(row)
+            month = _add_months(month, 1)
+    return out
+
+
+def _projection_inputs(inputs: Dict[str, Any], end: str, new_end: str) -> Dict[str, Any]:
+    """``inputs`` for an analysis carried from ``end`` to ``new_end``, for NOI only.
+
+    Curves, programs, concessions and reserves that reach the analysis end are
+    carried at their terminal values (the rent at the deal's growth); opex
+    grows by its own rates and growth phases from the analysis start, as in the
+    hold. Renovation programs stop at the analysis end: the buyer's year does
+    not continue the seller's business plan.
+    """
+    out = dict(inputs)
+    out["time_grid"] = {**inputs["time_grid"], "analysis_end_date": new_end}
+    for key, start_field, end_field, group in _PROJECTED_SEGMENTS:
+        if inputs.get(key):
+            out[key] = _carry_segments(inputs[key], start_field, end_field, group, end, new_end)
+    out["market_rent_curve"] = _carry_market_rent_curve(
+        inputs["market_rent_curve"], inputs.get("growth_assumptions"),
+        month_id(inputs["time_grid"]["analysis_start_date"]), end, new_end,
+    )
+    if inputs.get("renovation_programs"):
+        programs = []
+        for program in inputs["renovation_programs"]:
+            program = dict(program)
+            if not program.get("end_month") or month_id(program["end_month"]) > end:
+                program["end_month"] = end
+            programs.append(program)
+        out["renovation_programs"] = programs
+    plan = inputs.get("capital_plan")
+    if isinstance(plan, dict) and isinstance(plan.get("recurring_capex"), dict):
+        block = plan["recurring_capex"]
+        if block.get("end_period") and block.get("start_period"):
+            carried = _carry_segments([block], "start_period", "end_period", (), end, new_end)[0]
+            out["capital_plan"] = {**plan, "recurring_capex": carried}
+    return out
+
+
+def _noi_projection(
+    time_grid: TimeGrid,
+    inputs: Dict[str, Any],
+    months: int = house.EXIT_NOI_PROJECTION_MONTHS,
+) -> List[Dict[str, Any]]:
+    """Projected NOI rows for the ``months`` after the analysis end (ADR 0003 decision n).
+
+    The buyer's year: the operations are rebuilt on a grid carried ``months``
+    past the analysis end (``_projection_inputs``) with the same helpers as the
+    hold, and only the months after the analysis end are returned, with their
+    revenue, opex, NOI and below-NOI capital charge. Nothing here enters the
+    hold's cash flows: the exit value (``compute_exit_proceeds``) and a refi's
+    forward year near the analysis end (``size_refi_loan``) read these rows.
+    ``inputs`` are the hold's inputs before rent growth is applied.
+    """
+    end = time_grid.month_ids[-1]
+    new_end = _add_months(end, months)
+    projected_inputs = _projection_inputs(inputs, end, new_end)
+    grid = TimeGrid.build(projected_inputs["time_grid"]["analysis_start_date"], new_end)
+    operations = _build_operations(grid, projected_inputs, validate_augmented=False)
+    charges, _ = compute_below_noi_charge(grid, projected_inputs)
+    cashflow = compute_cashflow(
+        time_grid=grid,
+        revenue_by_month=operations["revenue_totals"],
+        opex_by_month=operations["opex_by_month"],
+        capex_by_month=[],
+        debt_by_month=[],
+        reserves_by_month=charges or None,
+        utility_recovery_by_month=operations["utility_recovery_by_month"],
+    )
+    charge_lookup = {row["month"]: row for row in charges}
+    rows: List[Dict[str, Any]] = []
+    for row in cashflow["by_month"]:
+        if row["month"] <= end:
+            continue
+        projected = {
+            field: row[field]
+            for field in (
+                "month", "net_rent", "net_programs", "utility_recovery", "effective_gross_income",
+                "total_opex", "net_operating_income", "replacement_reserves",
+            )
+        }
+        charge = charge_lookup.get(row["month"]) or {}
+        for field in ("replacement_reserve_floor", "recurring_capex_by_vintage"):
+            if field in charge:
+                projected[field] = charge[field]
+        rows.append(projected)
+    return rows
+
+
+def _needs_noi_projection(inputs: Mapping[str, Any], time_grid: TimeGrid) -> bool:
+    """Whether a forward window reaches past the analysis end: the exit's or a refi's."""
+    months = house.EXIT_NOI_PROJECTION_MONTHS
+    end = time_grid.month_ids[-1]
+    exit_assumptions = inputs.get("exit_assumptions") or {}
+    if (
+        exit_assumptions
+        and (exit_assumptions.get("noi_window") or house.HOUSE_EXIT_NOI_WINDOW) == house.EXIT_NOI_WINDOW_FORWARD
+        and exit_assumptions.get("forward_noi_override") is None
+    ):
+        exit_month = month_id(exit_assumptions["exit_month"]) if exit_assumptions.get("exit_month") else end
+        if exit_month not in time_grid.month_ids:
+            exit_month = end
+        if _add_months(exit_month, months) > end:
+            return True
+    refi = inputs.get("refi_event") or {}
+    if (
+        refi.get("trigger_month") and inputs.get("debt_terms")
+        and refi.get("noi_window", REFI_NOI_WINDOW_FORWARD) == REFI_NOI_WINDOW_FORWARD
+        and _add_months(month_id(refi["trigger_month"]), months - 1) > end
+    ):
+        return True
+    return False
+
+
 def run_underwriting(
     inputs: Dict[str, Any],
     *,
@@ -639,101 +988,20 @@ def run_underwriting(
             validate_or_raise(inputs)
     time_grid = TimeGrid.build(inputs["time_grid"]["analysis_start_date"], inputs["time_grid"]["analysis_end_date"])
 
-    # Rent growth - expand growth_assumptions into the market rent curve before
-    # renovation cohorts inherit it.
-    grown_mr_curve, rent_growth_disclosure = _apply_growth_assumptions(time_grid, inputs)
-    inputs = {**inputs, "market_rent_curve": grown_mr_curve}
-
-    # Renovation module - compute before revenue so dynamic unit counts are available
-    renovation_result = None
-    dynamic_unit_counts = None
-    augmented_cohorts = list(inputs["unit_cohorts"])
-    augmented_mr_curve = list(inputs["market_rent_curve"])
-    augmented_ltl = list(inputs["loss_to_lease"])
-    augmented_vac = list(inputs["physical_vacancy_curve"])
-
-    unit_renovations = inputs.get("unit_renovations", [])
-    if inputs.get("renovation_programs") or unit_renovations:
-        (
-            renovation_result,
-            dynamic_unit_counts,
-            output_cohort_entries,
-            output_mr_curve,
-            output_ltl,
-            output_vac,
-        ) = _build_renovation_context(time_grid, inputs, unit_renovations=unit_renovations)
-
-        augmented_cohorts.extend(output_cohort_entries)
-        augmented_mr_curve.extend(output_mr_curve)
-        augmented_ltl.extend(output_ltl)
-        augmented_vac.extend(output_vac)
-
-        # Post-augmentation validation: catch cohort_id collisions or overlapping
-        # segments introduced by _build_renovation_context (e.g., the cohort-collision bug
-        # where output_cohort collides with an existing canonical cohort_id).
-        if not skip_validation:
-            augmented_report = validate_augmented_curves(
-                augmented_mr_curve, augmented_ltl, augmented_vac
-            )
-            if augmented_report.status != "PASS":
-                messages = "\n".join(
-                    f"{i.code} {i.path}: {i.message}" for i in augmented_report.issues
-                )
-                raise ValueError(
-                    f"Augmented-curve validation failed after renovation context build:\n{messages}"
-                )
-
-    # Revenue module - base rent
-    base_rent = compute_base_rent(
-        time_grid=time_grid,
-        unit_cohorts=augmented_cohorts,
-        market_rent_curve=augmented_mr_curve,
-        loss_to_lease=augmented_ltl,
-        physical_vacancy_curve=augmented_vac,
-        collection_loss_curve=inputs["collection_loss_curve"],
-        dynamic_unit_counts=dynamic_unit_counts,
-        concession_schedule=inputs.get("concession_schedule"),
-    )
-
-    # Revenue module - programs
-    programs = compute_program_revenue(
-        time_grid=time_grid,
-        unit_cohorts=augmented_cohorts,
-        revenue_programs=inputs["revenue_programs"],
-        program_adoption_curve=inputs["program_adoption_curve"],
-        program_capacity=inputs.get("program_capacity"),
-        collection_loss_curve=inputs["collection_loss_curve"],
-        physical_vacancy_curve=inputs["physical_vacancy_curve"],
-        market_rent_curve=augmented_mr_curve,
-        loss_to_lease=augmented_ltl,
-        dynamic_unit_counts=dynamic_unit_counts,
-    )
-
-    # Combine revenue totals
-    revenue_totals = []
-    by_month_rent = {row["month"]: row for row in base_rent["by_month"]}
-    by_month_programs = {row["month"]: row for row in programs["by_month"]}
-    for month in time_grid.month_ids:
-        rent = by_month_rent[month]["net_rent"]
-        prog = by_month_programs[month]["net_programs"]
-        revenue_totals.append({
-            "month": month,
-            "net_rent": rent,
-            "net_programs": prog,
-            "net_total_revenue": round(rent + prog, 2),
-        })
-
-    # OpEx module
-    opex_by_month = [{"month": m, "total_opex": 0, "recoverable_opex": 0} for m in time_grid.month_ids]
-    opex_result = {"totals_by_month": opex_by_month, "totals_by_year": [], "by_category_by_month": []}
-    if inputs.get("opex_table"):
-        opex_result = compute_opex(
-            time_grid=time_grid,
-            unit_cohorts=inputs["unit_cohorts"],
-            opex_table=inputs["opex_table"],
-            revenue_by_month=revenue_totals,
-        )
-        opex_by_month = opex_result["totals_by_month"]
+    # Operations (rent growth, renovations, revenue, opex, utility recovery):
+    # everything NOI is built from. The pre-growth inputs are kept for the NOI
+    # projection past the analysis end (ADR 0003 decision n).
+    operating_inputs = inputs
+    operations = _build_operations(time_grid, inputs, validate_augmented=not skip_validation)
+    inputs = operations["inputs"]
+    rent_growth_disclosure = operations["rent_growth"]
+    renovation_result = operations["renovation_result"]
+    base_rent = operations["base_rent"]
+    programs = operations["programs"]
+    revenue_totals = operations["revenue_totals"]
+    opex_result = operations["opex_result"]
+    opex_by_month = operations["opex_by_month"]
+    utility_recovery_by_month = operations["utility_recovery_by_month"]
 
     # CapEx module
     capex_by_month = [{"month": m, "total_capex": 0} for m in time_grid.month_ids]
@@ -965,15 +1233,6 @@ def run_underwriting(
                             dec(row.get("loan_closing_costs", 0)) + extra_cc
                         )
 
-    # Utility recovery from utility_recovery_rules. Absent rules recover $0;
-    # multiple configured rules are applied by category instead of silently
-    # using only the first rule for every recoverable expense.
-    utility_recovery_by_month = _compute_utility_recovery_by_month(
-        time_grid=time_grid,
-        utility_recovery_rules=inputs.get("utility_recovery_rules"),
-        opex_by_category_by_month=opex_result.get("by_category_by_month", []),
-    )
-
     # Cashflow aggregation
     cashflow_result = compute_cashflow(
         time_grid=time_grid,
@@ -984,6 +1243,14 @@ def run_underwriting(
         reserves_by_month=reserves_by_month if reserves_by_month else None,
         utility_recovery_by_month=utility_recovery_by_month,
     )
+
+    # The buyer's year (ADR 0003 decision n): NOI projected for the 12 months
+    # past the analysis end, read only by a forward window that reaches past
+    # it (the exit value, and a refi's forward year near the end). The hold's
+    # cash flows, debt and metrics never see these months.
+    noi_projection: Optional[List[Dict[str, Any]]] = None
+    if _needs_noi_projection(inputs, time_grid):
+        noi_projection = _noi_projection(time_grid, operating_inputs)
 
     # Dynamic refi event: size perm loan from stabilized NOI, then re-run
     # debt + cashflow with the perm loan added as additional debt.
@@ -997,6 +1264,7 @@ def run_underwriting(
             # Sized on the loan sizing NOI basis (ADR 0003 §3), like the agency loan.
             noi_basis=dscr_basis,
             charge_by_month=reserves_by_month or None,
+            projected_by_month=noi_projection,
         )
 
         # Set bridge loan to terminate at refi month
@@ -1134,6 +1402,7 @@ def run_underwriting(
         purchase_assumptions=inputs.get("purchase_assumptions"),
         exit_assumptions=inputs.get("exit_assumptions"),
         cashflow_by_month=cashflow_result["by_month"],
+        projected_noi_by_month=noi_projection,
     )
     if exit_result:
         gross_sale = dec(exit_result["gross_sale_price"])
@@ -1182,6 +1451,7 @@ def run_underwriting(
         purchase_assumptions=inputs.get("purchase_assumptions"),
         exit_assumptions=inputs.get("exit_assumptions"),
         dscr_basis=dscr_basis,
+        projected_noi_by_month=noi_projection,
     )
 
     result = {
