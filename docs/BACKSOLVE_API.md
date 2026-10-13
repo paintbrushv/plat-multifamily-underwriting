@@ -352,6 +352,11 @@ Contract: `plat.backsolve/1`. Results include `summary`, `case`, `results`,
 | `infeasible` | The lower bound misses the target; no solved case is returned. |
 | `iteration_limit` | A feasible candidate exists, but the cent boundary is unresolved. |
 
+An `infeasible` result also carries `bracket_floor_case`: the case evaluated
+at `min_price`, its `assumptions` re-resolved in `mode="pricing"` like a solved
+case, so the assumptions the search priced (floors enforced, policy values)
+can still be reviewed. It is never a solved case; `case` stays `None`.
+
 The search assumes cash-on-cash return does not increase with price. Observed
 material violations refuse. The sized loan is rounded to the nearest $1,000, so
 cash-on-cash can rise by about |CoC| x $1,000 / equity where the loan steps up;
@@ -374,6 +379,50 @@ feasible supplied ceiling. Every run prints a concise summary to stdout:
 status, solved price, cash-on-cash basis and target, achieved cash-on-cash,
 levered IRR, minimum DSCR, the number of house floors enforced, and the paths
 of `backsolve_summary.json` and the other artifacts written.
+
+### Outputs
+
+`--output-dir` receives (`python -m engine.backsolve` and
+`runs/backsolve_price_for_target_coc.py` write the same files):
+
+| File | When | Contents |
+| --- | --- | --- |
+| `backsolve_summary.json` | always | The summary; `artifacts` lists the other files written. |
+| `canonical_backsolved_target_coc.json` | a feasible case (not `infeasible`) | The priced canonical (`case`). |
+| `underwriting_backsolved_target_coc.json` | same | Its engine results. |
+| `assumptions.json` | same, when the case has an `assumptions` section | The assumptions sheet of the priced canonical. |
+| `assumptions.html` | always, unless `--no-assumptions-html` | The assumption register page with a pricing summary header. |
+
+`assumptions.html` is the same self-contained register page `runs/run_deal.py`
+writes (`engine/assumptions/register_html.py`; no external assets, every value
+escaped), for the priced canonical, opened by a pricing summary header
+(`engine/assumptions/register_pricing.pricing_header`):
+
+- status (with a note for `infeasible`, `ceiling_feasible` or
+  `iteration_limit`), target cash-on-cash and its basis (Year 1, or the
+  stabilized analysis year and its months), achieved cash-on-cash;
+- solved price and $/unit, loan amount with its sizing basis, sizing method,
+  required DSCR, rate and basis source (`summary.loan_sizing`), equity;
+- going-in cap, exit cap and how it was set (entry-anchored spread, the steal
+  exception and its compression), levered and unlevered IRR, minimum DSCR on
+  its basis (and on NOI before capex when that differs);
+- the exit-cap sensitivity grid (`summary.exit_cap_sensitivity`): exit cap,
+  exit value, levered and unlevered IRR and levered multiple at each offset,
+  the base row in bold;
+- **Floors enforced in pricing**: one item per assumption and action
+  (`enforced`, `floor_applied_over_deal_evidence`) with its original and
+  applied values, floor and source, segment count and evidence, linked to its
+  row; the R&M top-up line and amount; then the other `policy_overrides`
+  (waivers, other replaced inputs).
+
+Rows a floor set in pricing (the assumption, the insurance line it raised, the
+R&M top-up line) are highlighted and badged "Enforced in pricing", and an
+"Enforced in pricing" chip filters to them; rows the policy pinned (fees,
+closing costs, the reassessed tax line) keep their "Pinned by pricing" note.
+An infeasible solve still writes the page: the header with no solved price
+and the bracket it searched, over the register of `bracket_floor_case`.
+Without pricing data (run_deal, ingest) the page has no header and is
+unchanged.
 
 The engine MCP tool `backsolve_deal_price` returns the same summary and
 assumptions, excluding large cashflow arrays. The Platworks tool
