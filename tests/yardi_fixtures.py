@@ -223,7 +223,8 @@ def _section_rows(section: dict[str, Any], out: list[list[Any]]) -> list[float]:
     return total
 
 
-def yardi_t12_rows() -> list[list[Any]]:
+def yardi_t12_rows(opex_sections: list[dict[str, Any]] | None = None) -> list[list[Any]]:
+    """Rows of the synthetic statement; ``opex_sections`` replaces ``T12_OPEX``."""
     rows: list[list[Any]] = [
         [f"{PROPERTY} ({PROPERTY_CODE})"],
         ["Statement (12 months)"],
@@ -246,7 +247,7 @@ def yardi_t12_rows() -> list[list[Any]]:
     rows.append([" OPERATING EXPENSES"])
     rows.append([None])
     opex = [0.0] * 12
-    for section in T12_OPEX:
+    for section in T12_OPEX if opex_sections is None else opex_sections:
         opex = _add(opex, _section_rows(section, rows))
     rows.append(_row(" TOTAL OPERATING EXPENSES", opex))
     rows.append([None])
@@ -295,13 +296,13 @@ T12_EGI = round(sum(_annual(a) for _, a in _lines(T12_INCOME)), 2)
 T12_OPEX_TOTAL = round(sum(_annual(a) for _, a in _lines(T12_OPEX)), 2)
 
 
-def write_yardi_t12(path: Path) -> Path:
+def write_yardi_t12(path: Path, opex_sections: list[dict[str, Any]] | None = None) -> Path:
     from openpyxl import Workbook
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Report1"
-    for row in yardi_t12_rows():
+    for row in yardi_t12_rows(opex_sections):
         ws.append(row)
     wb.save(path)
     wb.close()

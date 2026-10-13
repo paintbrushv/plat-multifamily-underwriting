@@ -753,8 +753,18 @@ completed (f):
       salaries, maintenance or service technicians, repair staff, make-ready
       technicians, building engineers), read line by line from the T12 (the
       parser keeps each line's annual amount, `source_lines` on the T12 opex
-      evidence); a T12 section taken whole that mixes maintenance labor with
-      other payroll cannot be split and earns nothing;
+      evidence). A section the statement closes with its own total (a Yardi
+      `ysi_is` PAYROLL EXPENSE section) is taken whole as Payroll at that
+      total, and each of its lines still carries its own amount, so "Repairs
+      Salaries" or "Temporary Help-Maint" count as maintenance payroll and
+      "Manager Salaries" does not. A salaries or wages line is always payroll,
+      never repairs or landscaping expense. Payroll taxes, benefits, bonuses
+      and fees are not allocated between maintenance and office staff: they
+      are non-maintenance payroll (they still count toward total payroll
+      against the benchmark). Only a section whose lines are named but not
+      amounted (T12 evidence recorded before the parser kept line amounts)
+      and that mixes maintenance labor with other payroll cannot be split;
+      it is listed as unseparated and earns nothing;
     - total payroll per unit above `HOUSE_PAYROLL_BENCHMARK_PER_UNIT`
       ($2,000/unit/year: NAA Income/Expense IQ 2024 data, administrative plus
       payroll $2,323/unit nationally; NAA 2021 survey, salaries and personnel

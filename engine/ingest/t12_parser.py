@@ -137,6 +137,15 @@ def _is_payroll_benefit_insurance(lowered_label: str) -> bool:
     )
 
 
+# Salaries and wages are payroll whatever they pay for: "Repairs Salaries"
+# and "Grounds Salaries" are labor, not repairs or landscaping expense.
+_PAYROLL_WAGE_RE = re.compile(r"\b(?:salar(?:y|ies)|wages?)\b", re.IGNORECASE)
+
+
+def _is_payroll_line(lowered_label: str) -> bool:
+    return _is_payroll_benefit_insurance(lowered_label) or bool(_PAYROLL_WAGE_RE.search(lowered_label))
+
+
 @dataclass
 class OpexGroup:
     """One hierarchical subsection of an OpEx statement."""
@@ -214,7 +223,7 @@ def _normalize_category(raw_name: str) -> tuple[str, bool]:
     resolve to the most specific category.
     """
     lower = _LEADING_ACCOUNT_CODE_RE.sub("", raw_name.strip().lower())
-    if _is_payroll_benefit_insurance(lower):
+    if _is_payroll_line(lower):
         return "Payroll", False
     best: tuple[int, int, str, int] | None = None  # (pos, -len, canonical, recoverable_rank)
     for pattern, canonical, recoverable in _SORTED_CATEGORY_MAP:
@@ -269,7 +278,7 @@ def _text_indent_level(raw_text: str) -> int:
 def _matches_category_map(text: str) -> str | None:
     """Return the canonical _CATEGORY_MAP hit, or None on no match."""
     lower = _LEADING_ACCOUNT_CODE_RE.sub("", text.strip().lower())
-    if _is_payroll_benefit_insurance(lower):
+    if _is_payroll_line(lower):
         return "Payroll"
     best: tuple[int, int, str, bool] | None = None
     for pattern, canonical, recoverable in _SORTED_CATEGORY_MAP:
@@ -325,7 +334,8 @@ def parse_t12_with_provenance(
     path = Path(path)
     _warnings: list[ParseWarning] = []
     _source_labels: dict[str, list[str]] = {}
-    rows = _load_rows(path, _warnings, _source_labels)
+    _source_line_amounts: dict[str, list[tuple[str, float]]] = {}
+    rows = _load_rows(path, _warnings, _source_labels, _source_line_amounts)
 
     # Accumulate by canonical name (handles duplicate rows)
     totals: dict[str, float] = {}
@@ -351,6 +361,14 @@ def parse_t12_with_provenance(
         source_rows.setdefault(canonical, []).extend(
             _source_labels.get(category_raw) or [category_raw.strip()]
         )
+        if _source_line_amounts.get(category_raw):
+            # Resolved from the statement's own sections (e.g. a Yardi payroll
+            # section taken whole): each statement line with its own amount.
+            line_amounts.setdefault(canonical, []).extend(
+                {"label": label.strip(), "annual": round(value, 2)}
+                for label, value in _source_line_amounts[category_raw]
+            )
+            continue
         line: dict[str, Any] = {"label": category_raw.strip(), "annual": round(annual_total, 2)}
         if _source_labels.get(category_raw):
             # A section taken whole: its lines are named but not amounted one by one.
@@ -667,14 +685,16 @@ def _load_rows(
     path: Path,
     warnings: list[ParseWarning] | None = None,
     source_labels: dict[str, list[str]] | None = None,
+    source_line_amounts: dict[str, list[tuple[str, float]]] | None = None,
 ) -> list[tuple[str, list[float | None]]]:
     """Load rows from CSV or Excel. Returns (category_name, [month_values...]).
 
-    When ``source_labels`` is given and the statement resolves through its own
-    nested sections, it is filled with canonical category -> the raw statement
-    lines that fed it.
+    When the statement resolves through its own nested sections,
+    ``source_labels`` is filled with canonical category -> the raw statement
+    lines that fed it, and ``source_line_amounts`` with the same lines and
+    their annual amounts.
     """
-    return _extract_statement_rows(_load_raw_rows(path), warnings, source_labels)
+    return _extract_statement_rows(_load_raw_rows(path), warnings, source_labels, source_line_amounts)
 
 
 def _load_raw_rows(path: Path) -> list[Any]:
@@ -1011,18 +1031,20 @@ def _resolve_sections(
     sections: list[_Section],
     warnings: list[ParseWarning],
     fallback: str | None = None,
-) -> list[tuple[str, float, list[str]]]:
+) -> list[tuple[str, float, list[tuple[str, float]]]]:
     """Resolve nested sections to (canonical category, annual amount, source lines).
 
     A section is never added on top of its own lines or child sections: it is
     taken whole at its total (a homogeneous category), or split into its lines
     (a container, a combined taxes & insurance section, or an unmapped
-    section), never both.
+    section), never both. Each source line keeps its own annual amount, so a
+    section taken whole (e.g. Payroll) can still be read line by line; a
+    section with no lines is one line under its header at its total.
     """
-    resolved: list[tuple[str, float, list[str]]] = []
+    resolved: list[tuple[str, float, list[tuple[str, float]]]] = []
     for section in sections:
         amount = section.total if section.total is not None else section.content_total()
-        nonzero = [label for label, value in section.detail_rows if value != 0]
+        nonzero = [(label, value) for label, value in section.detail_rows if value != 0]
         if amount == 0 and not nonzero and not section.children:
             continue
         category = _section_category(section)
@@ -1030,12 +1052,21 @@ def _resolve_sections(
             section.header
         )
         if category is not None and not combined and category not in _CONTAINER_SPLITS:
-            child_labels = [
-                label
-                for _, _, labels in _resolve_sections(section.children, [], category)
-                for label in labels
+            child_lines = [
+                line
+                for _, _, lines in _resolve_sections(section.children, [], category)
+                for line in lines
             ]
-            resolved.append((category, amount, nonzero + child_labels or [section.header]))
+            lines = nonzero + child_lines
+            if not lines:
+                lines = [(section.header, amount)]
+            else:
+                # The total ties to its lines within rounding; keep the lines
+                # summing to the amount taken.
+                residual = round(amount - sum(value for _, value in lines), 2)
+                if residual:
+                    lines.append((f"{(section.total_label or section.header).strip()} (unitemized)", residual))
+            resolved.append((category, amount, lines))
             continue
 
         section_fallback = category or fallback
@@ -1066,7 +1097,7 @@ def _resolve_sections(
                     )
                 )
                 match = _OTHER_OPEX
-            resolved.append((match, value, [label]))
+            resolved.append((match, value, [(label, value)]))
         resolved.extend(_resolve_sections(section.children, warnings, section_fallback))
     return resolved
 
@@ -1229,6 +1260,7 @@ def _extract_statement_rows(
     raw_rows: Any,
     warnings: list[ParseWarning] | None = None,
     source_labels: dict[str, list[str]] | None = None,
+    source_line_amounts: dict[str, list[tuple[str, float]]] | None = None,
 ) -> list[tuple[str, list[float | None]]]:
     """Extract expense rows from a T12/P&L export.
 
@@ -1288,10 +1320,12 @@ def _extract_statement_rows(
     nested = _parse_nested_sections(opex_raw_rows)
     if nested is not None:
         totals_by_category: dict[str, float] = {}
-        for canonical, amount, labels in _resolve_sections(nested, warnings):
+        for canonical, amount, lines in _resolve_sections(nested, warnings):
             totals_by_category[canonical] = totals_by_category.get(canonical, 0.0) + amount
             if source_labels is not None:
-                source_labels.setdefault(canonical, []).extend(labels)
+                source_labels.setdefault(canonical, []).extend(label for label, _ in lines)
+            if source_line_amounts is not None:
+                source_line_amounts.setdefault(canonical, []).extend(lines)
         return [(label, [round(amount, 2)]) for label, amount in totals_by_category.items()]
 
     groups = _detect_hierarchy(opex_raw_rows)
