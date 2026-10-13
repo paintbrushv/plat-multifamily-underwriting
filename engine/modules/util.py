@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from typing import List, Optional
 
 
@@ -23,6 +24,15 @@ def round4(value: Decimal) -> float:
 
 
 def parse_month(value: str) -> date:
+    # Months are parsed millions of times per run (every curve lookup), from a
+    # handful of distinct strings: memoize str input. ``date`` is immutable, and
+    # a bad value still raises on every call (lru_cache does not cache errors).
+    if type(value) is str:
+        return _parse_month_cached(value)
+    return _parse_month(value)
+
+
+def _parse_month(value: str) -> date:
     value = value.strip()
     if len(value) == 7 and value[4] == "-":
         year = int(value[0:4])
@@ -38,9 +48,22 @@ def parse_month(value: str) -> date:
     return date(year, month, 1)
 
 
+_parse_month_cached = lru_cache(maxsize=4096)(_parse_month)
+
+
 def month_id(value: str) -> str:
-    d = parse_month(value)
+    """``YYYY-MM`` for a month or first-of-month date string (memoized for str input)."""
+    if type(value) is str:
+        return _month_id_cached(value)
+    return _month_id(value)
+
+
+def _month_id(value: str) -> str:
+    d = _parse_month(value)
     return f"{d.year:04d}-{d.month:02d}"
+
+
+_month_id_cached = lru_cache(maxsize=4096)(_month_id)
 
 
 def get_total_units(unit_cohorts: List[dict]) -> Decimal:
