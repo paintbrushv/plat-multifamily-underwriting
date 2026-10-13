@@ -7,6 +7,14 @@ grouped by assumption group with the columns Assumption | Value | Default
 (source) | Why this default | User edit | Flags. Each row can expand the
 candidates the resolver considered.
 
+A backsolve run passes ``pricing`` (``engine.assumptions.register_pricing.
+pricing_header`` of its summary): the page then opens with a pricing summary
+header (status, target and basis, solved price, loan and its sizing basis,
+equity, caps, IRRs, minimum DSCR, the exit-cap sensitivity grid, and the
+floors the pricing enforced), highlights each row a floor set and adds an
+"Enforced in pricing" chip. Without ``pricing`` (run_deal, ingest) the page is
+unchanged.
+
 The page has no external assets: inline CSS (light and dark through
 ``prefers-color-scheme``, a print stylesheet, a narrow-screen card layout)
 and a few lines of vanilla JavaScript for the filter chips. Every piece of
@@ -19,7 +27,7 @@ from __future__ import annotations
 
 from html import escape
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 
 from engine.assumptions.register import FILTERS, build_register, flag_labels, guardrail_detail
 
@@ -34,6 +42,8 @@ CHIPS: tuple[tuple[str, str, str], ...] = (
     ("guardrail", "Guardrail flags", "Values a house floor warned on, enforced, waived or exempted"),
 )
 assert tuple(chip for chip, _, _ in CHIPS) == FILTERS
+# Shown only on a backsolve page (the rows a house floor set in pricing).
+PRICING_CHIP = ("pricing", "Enforced in pricing", "Values a house floor the pricing guardrail enforced")
 
 _FAMILY_LABELS = {
     "analyst": "Analyst",
@@ -55,6 +65,7 @@ _CSS = """
   --b-fallback: #eceff1; --b-fallback-fg: #455a64; --b-other: #eceff1; --b-other-fg: #455a64;
   --review: #fdecea; --review-fg: #a1281b; --warn: #fff1d6; --warn-fg: #8a5300;
   --ok: #e3f4e8; --ok-fg: #1e6b3a;
+  --enforced: #fdebdc; --enforced-bar: #c2410c; --enforced-fg: #9a3412;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -66,6 +77,7 @@ _CSS = """
     --b-fallback: #2a3036; --b-fallback-fg: #b8c4cc; --b-other: #2a3036; --b-other-fg: #b8c4cc;
     --review: #45201c; --review-fg: #f3aaa0; --warn: #40310f; --warn-fg: #f0c674;
     --ok: #18352a; --ok-fg: #9fd9b3;
+    --enforced: #3d2616; --enforced-bar: #f08a4b; --enforced-fg: #f6b98f;
   }
 }
 * { box-sizing: border-box; }
@@ -93,6 +105,31 @@ code, .key { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospa
 .capital ol { margin: 0; padding-left: 20px; }
 .capital li { margin: 2px 0; }
 .capital .binds { font-weight: 600; color: var(--accent); }
+.pricing { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+  margin: 0 0 16px; }
+.pricing h2 { margin: 0 0 8px; }
+.pricing h3 { font-size: 13px; margin: 14px 0 6px; }
+.pricing .status { margin: 0 0 8px; }
+.pricing .pnote { margin: 0 0 6px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin: 0; }
+.kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+.kpi dt { color: var(--muted); font-size: 12px; }
+.kpi dd { margin: 0; }
+.kpi dd.v { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.gridwrap { overflow-x: auto; }
+.pricing table { min-width: 0; width: auto; table-layout: auto; background: var(--bg);
+  border: 1px solid var(--border); }
+.pricing th, .pricing td { padding: 4px 10px; font-variant-numeric: tabular-nums; }
+.pricing thead th { position: static; }
+.pricing tr.base td { font-weight: 700; background: var(--head); }
+.pricing ul { margin: 0; padding-left: 20px; }
+.pricing li { margin: 3px 0; }
+.status-converged { background: var(--ok); color: var(--ok-fg); }
+.status-infeasible { background: var(--review); color: var(--review-fg); }
+.status-other { background: var(--warn); color: var(--warn-fg); }
+.flag-enforced { background: var(--enforced); color: var(--enforced-fg); border: 1px solid var(--enforced-bar); }
+tr.row.floor-enforced td { background: var(--enforced); }
+tr.row.floor-enforced td:first-child { box-shadow: inset 4px 0 0 var(--enforced-bar); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
 .chips[hidden] { display: none; }
 .chip {
@@ -155,11 +192,16 @@ footer { color: var(--muted); font-size: 12px; margin-top: 16px; }
   td[data-col]::before { content: attr(data-col); display: block; font-size: 11px; color: var(--muted);
     text-transform: uppercase; letter-spacing: 0.03em; }
   colgroup { display: none; }
+  .pricing table { display: table; width: auto; }
+  .pricing thead { display: table-header-group; }
+  .pricing tbody { display: table-row-group; }
+  .pricing tr { display: table-row; }
+  .pricing td, .pricing th { display: table-cell; width: auto; padding: 4px 8px; }
 }
 @media print {
   :root {
     --bg: #ffffff; --fg: #000000; --muted: #444444; --border: #bbbbbb; --panel: #f2f2f2; --head: #e6e6e6;
-    --edited: #fff3cc;
+    --edited: #fff3cc; --enforced: #fde3cf;
   }
   body { font-size: 10px; }
   main { max-width: none; padding: 0; }
@@ -276,6 +318,8 @@ _STATS: tuple[tuple[str, str], ...] = (
     ("guardrail_warnings", "Guardrail warnings"),
     ("guardrail_enforced", "Guardrail enforced"),
 )
+# Added on a backsolve page only.
+_PRICING_STATS: tuple[tuple[str, str], ...] = (("pinned_by_pricing", "Pinned by pricing"),)
 
 
 def _chip_counts(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
@@ -390,8 +434,9 @@ _FLAG_CLASSES = {
 }
 
 
-def _flags_cell(row: Mapping[str, Any]) -> str:
-    out = "".join(
+def _flags_cell(row: Mapping[str, Any], *, enforced: bool = False) -> str:
+    out = '<span class="badge flag-enforced">Enforced in pricing</span>' if enforced else ""
+    out += "".join(
         f'<span class="badge {_FLAG_CLASSES.get(flag, "flag-muted")}">{_e(label)}</span>'
         for flag, label in zip(row.get("flags") or (), flag_labels(row))
     )
@@ -405,12 +450,17 @@ _COLUMNS = ("Assumption", "Value", "Default (source)", "Why this default", "User
 _CELL_CLASSES = ("assumption", "value", "default", "why", "edit", "flags")
 
 
-def _row_html(row: Mapping[str, Any]) -> str:
+def _row_html(row: Mapping[str, Any], *, enforced: bool = False) -> str:
+    """One register row; ``enforced`` marks a row a house floor set in pricing."""
     classes = ["row"]
     if row.get("user_edit") is not None:
         classes.append("edited")
     if row.get("review_required"):
         classes.append("review")
+    filters = list(row.get("filters") or ["all"])
+    if enforced:
+        classes.append("floor-enforced")
+        filters.append(PRICING_CHIP[0])
     assumption = (
         f'<span class="label">{_e(row["label"])}</span>'
         f'<span class="key">{_e(row["key"])}</span>'
@@ -421,7 +471,7 @@ def _row_html(row: Mapping[str, Any]) -> str:
         ("default", _default_cell(row)),
         ("why", _why_cell(row)),
         ("edit", _edit_cell(row)),
-        ("flags", _flags_cell(row)),
+        ("flags", _flags_cell(row, enforced=enforced)),
     )
     tds = "".join(
         f'<td class="{cls}" data-col="{_e(column)}">{html}</td>'
@@ -429,7 +479,7 @@ def _row_html(row: Mapping[str, Any]) -> str:
     )
     return (
         f'<tr class="{" ".join(classes)}" id="a-{_e(row["key"])}" '
-        f'data-filters="{_e(" ".join(row.get("filters") or ["all"]))}">{tds}</tr>'
+        f'data-filters="{_e(" ".join(filters))}">{tds}</tr>'
     )
 
 
@@ -441,6 +491,15 @@ def render_html(register: Mapping[str, Any]) -> str:
     title = "Assumption register"
     if register.get("deal_id"):
         title = f"{title}: {register['deal_id']}"
+    pricing = register.get("pricing") if isinstance(register.get("pricing"), Mapping) else None
+    enforced = frozenset(str(k) for k in (pricing or {}).get("enforced_keys") or ())
+    if pricing is None:
+        sub = ("Every underwriting assumption for this deal: the value the model uses, the default the "
+               "resolver chose and why, and any edits made by the analyst.")
+    else:
+        sub = ("The backsolve pricing summary, then every assumption as priced: the value the model uses, "
+               "the default the resolver chose and why, and what the pricing changed. Rows a house floor "
+               "set in pricing are highlighted.")
 
     out: list[str] = [
         "<!DOCTYPE html>",
@@ -456,16 +515,18 @@ def render_html(register: Mapping[str, Any]) -> str:
         "<main>",
         "<header>",
         f"<h1>{_e(title)}</h1>",
-        '<p class="sub">Every underwriting assumption for this deal: the value the model uses, the default the '
-        "resolver chose and why, and any edits made by the analyst.</p>",
+        f'<p class="sub">{_e(sub)}</p>',
     ]
     items = _profile_items(register)
     if items:
         out.append('<dl class="profile">')
         out.extend(f"<div><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>" for label, value in items)
         out.append("</dl>")
+    if pricing is not None:
+        out.extend(_pricing_html(pricing, present={row["key"] for row in rows}))
     out.append('<div class="stats">')
-    for name, label in _STATS:
+    stats = _STATS + (_PRICING_STATS if pricing is not None else ())
+    for name, label in stats:
         out.append(
             f'<div class="stat"><span class="n">{_e(summary.get(name, 0))}</span>'
             f'<span class="l">{_e(label)}</span></div>'
@@ -477,7 +538,11 @@ def render_html(register: Mapping[str, Any]) -> str:
     counts = _chip_counts(rows)
     active = register.get("filter") or "all"
     out.append('<div class="chips" id="chips" role="toolbar" aria-label="Filter assumptions" hidden="hidden">')
-    for name, label, tip in CHIPS:
+    chips = CHIPS
+    if pricing is not None:
+        chips = CHIPS + (PRICING_CHIP,)
+        counts[PRICING_CHIP[0]] = sum(1 for row in rows if row["key"] in enforced)
+    for name, label, tip in chips:
         pressed = "true" if name == active else "false"
         out.append(
             f'<button type="button" class="chip" data-chip="{_e(name)}" aria-pressed="{pressed}" '
@@ -502,7 +567,7 @@ def render_html(register: Mapping[str, Any]) -> str:
             f'<tr class="group-head"><th colspan="{len(_COLUMNS)}" scope="rowgroup">{_e(group["group"])}'
             f'<span class="c">{len(keys)}</span></th></tr>'
         )
-        out.extend(_row_html(by_key[key]) for key in keys)
+        out.extend(_row_html(by_key[key], enforced=key in enforced) for key in keys)
         out.append("</tbody>")
     out.append("</table>")
     hidden = ' hidden="hidden"' if rows else ""
@@ -543,9 +608,141 @@ def _capital_plan_html(plan: Any) -> list[str]:
     return out
 
 
-def render_register_html(canonical: Mapping[str, Any]) -> str:
-    """``assumptions.html`` for a canonical (every assumption, candidates included)."""
-    return render_html(build_register(canonical))
+def _status_class(status: Any) -> str:
+    if status == "converged":
+        return "status-converged"
+    if status == "infeasible":
+        return "status-infeasible"
+    return "status-other"
+
+
+def _key_link(key: Any, label: Any, present: set[str]) -> str:
+    if str(key) in present:
+        return f'<a href="#a-{_e(key)}">{_e(label)}</a>'
+    return f"<strong>{_e(label)}</strong>"
+
+
+def _change(original: Any, applied: Any) -> str:
+    if original is None and applied is None:
+        return ""
+    return f" {_e(original if original is not None else '—')} → <strong>{_e(applied if applied is not None else '—')}</strong>"
+
+
+def _grid_html(grid: Mapping[str, Any]) -> list[str]:
+    points = [p for p in grid.get("points") or [] if isinstance(p, Mapping)]
+    if not points:
+        return []
+    columns = ("Offset", "Exit cap", "Exit value", "Levered IRR", "Unlevered IRR", "Levered EM")
+    fields = ("offset_display", "exit_cap_display", "exit_value_display", "levered_irr_display",
+              "unlevered_irr_display", "levered_em_display")
+    out = [
+        "<h3>Exit-cap sensitivity at the solved price</h3>",
+        '<div class="gridwrap"><table class="grid">',
+        "<thead><tr>" + "".join(f'<th scope="col">{_e(c)}</th>' for c in columns) + "</tr></thead><tbody>",
+    ]
+    for point in points:
+        cls = "grid-row base" if point.get("is_base") else "grid-row"
+        out.append(f'<tr class="{cls}">' + "".join(f"<td>{_e(point.get(f))}</td>" for f in fields) + "</tr>")
+    out.append("</tbody></table></div>")
+    if grid.get("rule"):
+        out.append(f'<p class="meta">{_e(grid["rule"])}</p>')
+    return out
+
+
+def _floors_html(pricing: Mapping[str, Any], present: set[str]) -> list[str]:
+    floors = [f for f in pricing.get("floors_enforced") or [] if isinstance(f, Mapping)]
+    top_up = pricing.get("r_and_m_top_up") if isinstance(pricing.get("r_and_m_top_up"), Mapping) else None
+    out = [f"<h3>Floors enforced in pricing ({len(floors)})</h3>"]
+    findings = pricing.get("floors_enforced_findings")
+    if isinstance(findings, int) and findings != len(floors):
+        out.append(f'<p class="meta">{_e(findings)} findings across segments and cohorts '
+                   '(the count the backsolve CLI prints).</p>')
+    if not floors and top_up is None:
+        out.append('<p class="none">None: every assumption cleared its house floor.</p>')
+        return out
+    out.append('<ul class="floors">')
+    for floor in floors:
+        meta = []
+        if floor.get("floor_display") is not None:
+            meta.append(f"floor {floor['floor_display']}")
+        if floor.get("floor_source"):
+            meta.append(str(floor["floor_source"]))
+        if isinstance(floor.get("count"), int) and floor["count"] > 1:
+            meta.append(f"{floor['count']} segments")
+        if floor.get("evidence"):
+            meta.append(f"over {floor['evidence']}")
+        out.append(
+            f"<li>{_key_link(floor.get('key'), floor.get('label'), present)} "
+            f'<code>{_e(floor.get("key"))}</code> '
+            f'<span class="badge flag-enforced">{_e(floor.get("action_label"))}</span>'
+            f"{_change(floor.get('original_display'), floor.get('applied_display'))}"
+            + (f' <span class="meta">{_e(" · ".join(meta))}</span>' if meta else "")
+            + "</li>"
+        )
+    if top_up is not None:
+        floor = f" to reach the house floor {top_up['floor_per_unit_display']}/unit" if top_up.get(
+            "floor_per_unit_display") else ""
+        link = _key_link(top_up.get("key"), "R&M top-up", present) if top_up.get("key") else "<strong>R&amp;M top-up</strong>"
+        out.append(
+            f"<li>{link}: <strong>{_e(top_up.get('annual_display'))}</strong> a year added as "
+            f"“{_e(top_up.get('category_name'))}”{_e(floor)}</li>"
+        )
+    out.append("</ul>")
+    return out
+
+
+def _adjustments_html(pricing: Mapping[str, Any]) -> list[str]:
+    items = [a for a in pricing.get("other_adjustments") or [] if isinstance(a, Mapping)]
+    if not items:
+        return []
+    out = [f"<h3>Other pricing adjustments ({len(items)})</h3>", '<ul class="adjustments">']
+    for item in items:
+        out.append(
+            f'<li><code>{_e(item.get("input"))}</code> '
+            f'<span class="badge flag-muted">{_e(item.get("action_label"))}</span>'
+            f"{_change(item.get('original_display'), item.get('applied_display'))}"
+            + (f' <span class="meta">{_e(item["detail"])}</span>' if item.get("detail") else "")
+            + "</li>"
+        )
+    out.append("</ul>")
+    return out
+
+
+def _pricing_html(pricing: Mapping[str, Any], *, present: set[str]) -> list[str]:
+    """The pricing summary header of a backsolve page (``register_pricing.pricing_header``)."""
+    out = [
+        '<section class="pricing" id="pricing" aria-label="Backsolve pricing">',
+        "<h2>Backsolve pricing</h2>",
+        f'<p class="status">Status: <span class="badge {_status_class(pricing.get("status"))}">'
+        f'{_e(pricing.get("status_label"))}</span>'
+        + (f' <code>{_e(pricing.get("status"))}</code>' if pricing.get("status") is not None else "")
+        + "</p>",
+    ]
+    out.extend(f'<p class="pnote">{_e(note)}</p>' for note in pricing.get("notes") or [])
+    metrics = [m for m in pricing.get("metrics") or [] if isinstance(m, Mapping)]
+    if metrics:
+        out.append('<dl class="kpis">')
+        for metric in metrics:
+            detail = f'<dd class="meta">{_e(metric["detail"])}</dd>' if metric.get("detail") else ""
+            out.append(
+                f'<div class="kpi" data-metric="{_e(metric.get("key"))}"><dt>{_e(metric.get("label"))}</dt>'
+                f'<dd class="v">{_e(metric.get("display"))}</dd>{detail}</div>'
+            )
+        out.append("</dl>")
+    if isinstance(pricing.get("exit_cap_grid"), Mapping):
+        out.extend(_grid_html(pricing["exit_cap_grid"]))
+    out.extend(_floors_html(pricing, present))
+    out.extend(_adjustments_html(pricing))
+    out.append("</section>")
+    return out
+
+
+def render_register_html(canonical: Mapping[str, Any], *, pricing: Optional[Mapping[str, Any]] = None) -> str:
+    """``assumptions.html`` for a canonical (every assumption, candidates included).
+
+    ``pricing`` (``register_pricing.pricing_header``) adds the backsolve pricing header.
+    """
+    return render_html(build_register(canonical, pricing=pricing))
 
 
 def register_html_path_for(output_path: Path | str) -> Path:
@@ -554,9 +751,11 @@ def register_html_path_for(output_path: Path | str) -> Path:
     return output_path.with_name(f"{output_path.stem}.assumptions.html")
 
 
-def write_register_html(canonical: Mapping[str, Any], path: Path | str) -> Path:
-    """Write ``assumptions.html`` for the canonical and return its path."""
+def write_register_html(
+    canonical: Mapping[str, Any], path: Path | str, *, pricing: Optional[Mapping[str, Any]] = None,
+) -> Path:
+    """Write ``assumptions.html`` for the canonical (with ``pricing``, the backsolve header) and return its path."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_register_html(canonical), encoding="utf-8")
+    path.write_text(render_register_html(canonical, pricing=pricing), encoding="utf-8")
     return path

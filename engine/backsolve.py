@@ -1974,6 +1974,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--min-price", type=Decimal, default=Decimal("1000000"))
     parser.add_argument("--max-price", type=Decimal, default=Decimal("100000000"))
     parser.add_argument("--max-iterations", type=int, default=40)
+    parser.add_argument("--no-assumptions-html", action="store_true",
+                        help=f"Do not write {REGISTER_HTML_NAME}, the assumption register page with the "
+                             "pricing summary header (written by default, infeasible solves included)")
     return parser.parse_args()
 
 
@@ -2080,9 +2083,19 @@ def backsolve_price(
     if hi_coc > lo_coc:
         raise BacksolveInputError("cash-on-cash is not decreasing across the price bracket")
     base = {"contract_version": CONTRACT_VERSION, "effective_assumptions": effective, "bracket": bracket}
+    findings = (policy_summary.get("guardrails") or {}).get("findings") or []
     if lo_coc < target:
         summary = {**base, "status": "infeasible", "solved_purchase_price": None}
-        return {**base, "status": "infeasible", "case": None, "results": None, "summary": summary}
+        # Never a solved case: the case priced at min_price, its assumptions
+        # re-resolved in pricing mode, so the assumptions the search used
+        # (floors enforced, policy values) can still be reviewed (UPL-97).
+        bracket_floor_case = _with_pricing_assumptions(
+            lo_case, strategy=values["strategy"], year_built=values["year_built"], findings=findings,
+            original=canonical, policy=policy, values=values, policy_summary=policy_summary,
+            analyst_keys=analyst_keys,
+        )
+        return {**base, "status": "infeasible", "case": None, "results": None, "summary": summary,
+                "bracket_floor_case": bracket_floor_case}
     search_ceiling_reached = hi_coc >= target
     if search_ceiling_reached:
         solved_case, solved_results, solved_coc = hi_case, hi_results, hi_coc
@@ -2112,7 +2125,7 @@ def backsolve_price(
         solved_case,
         strategy=values["strategy"],
         year_built=values["year_built"],
-        findings=(policy_summary.get("guardrails") or {}).get("findings") or [],
+        findings=findings,
         original=canonical,
         policy=policy,
         values=values,
@@ -2305,10 +2318,34 @@ def format_cli_summary(summary: dict[str, Any], summary_path: Path) -> str:
         f"  Floors enforced:  {enforced}",
         f"  Summary:          {summary_path}",
     ]
-    labels = {"canonical": "Canonical", "underwriting": "Results", "assumptions": "Assumptions"}
+    labels = {"canonical": "Canonical", "underwriting": "Results", "assumptions": "Assumptions",
+              "assumptions_html": "Register page"}
     for key, path in (summary.get("artifacts") or {}).items():
         lines.append(f"  {labels.get(key, key.title()) + ':':<18}{path}")
     return "\n".join(lines)
+
+
+REGISTER_HTML_NAME = "assumptions.html"
+
+
+def write_backsolve_register_html(
+    result: dict[str, Any], path: Path, *, summary: dict[str, Any] | None = None,
+) -> Path:
+    """Write the assumption register page of a backsolve result, with its pricing header (UPL-97).
+
+    The page shows the solved case's priced assumptions; an infeasible solve
+    has no solved case, so it shows the case the search priced at the bracket
+    floor (``bracket_floor_case``) under a header with no solved price.
+    """
+    from engine.assumptions.register_html import write_register_html
+    from engine.assumptions.register_pricing import pricing_header
+
+    case = result.get("case")
+    if case is None:
+        case = result.get("bracket_floor_case")
+    summary = result.get("summary") if summary is None else summary
+    pricing = pricing_header(summary, canonical=case, results=result.get("results"))
+    return write_register_html(case or {}, path, pricing=pricing)
 
 
 def main() -> None:
@@ -2360,6 +2397,9 @@ def main() -> None:
         if has_assumptions(result["case"]):
             sheet_path = write_assumptions_json(result["case"], output_dir / "assumptions.json")
             summary["artifacts"]["assumptions"] = str(sheet_path)
+    if not args.no_assumptions_html:
+        page_path = write_backsolve_register_html(result, output_dir / REGISTER_HTML_NAME, summary=summary)
+        summary.setdefault("artifacts", {})["assumptions_html"] = str(page_path)
     summary_path = output_dir / "backsolve_summary.json"
     _write_json(summary_path, summary)
     print(format_cli_summary(summary, summary_path))

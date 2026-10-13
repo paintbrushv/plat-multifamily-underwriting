@@ -255,10 +255,17 @@ python -m engine.backsolve --canonical-json output/deal.json \
   --benchmark-5yr-treasury 0.04 --benchmark-as-of 2026-09-30 --benchmark-source "analyst entry"
 ```
 
-It writes `backsolve_summary.json`, the priced canonical, its results and
-`assumptions.json` into the output folder, and prints the status, solved
-price, cash-on-cash basis and target, achieved cash-on-cash, levered IRR,
-minimum DSCR, the number of floors enforced and those paths. It exits 2 when
+It writes `backsolve_summary.json`, the priced canonical, its results,
+`assumptions.json` and `assumptions.html` into the output folder. The page is
+the assumption register of the priced canonical under a pricing summary
+header: status, target and basis, solved price and $/unit, loan amount and
+sizing basis, equity, going-in and exit cap, IRRs, minimum DSCR and the
+exit-cap grid, with every floor the pricing enforced listed and its row
+highlighted. An infeasible solve still writes the page (no solved price, the
+assumptions priced at the bracket floor); `--no-assumptions-html` skips it.
+It prints the status, solved price, cash-on-cash basis and target, achieved
+cash-on-cash, levered IRR, minimum DSCR, the number of floors enforced and
+those paths. It exits 2 when
 the search is infeasible or exhausted. Fees, closing costs and the sale cost
 are the canonical's analyst values when it has them (the ingest `--sale-cost`,
 an override), else the policy defaults; a flag such as `--sale-cost-percent`
