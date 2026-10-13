@@ -187,6 +187,22 @@ def test_the_t12_parser_keeps_each_payroll_line_amount():
         ("Payroll - Office", 104_000.0), ("Payroll - Leasing", 76_000.0), ("Payroll - Maintenance", 120_000.0)]
 
 
+def test_a_flat_t12_keeps_maintenance_salaries_in_payroll(tmp_path):
+    # Salaries are payroll whatever they pay for: "Repairs Salaries" is
+    # maintenance labor, not a repairs & maintenance expense.
+    path = tmp_path / "t12.csv"
+    rows = [("Manager Salaries", 3_000), ("Repairs Salaries", 2_500), ("Grounds Salaries", 500),
+            ("Repairs & Maintenance", 1_000), ("Property Insurance", 1_500)]
+    path.write_text("Category," + ",".join(f"M{m}" for m in range(1, 13)) + "\n" + "".join(
+        f"{label}," + ",".join([str(monthly)] * 12) + "\n" for label, monthly in rows))
+    opex, provenance = parse_t12_with_provenance(path)
+    by_name = {row["category_name"]: row["base_value"] for row in opex}
+    assert by_name["Payroll"] == 72_000.0
+    assert by_name["Repairs & Maintenance"] == 12_000.0
+    assert [(line["label"], line["annual"]) for line in provenance["_line_amounts"]["Payroll"]] == [
+        ("Manager Salaries", 36_000.0), ("Repairs Salaries", 30_000.0), ("Grounds Salaries", 6_000.0)]
+
+
 @lru_cache(maxsize=None)
 def _library(slug: str) -> str:
     return json.dumps(dl.ingest(dl.load_deal(slug)))
