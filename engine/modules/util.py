@@ -66,6 +66,63 @@ def _month_id(value: str) -> str:
 _month_id_cached = lru_cache(maxsize=4096)(_month_id)
 
 
+class CurveLookup:
+    """One curve's ``start_period``/``end_period`` segments, looked up by month.
+
+    Equivalent to scanning ``rows`` for the one segment covering a month on
+    every call (a missing month raises ``KeyError``, overlapping segments raise
+    ``ValueError``), but each row's period is parsed once, on the first lookup,
+    and each month's value is computed once. Errors are never cached: a lookup
+    that raised raises again. A curve with a row whose period does not parse
+    is scanned row by row on every lookup, exactly as before, so it raises the
+    same error at the same lookup. ``rows`` must not change while in use.
+    """
+
+    __slots__ = ("_rows", "_value_field", "_segments", "_values")
+
+    def __init__(self, rows: List[dict], value_field: str):
+        self._rows = rows
+        self._value_field = value_field
+        self._segments: Optional[List[tuple]] = None  # None: not parsed yet; False: unparseable
+        self._values: dict = {}
+
+    def __call__(self, month: str) -> Decimal:
+        month = month_id(month)
+        values = self._values
+        if month in values:
+            return values[month]
+        segments = self._segments
+        if segments is None:
+            try:
+                segments = [(month_id(row["start_period"]), month_id(row["end_period"]), row) for row in self._rows]
+            except Exception:
+                segments = False
+            self._segments = segments
+        if segments is False:
+            matches = [
+                row
+                for row in self._rows
+                if month_id(row["start_period"]) <= month <= month_id(row["end_period"])
+            ]
+        else:
+            matches = [row for start, end, row in segments if start <= month <= end]
+        value_field = self._value_field
+        if not matches:
+            raise KeyError(f"Missing curve value for month={month} field={value_field}")
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous curve lookup for month={month}: {len(matches)} overlapping segments. "
+                f"Validator should have caught this; check augmented_curves invariants."
+            )
+        value = values[month] = dec(matches[0][value_field])
+        return value
+
+
+def find_curve_value(curve_rows: List[dict], month: str, value_field: str) -> Decimal:
+    """The value of the one segment of ``curve_rows`` covering ``month`` (see ``CurveLookup``)."""
+    return CurveLookup(curve_rows, value_field)(month)
+
+
 def get_total_units(unit_cohorts: List[dict]) -> Decimal:
     """Sum total units across all cohorts."""
     return sum(dec(c["unit_count"]) for c in unit_cohorts)

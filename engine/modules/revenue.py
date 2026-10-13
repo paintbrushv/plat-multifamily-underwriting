@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from engine.modules.time_grid import TimeGrid
-from engine.modules.util import dec, month_id, round2
+from engine.modules.util import CurveLookup, dec, find_curve_value, month_id, round2
 
 
 @dataclass(frozen=True)
@@ -22,20 +22,7 @@ class BaseRentMonthResult:
 
 
 def _find_curve_value(curve_rows: List[Dict[str, Any]], month: str, value_field: str) -> Decimal:
-    month = month_id(month)
-    matches = [
-        row
-        for row in curve_rows
-        if month_id(row["start_period"]) <= month <= month_id(row["end_period"])
-    ]
-    if not matches:
-        raise KeyError(f"Missing curve value for month={month} field={value_field}")
-    if len(matches) > 1:
-        raise ValueError(
-            f"Ambiguous curve lookup for month={month}: {len(matches)} overlapping segments. "
-            f"Validator should have caught this; check augmented_curves invariants."
-        )
-    return dec(matches[0][value_field])
+    return find_curve_value(curve_rows, month, value_field)
 
 
 def _compute_concession_for_cohort(
@@ -92,18 +79,28 @@ def compute_base_rent(
         for cid in dynamic_unit_counts:
             if cid not in cohort_ids:
                 cohort_ids.append(cid)
-    mr_by_cohort = {cid: [r for r in market_rent_curve if r["cohort_id"] == cid] for cid in cohort_ids}
-    ltl_by_cohort = {cid: [r for r in loss_to_lease if r["cohort_id"] == cid] for cid in cohort_ids}
-    vac_by_cohort = {cid: [r for r in physical_vacancy_curve if r["cohort_id"] == cid] for cid in cohort_ids}
+    # One lookup per curve: each segment's period is parsed once, not per month.
+    mr_by_cohort = {
+        cid: CurveLookup([r for r in market_rent_curve if r["cohort_id"] == cid], "market_rent")
+        for cid in cohort_ids
+    }
+    ltl_by_cohort = {
+        cid: CurveLookup([r for r in loss_to_lease if r["cohort_id"] == cid], "ltl_percent")
+        for cid in cohort_ids
+    }
+    vac_by_cohort = {
+        cid: CurveLookup([r for r in physical_vacancy_curve if r["cohort_id"] == cid], "vacancy_rate")
+        for cid in cohort_ids
+    }
 
-    cl_rent = [r for r in collection_loss_curve if r["applies_to"] == "Rent"]
-    cl_all = [r for r in collection_loss_curve if r["applies_to"] == "ALL"]
+    cl_rent = CurveLookup([r for r in collection_loss_curve if r["applies_to"] == "Rent"], "loss_rate")
+    cl_all = CurveLookup([r for r in collection_loss_curve if r["applies_to"] == "ALL"], "loss_rate")
 
     def loss_rate_for_rent(month: str) -> Decimal:
         try:
-            return _find_curve_value(cl_rent, month, "loss_rate")
+            return cl_rent(month)
         except KeyError:
-            return _find_curve_value(cl_all, month, "loss_rate")
+            return cl_all(month)
 
     cl_rate_by_month = {m: loss_rate_for_rent(m) for m in time_grid.month_ids}
 
@@ -129,9 +126,9 @@ def compute_base_rent(
             else:
                 unit_count = Decimal("0")
 
-            market_rent = _find_curve_value(mr_by_cohort[cohort_id], month, "market_rent")
-            ltl = _find_curve_value(ltl_by_cohort[cohort_id], month, "ltl_percent")
-            vacancy = _find_curve_value(vac_by_cohort[cohort_id], month, "vacancy_rate")
+            market_rent = mr_by_cohort[cohort_id](month)
+            ltl = ltl_by_cohort[cohort_id](month)
+            vacancy = vac_by_cohort[cohort_id](month)
 
             inplace_rent = market_rent * (Decimal("1") - ltl)
             occupied_units = unit_count * (Decimal("1") - vacancy)
