@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+from decimal import Decimal
 from functools import lru_cache
 
 import pytest
@@ -205,3 +206,99 @@ def test_library_deals_disclose_the_review_from_the_t12_lines(slug):
     # Library payroll is at or below the benchmark: payroll is payroll, no credit.
     assert review["payroll_per_unit"] <= float(BENCHMARK)
     assert entry["value"] == 0.0 and entry["review_required"] is False
+
+
+# ── Yardi ysi_is: a payroll section read line by line ────────────────────
+#
+# A Yardi statement itemizes its PAYROLL EXPENSE section (maintenance wages,
+# office wages, bonuses, taxes, benefits, fees) and closes it with a total.
+# The section is taken whole as Payroll, but each line keeps its own annual
+# amount, so the review reads the labeled maintenance payroll from it.
+
+
+def _yardi_payroll_deal(tmp_path, payroll_lines=None):
+    from engine.ingest.ingestion_pipeline import build_deal_from_documents
+    from tests import yardi_fixtures as yf
+
+    sections = copy.deepcopy(yf.T12_OPEX)
+    if payroll_lines is not None:
+        [payroll] = [s for s in sections if s["header"].strip() == "PAYROLL EXPENSE"]
+        payroll["lines"] = list(payroll_lines)
+    deal = build_deal_from_documents(
+        property_id="Synthetic Yardi Deal",
+        rent_roll_path=yf.write_yardi_rent_roll(tmp_path / "rent_roll.xlsx"),
+        t12_path=yf.write_yardi_t12(tmp_path / "ysi_is.xlsx", sections),
+        analysis_start="2027-02",
+        analysis_end="2032-01",
+        rent_growth_rate=0.025,
+        collection_loss_rate=0.01,
+        year_built=YEAR,
+    )
+    return deal, len(yf.RR_UNITS)
+
+
+def _payroll_evidence(deal):
+    return deal["metadata"]["ingest_gate"]["evidence"]["t12"]["opex_lines"]["Payroll"]
+
+
+def test_a_yardi_payroll_section_above_the_benchmark_credits_its_labeled_maintenance_lines(tmp_path):
+    from tests.yardi_fixtures import t12_line, t12_section
+
+    deal, units = _yardi_payroll_deal(tmp_path)
+    payroll = t12_section("TOTAL PAYROLL EXPENSE")
+    maintenance = t12_line("Repairs Salaries") + t12_line("Temporary Help-Maint")
+    assert payroll / units > float(BENCHMARK)
+
+    # Opex and the reconciliation gate are untouched: Payroll is the section total, once.
+    assert deal["metadata"]["ingest_gate"]["t12_reconciliation"]["status"] == "PASS"
+    [row] = [r for r in deal["opex_table"] if r["category_name"] == "Payroll"]
+    assert row["base_value"] == pytest.approx(payroll)
+    assert not any(r["category_name"] == "Repairs & Maintenance" and r["base_value"] >= t12_line("Repairs Salaries")
+                   for r in deal["opex_table"])
+    evidence = _payroll_evidence(deal)
+    assert evidence["annual_amount"] == pytest.approx(payroll)
+    lines = {line["label"]: line["annual"] for line in evidence["source_lines"]}
+    assert lines["Manager Salaries"] == pytest.approx(t12_line("Manager Salaries"))
+    assert lines["Repairs Salaries"] == pytest.approx(t12_line("Repairs Salaries"))
+    assert sum(lines.values()) == pytest.approx(payroll)
+
+    review = guardrails.r_and_m_payroll_review(deal, Decimal("900"))
+    assert review["payroll_annual"] == pytest.approx(payroll)
+    assert review["maintenance_payroll_lines"] == [
+        {"label": "Repairs Salaries", "annual": pytest.approx(t12_line("Repairs Salaries"))},
+        {"label": "Temporary Help-Maint", "annual": pytest.approx(t12_line("Temporary Help-Maint"))},
+    ]
+    assert review["maintenance_payroll_annual"] == pytest.approx(maintenance)
+    assert review["unseparated_payroll_sections"] == []
+    above = payroll - float(BENCHMARK) * units
+    assert maintenance < above
+    assert review["house_credit_annual"] == pytest.approx(min(maintenance, above))
+
+
+def test_a_yardi_payroll_section_below_the_benchmark_lists_its_maintenance_lines_and_earns_no_credit(tmp_path):
+    payroll_lines = [
+        ("Manager Salaries", 9_000.00),
+        ("Repairs Salaries", 8_400.00),
+        ("Bonuses", 300.00),
+        ("Payroll /Unemployment Tax", 1_150.00),
+        ("Workers Compensation Insurance", 240.00),
+        ("Health/Life Insurance", 2_200.00),
+        ("Temporary Help-Office", 450.00),
+        ("Temporary Help-Maint", 600.00),
+        ("Payroll Fees", 180.00),
+    ]
+    deal, units = _yardi_payroll_deal(tmp_path, payroll_lines)
+    payroll = sum(amount for _, amount in payroll_lines)
+    assert payroll / units < float(BENCHMARK)
+    assert deal["metadata"]["ingest_gate"]["t12_reconciliation"]["status"] == "PASS"
+
+    review = guardrails.r_and_m_payroll_review(deal, Decimal("900"))
+    assert review["payroll_annual"] == pytest.approx(payroll)
+    assert review["maintenance_payroll_lines"] == [
+        {"label": "Repairs Salaries", "annual": 8_400.0},
+        {"label": "Temporary Help-Maint", "annual": 600.0},
+    ]
+    assert review["maintenance_payroll_annual"] == pytest.approx(9_000.0)
+    assert review["unseparated_payroll_sections"] == []
+    assert review["payroll_above_benchmark_annual"] == 0.0
+    assert review["house_credit_annual"] == 0.0
