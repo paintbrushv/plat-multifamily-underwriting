@@ -478,6 +478,99 @@ def test_vacancy_anchor_counts_statuses_case_and_separator_insensitively():
     assert summary["conservative_downside_candidates"]["rent_roll_vacant_plus_notice"] == 0.8
     assert summary["conservative_downside_selected_anchor"] == ["rent_roll_vacant_plus_notice"]
 
+
+def _library_rent_roll_counts(slug: str) -> tuple[int, int]:
+    """(vacant, total) units read straight from a library deal's rent roll CSV."""
+    import csv
+
+    path = Path(__file__).parent / "fixtures" / "deals" / slug / "rent_roll.csv"
+    with path.open(newline="", encoding="utf-8") as handle:
+        statuses = [row["Status"].strip().lower() for row in csv.DictReader(handle)]
+    return sum(1 for status in statuses if status.startswith("vacant")), len(statuses)
+
+
+def _anchor(canonical, default_vacancy="0.05"):
+    return _vacancy_anchor_summary(
+        canonical,
+        default_vacancy=Decimal(default_vacancy),
+        broker_vacancy=None,
+        trailing_actuals=None,
+        broker_snapshot=None,
+    )
+
+
+def test_vacancy_anchor_reads_the_ingested_rent_roll_without_a_box_score():
+    # UPL-107: document ingest fills no house box score; the rent-roll anchor
+    # must come from the ingested rent roll's own unit counts, not read 0.0.
+    from tests import deal_library as dl
+
+    slug = "c_value_add_1970s_reno"
+    vacant, total = _library_rent_roll_counts(slug)
+    canonical = dl.ingest_documents(dl.load_deal(slug))
+    assert not (canonical["metadata"].get("property_summary") or {}).get("house_box_score")
+
+    base_rate, summary = _anchor(canonical)
+
+    assert vacant > 0
+    assert summary["base_case_candidates"]["rent_roll_vacant"] == pytest.approx(vacant / total)
+    assert base_rate == Decimal(vacant) / Decimal(total)
+    assert summary["base_case_selected_anchor"] == ["rent_roll_vacant"]
+    evidence = summary["rent_roll_vacancy_evidence"]
+    assert evidence["source"] == "ingest_gate.rent_roll_reconciliation"
+    assert (evidence["vacant_units"], evidence["total_units"]) == (vacant, total)
+    # The ingested roll does not separate notice units: the conservative
+    # candidate is the vacant rate, disclosed as such, never 0.0.
+    assert summary["conservative_downside_candidates"]["rent_roll_vacant_plus_notice"] == pytest.approx(
+        vacant / total
+    )
+    assert evidence["notice_units"] is None
+    assert "notice" in evidence["note"]
+
+
+def test_vacancy_anchor_prefers_box_score_counts_over_the_ingested_rent_roll():
+    canonical = {
+        "metadata": {
+            "property_summary": {
+                "house_box_score": {"total_units": 20, "status_counts": {"Occupied": 16, "Vacant": 3, "Notice": 1}},
+            },
+            "ingest_gate": {
+                "rent_roll_reconciliation": {
+                    "units": {"parsed": 20, "status": "PASS"},
+                    "vacant_units": {"parsed": 10, "status": "PASS"},
+                },
+            },
+        },
+        "unit_cohorts": [{"cohort_id": "all", "unit_count": 20}],
+        "physical_vacancy_curve": [],
+    }
+
+    base_rate, summary = _anchor(canonical)
+
+    assert base_rate == Decimal("0.15")
+    assert summary["base_case_candidates"]["rent_roll_vacant"] == 0.15
+    assert summary["conservative_downside_candidates"]["rent_roll_vacant_plus_notice"] == 0.2
+    evidence = summary["rent_roll_vacancy_evidence"]
+    assert evidence["source"] == "house_box_score.status_counts"
+    assert (evidence["vacant_units"], evidence["notice_units"], evidence["total_units"]) == (3, 1, 20)
+
+
+def test_vacancy_anchor_reports_rent_roll_unavailable_not_zero():
+    canonical = {
+        "metadata": {"property_summary": {}},
+        "unit_cohorts": [{"cohort_id": "all", "unit_count": 20}],
+        "physical_vacancy_curve": [],
+    }
+
+    base_rate, summary = _anchor(canonical)
+
+    assert summary["base_case_candidates"]["rent_roll_vacant"] is None
+    assert summary["conservative_downside_candidates"]["rent_roll_vacant_plus_notice"] is None
+    assert base_rate == Decimal("0.05")
+    assert summary["base_case_selected_anchor"] == ["vintage_house_floor"]
+    evidence = summary["rent_roll_vacancy_evidence"]
+    assert evidence["source"] is None
+    assert evidence["unavailable_reason"]
+
 def test_prepare_house_assumptions_preserves_multisegment_market_rent_curve():
     canonical = {
         "metadata": {
