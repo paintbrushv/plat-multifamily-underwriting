@@ -2348,6 +2348,44 @@ def write_backsolve_register_html(
     return write_register_html(case or {}, path, pricing=pricing)
 
 
+SUMMARY_NAME = "backsolve_summary.json"
+SOLVED_CANONICAL_NAME = "canonical_backsolved_target_coc.json"
+SOLVED_RESULTS_NAME = "underwriting_backsolved_target_coc.json"
+
+
+def write_backsolve_artifacts(
+    result: dict[str, Any], output_dir: Path, *, assumptions_html: bool = True,
+) -> tuple[dict[str, Any], Path]:
+    """Write a backsolve result's artifacts into ``output_dir``; return (summary, summary path).
+
+    The solved canonical and results (when a price was solved), its
+    assumptions sheet, the assumption register page with the pricing header
+    (unless ``assumptions_html`` is False; infeasible solves included) and
+    ``backsolve_summary.json``, whose ``artifacts`` lists every file written.
+    Shared by the CLI and the MCP workflow (``engine.workflow``).
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = deepcopy(result["summary"])
+    if result["case"] is not None:
+        case_path = output_dir / SOLVED_CANONICAL_NAME
+        results_path = output_dir / SOLVED_RESULTS_NAME
+        _write_json(case_path, result["case"])
+        _write_json(results_path, result["results"])
+        summary["artifacts"] = {"canonical": str(case_path), "underwriting": str(results_path)}
+        from engine.assumptions.sheet import has_assumptions, write_assumptions_json
+
+        if has_assumptions(result["case"]):
+            sheet_path = write_assumptions_json(result["case"], output_dir / "assumptions.json")
+            summary["artifacts"]["assumptions"] = str(sheet_path)
+    if assumptions_html:
+        page_path = write_backsolve_register_html(result, output_dir / REGISTER_HTML_NAME, summary=summary)
+        summary.setdefault("artifacts", {})["assumptions_html"] = str(page_path)
+    summary_path = output_dir / SUMMARY_NAME
+    _write_json(summary_path, summary)
+    return summary, summary_path
+
+
 def main() -> None:
     args = _parse_args()
     canonical = _load_json(Path(args.canonical_json))
@@ -2384,24 +2422,8 @@ def main() -> None:
         revenue_quality_bridge=_load_bridge_if_available(args.revenue_quality_bridge_json, Path(args.output_dir)),
         trailing_actuals=_load_trailing_actuals(Path(args.trailing_actuals_json) if args.trailing_actuals_json else None),
     )
-    output_dir = Path(args.output_dir)
-    summary = deepcopy(result["summary"])
-    if result["case"] is not None:
-        case_path = output_dir / "canonical_backsolved_target_coc.json"
-        results_path = output_dir / "underwriting_backsolved_target_coc.json"
-        _write_json(case_path, result["case"])
-        _write_json(results_path, result["results"])
-        summary["artifacts"] = {"canonical": str(case_path), "underwriting": str(results_path)}
-        from engine.assumptions.sheet import has_assumptions, write_assumptions_json
-
-        if has_assumptions(result["case"]):
-            sheet_path = write_assumptions_json(result["case"], output_dir / "assumptions.json")
-            summary["artifacts"]["assumptions"] = str(sheet_path)
-    if not args.no_assumptions_html:
-        page_path = write_backsolve_register_html(result, output_dir / REGISTER_HTML_NAME, summary=summary)
-        summary.setdefault("artifacts", {})["assumptions_html"] = str(page_path)
-    summary_path = output_dir / "backsolve_summary.json"
-    _write_json(summary_path, summary)
+    summary, summary_path = write_backsolve_artifacts(
+        result, Path(args.output_dir), assumptions_html=not args.no_assumptions_html)
     print(format_cli_summary(summary, summary_path))
     if result["status"] not in {"converged", "ceiling_feasible"}:
         raise SystemExit(2)

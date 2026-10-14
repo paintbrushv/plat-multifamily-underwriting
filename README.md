@@ -20,7 +20,7 @@ pytest
 | `engine/validator.py` | Schema v0.1 conformance + reference integrity + cohort-overlap gates. |
 | `engine/property_tax.py`, `engine/tax_regimes.py` | Millage-based property tax projection with per-regime statute citations. |
 | `engine/api.py` | Framework-free JSON request handlers (`handle_run_deal`, `handle_assumption_register`, portfolio, refi-vs-sell). |
-| `engine/mcp_server.py` | Installed `plat.underwriting.mcp/1` stdio adapter for validation, small summary metrics, feasibility, and the assumption register. |
+| `engine/mcp_server.py`, `engine/workflow/` | MCP server: a guided deal workflow over a persistent workspace (create, add documents, describe, ingest, review, edit, run, solve price, export) plus the stateless `plat.underwriting.mcp/1` tools. See [Use it from an AI assistant](#use-it-from-an-ai-assistant). |
 | `runs/ingest_deal.py` | Canonical intake CLI: documents or agent-authored JSON -> validated deal JSON. |
 | `runs/run_deal.py` | Run CLI: canonical deal JSON -> validation, engine results, assumptions sheet, workbook, key metrics. |
 | `engine/assumptions/`, `runs/assumptions_sheet.py` | Assumption layer (ADR 0003): resolved assumptions with provenance, the editable assumptions sheet (JSON and Excel), and the assumption register (`assumptions.html`). |
@@ -440,13 +440,83 @@ the ingested rent roll (e.g. `1br1ba`); the renovated units move to
 `seasonal_downtime_multipliers`. A `--partial-json` file may also carry
 `metadata.property_summary.property_tax_policy` instead of `--millage`.
 
-For the optional MCP adapter, install `plat-multifamily-underwriting[mcp]`
-and run `python -m engine.mcp_server` from any working directory. It exposes
-three read-only tools and does not persist a deal or emit workbook artifacts.
-Callers should pin the producer version and package contents before relying
-on its results. The feasibility response evaluates IRR, DSCR, and LTV; a
-missing purchase price or debt commitment leaves LTV unavailable and fails
-that gate.
+The same flow is available to an AI assistant through the MCP server; see
+[Use it from an AI assistant](#use-it-from-an-ai-assistant).
+
+## Use it from an AI assistant
+
+`engine/mcp_server.py` is an MCP server, so any assistant that speaks the
+Model Context Protocol (Claude, ChatGPT, Grok, Copilot, Cursor, ...) can
+underwrite a deal end to end: the assistant collects the documents and the
+analyst's inputs, calls the tools, and explains the results. Every number
+still comes from the deterministic engine. Each tool returns a plain
+`summary` and a `next_step`, and every error says how to fix it. The tool
+contract is [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md); the analyst walkthrough
+is [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
+
+```bash
+pip install -e ".[mcp]"        # or: pip install "plat-multifamily-underwriting[mcp]"
+plat-uw mcp                    # stdio (the default)
+plat-uw mcp --http             # Streamable HTTP at http://127.0.0.1:8765/mcp
+```
+
+The eight steps are `create_deal`, `add_document` (T12 and rent roll; OM and
+PCA optional), `describe_deal`, `ingest_deal`, `review_assumptions`,
+`edit_assumptions`, `run_deal` and `solve_price`; `export_deal` lists the
+workbook, results and assumption register. Ask the assistant to call
+`start_here`, or to try `load_sample_deal` (a bundled synthetic deal), or use
+the `new_deal_walkthrough` prompt.
+
+**Claude Desktop (stdio).** Add the server to `claude_desktop_config.json`
+(Settings > Developer > Edit Config) and restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "multifamily-underwriting": {
+      "command": "/path/to/.venv/bin/plat-uw",
+      "args": ["mcp"],
+      "env": { "PLAT_UNDERWRITING_HOME": "/path/to/underwriting-workspace" }
+    }
+  }
+}
+```
+
+Use the absolute path of `plat-uw` in the virtualenv you installed into.
+`PLAT_UNDERWRITING_HOME` is optional; deals default to
+`~/.local/share/plat-underwriting/deals/` (or `[workspace] dir` in
+`~/.config/plat-underwriting/config.toml`), always outside this repository.
+Other local clients (Cursor, VS Code Copilot, Claude Code) take the same
+command and arguments.
+
+**HTTP on this machine.** `plat-uw mcp --http [--host 127.0.0.1] [--port 8765]`
+serves Streamable HTTP at `http://127.0.0.1:8765/mcp` for clients that
+connect by URL. It binds loopback only, and workspace files are served at
+`/files/<deal_id>/...` (the links `export_deal` returns).
+
+**ChatGPT, Grok and other hosted assistants** connect to a public HTTPS URL,
+not to your machine. That arrives with the hosted version (sign-in, storage,
+retention); until then you can put a tunnel in front of the server:
+
+```bash
+export PLAT_UW_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+plat-uw mcp --http --host 0.0.0.0 --allow-remote
+```
+
+A non-loopback bind needs `--allow-remote` and the bearer token
+`PLAT_UW_TOKEN`, which every request must send (`Authorization: Bearer
+...`); remote mode refuses server-side `path` inputs, so documents go up as
+base64. This token is interim access control for one trusted user, not
+production authentication: the hosted version adds OAuth at the single
+`engine.mcp_http.authorize` seam. Set `PLAT_UW_PUBLIC_URL` to the tunnel's
+URL so download links point at it.
+
+The original stateless tools (`validate_deal_inputs`, `run_deal_summary`,
+`check_deal_feasibility`, `assumption_register`, `backsolve_deal_price`) are
+still there; they take a canonical JSON and persist nothing. The feasibility
+response evaluates IRR, DSCR, and LTV; a missing purchase price or debt
+commitment leaves LTV unavailable and fails that gate. Callers should pin the
+producer version and package contents before relying on results.
 
 ## Honest limitations
 
@@ -470,6 +540,7 @@ that gate.
 engine/          deterministic underwriting modules + canonical schema
 engine/schemas/  deal_schema_v0_1.json (canonical deal format)
 engine/ingest/   rent roll / T12 / OM parsers
+engine/workflow/ the deal workspace and the eight-step workflow behind the MCP tools
 tests/           synthetic fixtures only
 runs/            ingest_deal.py intake, assumptions_sheet.py export/apply, run_deal.py run
 docs/            specs, module docs, tax regime schedules
@@ -487,6 +558,6 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## v0.1 packaging candidate
 
-The MCP adapter uses MCP 2.3–2.x. Install the `[mcp]` extra and run `plat-underwriting-mcp` (stdio).
+The MCP server uses MCP 2.3–2.x. Install the `[mcp]` extra and run `plat-uw mcp` (stdio; `plat-underwriting-mcp` is an alias) or `plat-uw mcp --http`.
 
 CI builds wheel/source archives, tests a fresh wheel environment, and validates runtime/package versions. A release tag must match `pyproject.toml`, use an unused PyPI version, and pass the full CI workflow before the tested artifacts can be uploaded. Candidate versions are not published by this change.

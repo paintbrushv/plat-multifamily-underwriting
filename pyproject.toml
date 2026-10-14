@@ -60,6 +60,7 @@ dependencies = [
 ]
 
 [project.scripts]
+plat-uw = "engine.cli:run"
 plat-underwriting-mcp = "engine.mcp_server:main"
 
 [project.urls]
@@ -100,7 +101,8 @@ where = ["."]
 include = ["engine*"]
 
 [tool.setuptools.package-data]
-engine = ["schemas/*.json"]
+# The bundled synthetic sample deal (load_sample_deal) ships with the package.
+engine = ["schemas/*.json", "samples/sample_deal/*"]
 "engine.schemas" = ["*.json"]
 
 [tool.pytest.ini_options]

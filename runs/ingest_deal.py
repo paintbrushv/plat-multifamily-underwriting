@@ -116,7 +116,6 @@ from engine.assumptions import (
     DealProfile,
     UnsupportedDealTypeError,
     normalize_overrides,
-    overrides_from_patch,
     resolve_assumptions,
 )
 from engine.assumptions.profile import ASSET_CLASSES, STAR_TIERS
@@ -129,6 +128,12 @@ from engine.assumptions.sheet import (
     write_assumptions_json,
 )
 from engine.ingest.broker_om_snapshot import stable_property_tax_source_locator
+from engine.ingest.partial_patch import (  # noqa: F401 - re-exported for callers
+    PARTIAL_JSON_OVERRIDE_NOTE,
+    apply_partial_and_reresolve,
+    apply_partial_json,
+    deep_merge,
+)
 from engine.ingest.ingestion_pipeline import (
     analyst_property_tax_policy,
     apply_analyst_property_tax_policy,
@@ -140,8 +145,6 @@ from engine.ingest.ingestion_pipeline import (
 from engine.underwriting_policy import IMMEDIATE_CAPEX_FUNDING_MODES
 from engine.validator import PROPERTY_TAX_MILLAGE_MISSING
 
-PARTIAL_JSON_OVERRIDE_NOTE = "supplied by --partial-json"
-
 
 def _load_json(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
@@ -151,58 +154,10 @@ def _load_json(path: Path) -> dict:
     return data
 
 
-def _deep_merge(base: object, patch: object) -> object:
-    if isinstance(base, dict) and isinstance(patch, dict):
-        merged = dict(base)
-        for key, value in patch.items():
-            if key in merged:
-                merged[key] = _deep_merge(merged[key], value)
-            else:
-                merged[key] = value
-        return merged
-    return patch
-
-
-def _apply_partial_json(base_deal: dict, partial: dict) -> dict:
-    merged = _deep_merge(base_deal, partial)
-    if not isinstance(merged, dict):  # defensive; _deep_merge returns dict here
-        raise ValueError("Merged deal payload must be a dict")
-    growth_patch = partial.get("growth_assumptions")
-    if (
-        isinstance(growth_patch, dict)
-        and "annual_growth_rate" in growth_patch
-        and "annual_growth_rates" not in growth_patch
-        and isinstance(merged.get("growth_assumptions"), dict)
-    ):
-        # A scalar rent-growth patch is a flat rate: drop the resolved per-year vector.
-        merged["growth_assumptions"] = {
-            k: v for k, v in merged["growth_assumptions"].items() if k != "annual_growth_rates"
-        }
-
-    metadata = merged.setdefault("metadata", {})
-    partial_metadata = partial.get("metadata", {}) if isinstance(partial.get("metadata"), dict) else {}
-    if "purchase_assumptions" in partial and "purchase_assumptions_source" not in partial_metadata:
-        metadata["purchase_assumptions_source"] = "analyst_override"
-    if any(k in partial for k in ("purchase_assumptions", "debt_terms", "exit_assumptions", "fund_assumptions")):
-        metadata["analyst_review_required"] = False
-    return merged
-
-
-def apply_partial_and_reresolve(base_deal: dict, partial: dict, *, market: object = None) -> dict:
-    """Merge a partial patch, then re-run the assumption resolver.
-
-    Assumption values the patch supplies become analyst overrides, so the
-    assumptions section and the legacy ``ingest_gate.assumed_defaults`` reflect
-    the merged deal instead of the pre-merge ingest. ``market`` is the
-    market-data registry used at ingest (market-sourced values are kept when
-    it is None).
-    """
-    merged = _apply_partial_json(base_deal, partial)
-    if "assumptions" not in base_deal:
-        return merged
-    overrides = overrides_from_patch(partial, merged, note=PARTIAL_JSON_OVERRIDE_NOTE)
-    resolved = resolve_assumptions(merged, overrides=overrides, market=market)
-    return sync_ingest_gate_assumptions(resolved)
+# The partial-patch merge lives in engine.ingest.partial_patch (shared with the
+# MCP workflow); these names are kept for existing callers.
+_deep_merge = deep_merge
+_apply_partial_json = apply_partial_json
 
 
 _PROFILE_FLAGS = (
