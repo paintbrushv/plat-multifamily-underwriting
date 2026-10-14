@@ -1,0 +1,44 @@
+{
+  "name": "Sample Garden Apartments (synthetic)",
+  "synthetic": true,
+  "description": "A fictional 128-unit, 1985 garden community underwritten as a stabilized deal. Every name, unit and amount is invented. Use it to learn the flow before a real deal.",
+  "documents": {
+    "rent_roll": "rent_roll.xlsx",
+    "t12": "t12.xlsx"
+  },
+  "ingest": {
+    "property_id": "SAMPLE-GARDEN",
+    "start": "2026-11",
+    "end": "2031-10",
+    "deal_type": "stabilized",
+    "year_built": 1985,
+    "asset_class": "B",
+    "star_tier": "3",
+    "msa": "Quillmere Synthetic MSA",
+    "metro_slug": "quillmere_sx",
+    "submarket": "Quillmere East",
+    "purchase_price": 14280000,
+    "ltv": 0.65,
+    "rate": 0.0575,
+    "amort": 30,
+    "io_months": 24,
+    "sale_cost": 0.02,
+    "millage": 21.0,
+    "assessment_ratio": 0.8,
+    "immediate_capex": 192000,
+    "validate": true
+  },
+  "pricing": {
+    "strategy": "cashflow",
+    "target_coc": 0.08,
+    "benchmark_5yr_treasury": 0.04,
+    "benchmark_as_of": "2026-09-30",
+    "benchmark_source": "illustrative sample value"
+  },
+  "notes": [
+    "Immediate capex of $192,000 ($1,500/unit) is an analyst figure for two roof replacements, funded with equity at close.",
+    "No PCA: the 1985 vintage is flagged for one (CAPEX_PCA_MISSING).",
+    "R&M plus turnover is $750/unit, under the 1980s floor of $900/unit: underwriting warns, pricing raises it to the floor.",
+    "The geography is synthetic, so market data falls back to flagged house values."
+  ]
+}
