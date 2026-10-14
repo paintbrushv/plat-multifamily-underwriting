@@ -471,6 +471,22 @@ workbook, results and assumption register. Ask the assistant to call
 `start_here`, or to try `load_sample_deal` (a bundled synthetic deal), or use
 the `new_deal_walkthrough` prompt.
 
+**Screens (MCP Apps).** In an assistant that supports
+[MCP Apps](https://apps.extensions.modelcontextprotocol.io), the tools open
+interactive screens beside the chat: `create_deal`, `describe_deal`,
+`get_deal` and `load_sample_deal` open **deal intake** (drag-and-drop
+documents, the deal facts with why each matters, Check documents);
+`ingest_deal`, `review_assumptions` and `edit_assumptions` open **check and
+assumptions** (the ingest gates with their fixes, then the register as an
+editable table); `run_deal` opens **results** (headline tiles, the capital
+plan and cash flow by year, the exit and the exit-cap grid, with charts); and
+`solve_price` opens **pricing**. Where the assistant cannot run tools from a
+screen, the screen is read-only and says what to ask the assistant instead;
+an assistant without MCP Apps gets the same text answers as before. The
+screens are `ui://plat-underwriting/<screen>` resources (see
+[docs/MCP_TOOLS.md](docs/MCP_TOOLS.md#screens-mcp-apps)); they load nothing
+from the network.
+
 **Claude Desktop (stdio).** Add the server to `claude_desktop_config.json`
 (Settings > Developer > Edit Config) and restart Claude Desktop:
 
@@ -522,6 +538,34 @@ response evaluates IRR, DSCR, and LTV; a missing purchase price or debt
 commitment leaves LTV unavailable and fails that gate. Callers should pin the
 producer version and package contents before relying on results.
 
+## Use it in your browser
+
+The same four screens run as a browser app on your own computer, no
+assistant needed:
+
+```bash
+pip install -e ".[mcp]"
+plat-uw serve                  # http://127.0.0.1:8766/
+```
+
+Open `http://127.0.0.1:8766/`. The left side lists your deals, with **Try the
+sample deal** and **New deal**; **New? Start here** opens the
+[user guide](docs/USER_GUIDE.md) and the
+[assumption glossary](docs/ASSUMPTION_GLOSSARY.md) inside the app. Deals live
+in the same workspace as the MCP server's (`PLAT_UNDERWRITING_HOME`), so you
+can start a deal in the browser and finish it from an assistant, or the other
+way round. Options: `--port` (default 8766) and `--host` (default
+`127.0.0.1`).
+
+It follows the HTTP server's rules: loopback only by default, with a `Host`
+check against DNS rebinding. `--host 0.0.0.0 --allow-remote` needs
+`PLAT_UW_TOKEN`; you then sign in once at `/login` with the token (it is kept
+in an HttpOnly, SameSite=Strict cookie). Every change the app makes carries
+an app-only header and is checked as same-origin, uploads are capped at the
+workspace limit, and files are served only from inside a deal's folder.
+Under the hood the page calls `POST /api/tools/<name>`, which runs the same
+function as the MCP tool and returns the same JSON.
+
 ## Honest limitations
 
 - **Synthetic-only validation.** Every fixture in this repository is
@@ -545,6 +589,7 @@ engine/          deterministic underwriting modules + canonical schema
 engine/schemas/  deal_schema_v0_1.json (canonical deal format)
 engine/ingest/   rent roll / T12 / OM parsers
 engine/workflow/ the deal workspace and the eight-step workflow behind the MCP tools
+engine/ui/       the analyst screens: MCP Apps resources and the plat-uw serve browser app
 tests/           synthetic fixtures only
 runs/            ingest_deal.py intake, assumptions_sheet.py export/apply, run_deal.py run
 docs/            specs, module docs, tax regime schedules

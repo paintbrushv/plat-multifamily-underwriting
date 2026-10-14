@@ -18,6 +18,7 @@ Contents:
 - [Pricing](#pricing)
 - [Market data](#market-data)
 - [Connecting your AI assistant](#connecting-your-ai-assistant)
+- [Using the screens](#using-the-screens)
 - [CLI fallback](#cli-fallback)
 - [FAQ and troubleshooting](#faq-and-troubleshooting)
 
@@ -66,6 +67,14 @@ These are the tools your AI assistant uses. The exact parameters of each tool
 are in [docs/MCP_TOOLS.md](MCP_TOOLS.md). The [CLI fallback](#cli-fallback)
 lists the same steps as commands.
 
+**Screens.** You can also click through the flow instead of typing. In an
+assistant that supports MCP Apps, the tools open four screens beside the
+chat; with `plat-uw serve` the same screens run in your browser (see
+[Using the screens](#using-the-screens)). Each step below says which screen
+shows it. Every screen has the step header (1 Documents, 2 Describe, 3 Check,
+4 Assumptions, 5 Results, 6 Price, 7 Export), a *New? Start here* panel and
+*Export files*.
+
 | Step | Tool | In one line |
 |---|---|---|
 | 1 | `start_here` | Orientation: what the tool does and what to do next. |
@@ -87,6 +96,8 @@ lists the same steps as commands.
 - **You get back:** a short orientation and the list of steps.
 - **Good looks like:** the assistant offers to load the sample deal or to
   start a new one.
+- **Screen:** *New? Start here* on every screen; in the browser app, the home
+  page and the user guide.
 - **Common problems:** the assistant does not see the tool at all. The
   connection is not set up; see [Connecting your AI assistant](#connecting-your-ai-assistant).
 
@@ -99,6 +110,8 @@ lists the same steps as commands.
 - **You get back:** a deal that is ready for step 5.
 - **Good looks like:** you can go straight to `ingest_deal` and follow
   [Your first 10 minutes](#your-first-10-minutes-the-sample-deal).
+- **Screen:** *Deal intake*, with the documents and deal facts filled in (the
+  browser app's *Try the sample deal* button).
 - **Common problems:** none expected. Every name and number in the sample is
   invented; do not read anything into them.
 
@@ -110,6 +123,7 @@ lists the same steps as commands.
 - **Good looks like:** one deal per property and per version of the
   underwriting you want to keep.
 - **Common problems:** reusing a name you already used. Pick a new one.
+- **Screen:** *Deal intake* (the browser app's *New deal* button).
 
 ### Step 3: `add_document`
 
@@ -124,6 +138,8 @@ lists the same steps as commands.
     own file.
   - A scanned PDF T12 with no text layer may not be readable. Ask for the
     Excel export.
+- **Screen:** *Deal intake*, Documents: drop each file on its box (T12, rent
+  roll, offering memo, condition report).
 
 ### Step 4: `describe_deal`
 
@@ -149,6 +165,10 @@ lists the same steps as commands.
   - No exit cap. That is fine: the house fills one and flags it for review.
   - A real metro with no market data configured. That is fine too; see
     [Market data](#market-data).
+- **Screen:** *Deal intake*, Deal facts: grouped as Property, Location,
+  Price & financing, Taxes, Capex & condition and Hold, each field with why it
+  matters and whether it is needed to check the documents or to run. Rates
+  are typed as percents there (5.75, not 0.0575).
 
 ### Step 5: `ingest_deal`
 
@@ -164,6 +184,9 @@ lists the same steps as commands.
   normal: each one is something to review, not an error.
 - **Common problems:** a BLOCKED gate. See
   [Reading the ingest gates](#reading-the-ingest-gates).
+- **Screen:** *Check documents* on the intake screen; the result opens *Check
+  and assumptions*: the gate first (each blocker with its fix), then market
+  data and the capital plan.
 
 ### Step 6: `review_assumptions` / `edit_assumptions`
 
@@ -184,6 +207,11 @@ lists the same steps as commands.
     [floors](#floors-underwrite-warns-pricing-enforces).
   - Wanting to undo an edit. Clear it (set it to empty or `null`) and the row
     returns to its full default.
+- **Screen:** *Check and assumptions*, the register: chips for *Needs review*,
+  *Edited*, *Defaults* and *Enforced in pricing*; *Why this default* on each
+  row; *Edit* to change a value with a note (*Back to default* clears it). The
+  screen asks your name once per session and shows each change against the
+  default.
 
 ### Step 7: `run_deal`
 
@@ -197,6 +225,9 @@ lists the same steps as commands.
 - **Common problems:** the run refuses because of a validation ERROR (a
   BLOCKED gate, missing millage, an unresolved exit cap placeholder). The
   error names what to fix.
+- **Screen:** *Results*: headline tiles, the cash flow by year (chart and
+  table), the capital plan by year with the bucket that binds, the exit on
+  forward NOI and the exit-cap grid (chart and table).
 
 ### Step 8: `solve_price`
 
@@ -211,6 +242,10 @@ lists the same steps as commands.
 - **Good looks like:** status `converged` and an achieved cash-on-cash equal
   to the target.
 - **Common problems:** status `infeasible`. See [Pricing](#pricing).
+- **Screen:** *Pricing*: the target and the treasury (with its date and
+  source), *Solve the price*, the pricing panel with the floors enforced
+  (each opens its register row) and the asking price against the solved
+  price.
 
 ### Then: `export_deal`
 
@@ -222,6 +257,7 @@ lists the same steps as commands.
   you priced the deal. [docs/MCP_TOOLS.md](MCP_TOOLS.md) has the exact list.
 - **Good looks like:** the register page opens in any browser and matches what
   you reviewed.
+- **Screen:** *Export files* at the top of every screen.
 
 ## Your first 10 minutes: the sample deal
 
@@ -547,8 +583,28 @@ at a JSON or CSV file of observations; the README section
 The tool runs as an MCP server, so Claude, ChatGPT, Grok and other assistants
 that support MCP can use it. Setup steps are in the README section
 [Use it from an AI assistant](../README.md#use-it-from-an-ai-assistant), and
-every tool and its parameters are in [docs/MCP_TOOLS.md](MCP_TOOLS.md). A
-browser app is coming; until then, use an assistant or the CLI below.
+every tool and its parameters are in [docs/MCP_TOOLS.md](MCP_TOOLS.md).
+
+## Using the screens
+
+The four screens (deal intake, check and assumptions, results, pricing) work
+two ways:
+
+- **In your assistant.** An assistant that supports MCP Apps opens the
+  screen that belongs to each tool. If the assistant can run tools from the
+  screen, the buttons work there; a step on another screen is sent to the
+  assistant as a message. If it cannot, the screen is view-only and tells you
+  what to ask the assistant. An assistant without MCP Apps simply answers in
+  text, as before.
+- **In your browser.** Run `plat-uw serve` and open
+  `http://127.0.0.1:8766/`. The left side lists your deals, with *Try the
+  sample deal* and *New deal*; this guide and the glossary are one click
+  away. It only answers on this computer unless you start it with
+  `--allow-remote` and a token (see the README section
+  [Use it in your browser](../README.md#use-it-in-your-browser)).
+
+Words with a dotted underline (NOI, DSCR, cap rate, millage and so on) show
+a short definition when you hover, focus or tap them.
 
 ## CLI fallback
 
