@@ -730,8 +730,10 @@ DEALS: tuple[DealSpec, ...] = (
                 "going_in_cap_rate": [0.052, 0.068],
             },
             # The PCA recurring capex ($1,500) is below the value-add band midpoint
-            # ($1,750): warned in underwrite, raised to the band in pricing.
-            "guardrail_warnings": ["collection_loss", "recurring_capex_per_unit"],
+            # ($1,750): warned in underwrite, raised to the band in pricing. The
+            # 6.0% stabilized vacancy is below the rent roll's 6 of 90 vacant
+            # (6.67%), the property-level vacancy anchor (UPL-107).
+            "guardrail_warnings": ["collection_loss", "recurring_capex_per_unit", "physical_vacancy"],
             "guardrail_waivers": [],
         },
     ),
