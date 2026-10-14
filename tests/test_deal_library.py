@@ -326,8 +326,12 @@ def _below_floor_keys(canonical, deal):
     units = Decimal(sum_units(canonical))
     d = lambda value: Decimal(str(value))  # noqa: E731
     below = set()
-    if any(d(r["vacancy_rate"]) < house.default_physical_vacancy_rate(year, strategy=strategy)
-           for r in canonical["physical_vacancy_curve"]):
+    # The vacancy floor is the larger of the vintage rate and the rent roll's
+    # vacant share (the rent-roll vacancy anchor, UPL-107).
+    docs = deal["expected"]["documents"]
+    rent_roll_vacant = Decimal(round(docs["rent_roll_physical_vacancy"] * docs["units"])) / units
+    vacancy_floor = max(house.default_physical_vacancy_rate(year, strategy=strategy), rent_roll_vacant)
+    if any(d(r["vacancy_rate"]) < vacancy_floor for r in canonical["physical_vacancy_curve"]):
         below.add("physical_vacancy")
     # Loss to lease: cohorts with a market vs in-place gap only; such a cohort
     # with no row reads as 0%.

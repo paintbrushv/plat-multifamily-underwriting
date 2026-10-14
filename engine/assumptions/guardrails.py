@@ -409,6 +409,48 @@ def market_vacancy_benchmark(
     return {**checked, "vacancy_rate": checked["rate"]}
 
 
+def rent_roll_unit_counts(canonical: dict[str, Any]) -> dict[str, Any]:
+    """Total, vacant and notice units behind the ``rent_roll_vacant`` anchor.
+
+    House box-score status counts win when present. Otherwise the ingested
+    rent roll's parsed unit and vacant counts (``ingest_gate``'s rent-roll
+    reconciliation); that roll does not separate notice units. With neither,
+    the counts are None and ``unavailable_reason`` says why: the anchor is
+    then unavailable, never 0.0.
+    """
+    metadata = canonical.get("metadata") or {}
+    house_box = (metadata.get("property_summary") or {}).get("house_box_score") or {}
+    status_counts = house_box.get("status_counts") or {}
+    if status_counts:
+        return {
+            "source": "house_box_score.status_counts",
+            "total_units": int(house_box.get("total_units") or sum_units(canonical) or 0),
+            "vacant_units": status_count(status_counts, "Vacant", "Non-Revenue", "Non Revenue"),
+            "notice_units": status_count(status_counts, "Notice"),
+        }
+    reconciliation = (metadata.get("ingest_gate") or {}).get("rent_roll_reconciliation") or {}
+    total = (reconciliation.get("units") or {}).get("parsed")
+    vacant = (reconciliation.get("vacant_units") or {}).get("parsed")
+    if total and vacant is not None:
+        return {
+            "source": "ingest_gate.rent_roll_reconciliation",
+            "total_units": int(total),
+            "vacant_units": int(vacant),
+            "notice_units": None,
+            "note": (
+                "Parsed from the ingested rent roll; notice units are not counted "
+                "separately, so the vacant-plus-notice candidate is the vacant rate."
+            ),
+        }
+    return {
+        "source": None,
+        "total_units": None,
+        "vacant_units": None,
+        "notice_units": None,
+        "unavailable_reason": "No house box-score status counts and no ingested rent-roll unit counts.",
+    }
+
+
 def vacancy_anchor_summary(
     canonical: dict[str, Any],
     *,
@@ -420,13 +462,14 @@ def vacancy_anchor_summary(
 ) -> tuple[Decimal, dict[str, Any]]:
     """Property-level vacancy anchor: the max of the deal and house anchors."""
     property_summary = (canonical.get("metadata") or {}).get("property_summary") or {}
-    house_box = property_summary.get("house_box_score") or {}
-    status_counts = house_box.get("status_counts") or {}
-    total_units = Decimal(str(house_box.get("total_units") or sum_units(canonical) or 0))
-    vacant_units = Decimal(str(status_count(status_counts, "Vacant", "Non-Revenue", "Non Revenue")))
-    notice_units = Decimal(str(status_count(status_counts, "Notice")))
-    rent_roll_vacant = vacant_units / total_units if total_units else None
-    vacant_plus_notice = (vacant_units + notice_units) / total_units if total_units else None
+    status_counts = (property_summary.get("house_box_score") or {}).get("status_counts") or {}
+    rent_roll = rent_roll_unit_counts(canonical)
+    total_units = rent_roll["total_units"]
+    vacant_units = rent_roll["vacant_units"]
+    rent_roll_vacant = vacant_plus_notice = None
+    if total_units:
+        rent_roll_vacant = Decimal(vacant_units) / Decimal(total_units)
+        vacant_plus_notice = Decimal(vacant_units + (rent_roll["notice_units"] or 0)) / Decimal(total_units)
     t12_vacancy = t12_vacancy_rate(trailing_actuals)
     broker_table_vacancy = broker_vacancy_rate(broker_snapshot)
     broker_anchor = broker_vacancy if broker_vacancy is not None else broker_table_vacancy
@@ -482,6 +525,7 @@ def vacancy_anchor_summary(
             "applied property-wide unless explicitly selected."
         ),
         "observed_status_counts": status_counts,
+        "rent_roll_vacancy_evidence": rent_roll,
         "market_vacancy_benchmark_source": market,
     }
 

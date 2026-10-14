@@ -306,7 +306,8 @@
     },
     "guardrail_warnings": [
       "collection_loss",
-      "recurring_capex_per_unit"
+      "recurring_capex_per_unit",
+      "physical_vacancy"
     ],
     "guardrail_waivers": []
   }

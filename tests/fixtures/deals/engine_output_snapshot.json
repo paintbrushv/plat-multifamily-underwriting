@@ -1,23 +1,23 @@
 {
   "backsolve_price:a_stabilized_1990s": {
-    "*": "cbb39259ada5b741cc5932d9f7bd306b9003023739aeafc5a9e56a7f26f967e0",
+    "*": "cc49d9ff651a0a089c2f23c2a45fc4190b43d338f226da140ca9169d03a13553",
     "bracket": "5867aa365954d989ce8d34fa0320ed4fec722023c760a357bc979a62ead96d62",
     "case": "815ec98b5888d8efba6bef0678cf20a868841b1936676e01e4f51fe3dc934461",
     "contract_version": "0111e46955b1295fbf9ad6457a01bfb47f3005b2cf60c209abe1840798a0bd13",
-    "effective_assumptions": "b32535910cf49a930c9ff107af34b74370122fbebc95d4eef5b9450e1337076d",
+    "effective_assumptions": "9f8f0fb2fa4dbd585eadd82f34925e7c961e1cac715a1bf1b94615db25f6875e",
     "results": "5a266cba04674b7398fab7d853a0de6a9ec0632a72f85937b81fcdf4e15a7947",
     "status": "6979b5a1f1311ec0c1b08fbcf05d7770eccb7f23e43da98634b5fb82fd411354",
-    "summary": "c97fb1714d0a1a41714e8a5e5b860877cf629cfc919b22576053e180a2f39c82"
+    "summary": "ca2288cccd1dca0bae82d9b4ef6ce6fd534dc02d2fcc084014763dbb9fb2ff97"
   },
   "backsolve_price:c_value_add_1970s_reno": {
-    "*": "9af7efcbbdbd13e019ccd145fedc599afc2d23c63f9f7506052ca383b98a6fe1",
+    "*": "63991997fa4bf15a591cb931ab14d6c9e28bad5f6af8febf736a6262816218d0",
     "bracket": "656dcef32f5644747c1134e30ac51c29fbf231700ba71e203d8fe22646628056",
     "case": "72b0c3390b1bac36d6124dd64f9a82d2f751e18cd9537bf43649c1ecaf3f0c2f",
     "contract_version": "0111e46955b1295fbf9ad6457a01bfb47f3005b2cf60c209abe1840798a0bd13",
-    "effective_assumptions": "31be61a79b81b2db3b1ef789946f98a1f5726013531d6ebf5f3112a13b0918a9",
+    "effective_assumptions": "6171179ca84731cfb48eb9fe5f6b5a25dc3eedce1be99c4d843610d514c303e8",
     "results": "ce13e741b2a24401ccb40db5824cac4b4081d4c96b33153b9fd05aa7ba00a984",
     "status": "6979b5a1f1311ec0c1b08fbcf05d7770eccb7f23e43da98634b5fb82fd411354",
-    "summary": "45d48c6bc3a4cf5fbc748a68761d72eec930223d435ef7e4ad14a830879ea8ed"
+    "summary": "e282922705678499f4e4088927b5db8af5adbde2a3cfcd7879287dfa16093ad0"
   },
   "run_underwriting:a_stabilized_1990s": {
     "*": "79d0c3f66638fc23081db7f9357c10ad8e0ec82f8ce8156f8007d284a5a0698b",
