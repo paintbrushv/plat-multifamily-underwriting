@@ -106,6 +106,8 @@ engine = ["schemas/*.json", "samples/sample_deal/*"]
 "engine.schemas" = ["*.json"]
 # The sample deal (docs/USER_GUIDE.md): documents and profile; build_sample.py ships as a module.
 "engine.samples.sample_deal" = ["*.xlsx", "*.json"]
+# The analyst screens (engine/ui): plain JS and CSS inlined into each page at import time.
+"engine.ui" = ["static/*.js", "static/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -22,6 +22,9 @@ Prompts: ``new_deal_walkthrough``, ``explain_assumption``. Resources:
 ``guide://start-here``, ``guide://user-guide``, ``guide://glossary`` and
 ``deal://{deal_id}/assumptions.html``.
 
+Screens (MCP Apps, ``engine.ui``): ``ui://plat-underwriting/{intake,assumptions,results,pricing}``,
+opened by the tools whose ``_meta.ui.resourceUri`` links them (docs/MCP_TOOLS.md "Screens").
+
 Launch:
 
     plat-uw mcp                      # stdio (Claude Desktop and other local clients)
@@ -43,6 +46,7 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from engine import ui
 from engine.engine import run_underwriting
 from engine.validator import validate_deal
 from engine.version import ENGINE_VERSION, SCHEMA_VERSION
@@ -56,7 +60,10 @@ INSTRUCTIONS = (
     "solve_price) and how to try load_sample_deal. Every tool returns a summary and a next_step; errors say "
     "what failed and how to fix it. Never invent a number: ask the analyst for missing inputs."
 )
-mcp = MCPServer("multifamily-underwriting", instructions=INSTRUCTIONS, version=ENGINE_VERSION)
+# MCP Apps: four analyst screens (ui://plat-underwriting/<screen>, engine/ui). A host that supports
+# MCP Apps renders the linked screen beside a tool's result; any other host gets the same text.
+mcp = MCPServer("multifamily-underwriting", instructions=INSTRUCTIONS, version=ENGINE_VERSION,
+                extensions=[ui.apps_extension()])
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 
@@ -90,21 +97,21 @@ def list_deals() -> dict:
     return service.list_deals()
 
 
-@mcp.tool(annotations=READ_ONLY)
+@mcp.tool(annotations=READ_ONLY, meta=ui.tool_meta("get_deal"))
 def get_deal(deal_id: str) -> dict:
     """A deal's status: which steps are done (and stale), its documents and profile, the last
     ingest, run and price summaries, the files available, and what to do next."""
     return service.get_deal(deal_id)
 
 
-@mcp.tool(annotations=_writes(destructive=False, idempotent=False))
+@mcp.tool(annotations=_writes(destructive=False, idempotent=False), meta=ui.tool_meta("load_sample_deal"))
 def load_sample_deal() -> dict:
     """Create a new deal from the bundled synthetic sample (a T12, a rent roll and a filled-in
     profile), ready for ingest_deal. Use it to show an analyst the flow end to end."""
     return service.load_sample_deal()
 
 
-@mcp.tool(annotations=_writes(destructive=False, idempotent=False))
+@mcp.tool(annotations=_writes(destructive=False, idempotent=False), meta=ui.tool_meta("create_deal"))
 def create_deal(
     name: Annotated[str, Field(description="Deal name, e.g. the property name the analyst uses.")],
     deal_type: Annotated[str, Field(description="stabilized (prices on year-1 cash-on-cash) or value_add "
@@ -135,7 +142,7 @@ def _d(name: str) -> Any:
     return Field(description=_FIELD[name].description)
 
 
-@mcp.tool(annotations=_writes(destructive=False, idempotent=True))
+@mcp.tool(annotations=_writes(destructive=False, idempotent=True), meta=ui.tool_meta("describe_deal"))
 def describe_deal(
     deal_id: str,
     deal_type: Annotated[Optional[str], _d("deal_type")] = None,
@@ -185,7 +192,7 @@ def describe_deal(
     return service.describe_deal(deal_id, **updates)
 
 
-@mcp.tool(annotations=_writes(destructive=True, idempotent=True, open_world=True))
+@mcp.tool(annotations=_writes(destructive=True, idempotent=True, open_world=True), meta=ui.tool_meta("ingest_deal"))
 def ingest_deal(deal_id: str) -> dict:
     """Step 4: parse the documents, run the reconciliation gates and resolve every assumption (with
     market data when configured). Returns PASS/BLOCKED with the fix for each blocker, the capital
@@ -195,7 +202,7 @@ def ingest_deal(deal_id: str) -> dict:
     return service.ingest_deal(deal_id)
 
 
-@mcp.tool(annotations=READ_ONLY)
+@mcp.tool(annotations=READ_ONLY, meta=ui.tool_meta("review_assumptions"))
 def review_assumptions(
     deal_id: str,
     filter: Annotated[str, Field(description="all, needs_review, edited, defaults (house defaults and engine "
@@ -210,7 +217,7 @@ def review_assumptions(
     return service.review_assumptions(deal_id, filter=filter, case=case, include_candidates=include_candidates)
 
 
-@mcp.tool(annotations=_writes(destructive=False, idempotent=True))
+@mcp.tool(annotations=_writes(destructive=False, idempotent=True), meta=ui.tool_meta("edit_assumptions"))
 def edit_assumptions(
     deal_id: str,
     edits: Annotated[dict[str, Any], Field(description="{assumption key: {'value': v, 'note': 'why'}} or "
@@ -222,7 +229,7 @@ def edit_assumptions(
     return service.edit_assumptions(deal_id, edits, editor)
 
 
-@mcp.tool(annotations=_writes(destructive=False, idempotent=True))
+@mcp.tool(annotations=_writes(destructive=False, idempotent=True), meta=ui.tool_meta("run_deal"))
 def run_deal(deal_id: str) -> dict:
     """Step 7: validate and run the underwriting. Returns NOI, cash-on-cash, IRRs, equity multiples,
     DSCR on the sizing basis and on NOI, the exit cap and value, the capital plan and the exit-cap
@@ -230,7 +237,7 @@ def run_deal(deal_id: str) -> dict:
     return service.run_deal(deal_id)
 
 
-@mcp.tool(annotations=_writes(destructive=False, idempotent=True))
+@mcp.tool(annotations=_writes(destructive=False, idempotent=True), meta=ui.tool_meta("solve_price"))
 def solve_price(
     deal_id: str,
     target_coc: Annotated[Optional[str], Field(description="Target cash-on-cash as a decimal string "
