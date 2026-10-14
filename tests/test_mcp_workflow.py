@@ -667,3 +667,16 @@ def test_an_unpriced_deal_ingests_and_says_what_it_needs_to_run(workspace):
     run = mcp_server.run_deal(deal_id)
     assert run["error"]["code"] == "NOT_READY"
     assert run["missing_to_run"] == ingest["missing_to_run"]
+
+
+def test_the_tool_reference_covers_every_tool_and_profile_field():
+    from engine.workflow.fields import FIELDS
+
+    doc = (REPO / "docs" / "MCP_TOOLS.md").read_text(encoding="utf-8")
+    for name in READ_ONLY_TOOLS | WRITE_TOOLS | LEGACY_TOOLS | {"new_deal_walkthrough", "explain_assumption"}:
+        assert f"`{name}" in doc, name
+    for field in FIELDS:
+        assert f"| `{field.name}` |" in doc, field.name
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert "\n## Use it from an AI assistant\n" in readme
+    assert "docs/MCP_TOOLS.md" in readme
