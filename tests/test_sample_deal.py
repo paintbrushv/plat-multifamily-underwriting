@@ -2,7 +2,9 @@
 
 The sample is rebuilt by its own script, ships as package data, and runs end
 to end through the same CLIs the guide shows: ingest (gate PASS), run, and
-the target cash-on-cash backsolve at an illustrative 4.00% treasury.
+the target cash-on-cash backsolve at the guide's illustrative 4.00% treasury.
+The guide quotes the sample's numbers, so a change that moves them fails
+here until "Your first 10 minutes" in docs/USER_GUIDE.md is updated.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from engine.samples.sample_deal import build_sample
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _venv_python = REPO_ROOT / ".venv" / "bin" / "python"
 PYTHON = _venv_python if _venv_python.exists() else Path(sys.executable)
+GUIDE = REPO_ROOT / "docs" / "USER_GUIDE.md"
 SAMPLE_FILES = ("rent_roll.xlsx", "t12.xlsx", "profile.json")
 
 
@@ -156,3 +159,54 @@ def test_backsolve_converges_and_enforces_the_r_and_m_floor(sample_run):
     enforced = [f for f in summary["policy_summary"]["guardrails"]["findings"] if f["action"] == "enforced"]
     assert [f["key"] for f in enforced] == ["r_and_m_per_unit"]
     assert (sample_run["out"] / "price" / "assumptions.html").is_file()
+
+
+def _usd(value: float) -> str:
+    return f"${value:,.0f}"
+
+
+def _pct(value: float) -> str:
+    return f"{value * 100:.2f}%"
+
+
+def test_the_user_guide_quotes_the_sample_numbers(sample_run):
+    """docs/USER_GUIDE.md "Your first 10 minutes" must match what the sample produces."""
+    guide = GUIDE.read_text(encoding="utf-8")
+    results = _load(sample_run["out"] / "run" / "results.json")
+    metrics = results["metrics"]
+    coc = metrics["cash_on_cash"]["components"]
+    summary = _load(sample_run["out"] / "price" / "backsolve_summary.json")
+    grid = {p["offset_bps"]: p for p in results["exit_cap_sensitivity"]["points"]}
+    expected = {
+        "asking price": _usd(load_sample_profile()["ingest"]["purchase_price"]),
+        "year-1 NOI": _usd(metrics["noi"]["year_1_noi"]),
+        "year-1 debt service": _usd(coc["debt_service_year_1"]),
+        "year-1 levered cash flow": _usd(coc["leveraged_cash_flow_year_1"]),
+        "equity": _usd(coc["equity_basis"]),
+        "year-1 CoC": _pct(metrics["cash_on_cash"]["cash_on_cash_year_1_exact"]),
+        "unlevered IRR": _pct(metrics["irr"]["unlevered_irr"]),
+        "levered IRR": _pct(metrics["irr"]["levered_irr"]),
+        "levered EM": f"{metrics['equity_multiple']['levered_em']:.2f}x",
+        "min DSCR (NCF)": f"{metrics['dscr']['minimum_dscr']:.2f}x",
+        "min DSCR (NOI)": f"{metrics['dscr']['noi_before_capex']['minimum_dscr']:.2f}x",
+        "going-in cap": _pct(metrics["yields"]["going_in_cap_rate"]),
+        "exit cap": _pct(metrics["yields"]["exit_cap_rate"]),
+        "forward NOI": _usd(metrics["exit"]["forward_noi"]),
+        "exit value": _usd(metrics["exit"]["gross_sale_price"]),
+        "grid +50 levered IRR": _pct(grid[50]["levered_irr"]),
+        "grid +100 levered IRR": _pct(grid[100]["levered_irr"]),
+        "year-1 tax": _usd(results["property_tax_calculation"]["annual_ad_valorem_tax"]),
+        "solved price": _usd(summary["solved_purchase_price"]),
+        "solved price per unit": _usd(summary["solved_purchase_price"] / 128),
+        "pricing loan": _usd(summary["loan_amount"]),
+        "pricing loan rate": _pct(summary["interest_rate"]),
+        "pricing equity": _usd(summary["solved_total_equity_basis"]),
+        "pricing levered IRR": _pct(summary["levered_irr"]),
+        "pricing min DSCR (NCF)": f"{summary['minimum_dscr']:.2f}x",
+        "pricing min DSCR (NOI)": f"{summary['minimum_dscr_noi_before_capex']:.2f}x",
+        "pricing going-in cap": _pct(summary["going_in_cap_rate"]),
+        "pricing exit cap": _pct(summary["exit_cap_rate"]),
+    }
+    missing = {name: text for name, text in expected.items() if text not in guide}
+    assert missing == {}, f"update docs/USER_GUIDE.md 'Your first 10 minutes': {missing}"
+    assert "illustrative" in guide
