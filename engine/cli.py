@@ -1,12 +1,14 @@
-"""``plat-uw``: the command line entry point for the underwriting MCP server.
+"""``plat-uw``: the command line entry point for the underwriting MCP server and the browser app.
 
     plat-uw mcp                                   stdio (default; Claude Desktop and other local clients)
     plat-uw mcp --http [--host 127.0.0.1] [--port 8765]
                                                   Streamable HTTP at http://<host>:<port>/mcp
     plat-uw mcp --http --host 0.0.0.0 --allow-remote
                                                   beyond loopback; needs PLAT_UW_TOKEN (bearer token)
+    plat-uw serve [--host 127.0.0.1] [--port 8766]
+                                                  the analyst screens as a browser app (engine.ui.server)
 
-See ``engine.mcp_http`` for the access rules. Status lines go to stderr so
+See ``engine.mcp_http`` for the access rules (``plat-uw serve`` uses the same ones). Status lines go to stderr so
 stdout stays the MCP stdio channel.
 """
 
@@ -18,6 +20,8 @@ from typing import Optional, Sequence
 
 from engine.mcp_http import DEFAULT_HOST, DEFAULT_PORT, LaunchError
 
+SERVE_PORT = 8766  # engine.ui.server.DEFAULT_PORT (kept here so --help needs no Starlette import)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="plat-uw", description="Multifamily underwriting tools.")
@@ -28,11 +32,32 @@ def build_parser() -> argparse.ArgumentParser:
     mcp.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"HTTP port (default {DEFAULT_PORT}).")
     mcp.add_argument("--allow-remote", action="store_true",
                      help="Allow a non-loopback --host. Requires PLAT_UW_TOKEN; disables path inputs.")
+    serve = sub.add_parser("serve", help="Serve the analyst screens as a browser app on this computer.")
+    serve.add_argument("--host", default=DEFAULT_HOST, help=f"Bind address (default {DEFAULT_HOST}, loopback).")
+    serve.add_argument("--port", type=int, default=SERVE_PORT, help=f"Port (default {SERVE_PORT}).")
+    serve.add_argument("--allow-remote", action="store_true",
+                       help="Allow a non-loopback --host. Requires PLAT_UW_TOKEN (sign in at /login).")
     return parser
+
+
+def _serve(args: argparse.Namespace) -> int:
+    from engine.ui import server
+
+    try:
+        settings = server.serve_settings(args.host, args.port, allow_remote=args.allow_remote)
+    except LaunchError as exc:
+        print(f"plat-uw: {exc}", file=sys.stderr)
+        return 2
+    mode = "remote (sign in with PLAT_UW_TOKEN at /login)" if settings.remote else "local"
+    print(f"plat-uw: the browser app is at {settings.base_url}/ ({mode}); press Ctrl+C to stop", file=sys.stderr)
+    server.serve(settings)  # pragma: no cover - blocks
+    return 0  # pragma: no cover
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "serve":
+        return _serve(args)
     if args.command != "mcp":  # pragma: no cover - argparse enforces the choice
         return 2
     if not args.http:
