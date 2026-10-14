@@ -15,9 +15,8 @@ from __future__ import annotations
 
 import base64
 import json
-import re
 import shutil
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
@@ -90,13 +89,22 @@ def workspace(monkeypatch, tmp_path) -> Path:
 
 @pytest.fixture
 def sample_dir(monkeypatch, tmp_path) -> Path:
-    """A stand-in for engine/samples/sample_deal built from library deal d."""
+    """A stand-in for engine/samples/sample_deal built from library deal d, in the bundle's shape:
+    ``documents`` (file names), ``ingest`` (runs/ingest_deal.py flags, underscored; ``true`` is a
+    bare switch), ``pricing`` and ``notes``."""
     folder = tmp_path / "sample_deal"
     folder.mkdir()
-    shutil.copy(LIBRARY_DEAL / "t12.csv", folder / "t12.csv")
-    shutil.copy(LIBRARY_DEAL / "rent_roll.csv", folder / "rent_roll.csv")
-    profile = {"name": "Synthetic sample deal", "deal_type": "value_add", **PROFILE, **TAX,
-               "not_a_field": "ignored"}
+    shutil.copy(LIBRARY_DEAL / "t12.csv", folder / "sample_t12.csv")
+    shutil.copy(LIBRARY_DEAL / "rent_roll.csv", folder / "sample_rent_roll.csv")
+    profile = {
+        "documents": {"t12": "sample_t12.csv", "rent_roll": "sample_rent_roll.csv"},
+        "ingest": {"property_id": "Synthetic sample deal", "deal_type": "value_add", **PROFILE, **TAX,
+                   "rent_roll": "sample_rent_roll.csv", "t12": "sample_t12.csv", "validate": True,
+                   "no_market_data": True, "not_a_field": "ignored"},
+        "pricing": {"target_coc": 0.03, "benchmark_5yr_treasury": 0.04, "benchmark_as_of": "2026-10-01",
+                    "benchmark_source": "illustrative synthetic benchmark"},
+        "notes": "Synthetic; describes no real property.",
+    }
     (folder / "profile.json").write_text(json.dumps(profile), encoding="utf-8")
     monkeypatch.setattr(service, "SAMPLE_DEAL_DIR", folder)
     return folder
@@ -213,7 +221,9 @@ def test_ingest_reports_gates_capital_plan_market_data_and_review_count(flow):
     buckets = {b["key"]: b for b in ingest["capital_plan"]["buckets"]}
     assert buckets["immediate_capex"]["value"] == 180000
     assert buckets["immediate_capex"]["source"] == "deal:pca"
-    assert "Market data" in ingest["market_data"]["summary"]
+    market = ingest["market_data"]
+    assert market["enabled"] is True and "market slots" in market["summary"]
+    assert any("FELL BACK" in line for line in market["lines"])  # no feeder data offline: each fallback named
     assert ingest["validation"]["status"] == "PASS"
     deal_dir = Path(flow["create"]["workspace"])
     for name in ("canonical.json", "assumptions.json", "assumptions.html"):
@@ -242,16 +252,20 @@ def test_edit_assumptions_stamps_the_editor_and_reports_the_delta(flow):
     assert change["after"]["user_edit"]["edited_at"] == datetime.now(timezone.utc).date().isoformat()
     assert change["after"]["user_edit"]["note"] == "IC view"
     assert change["before"]["value"] != change["after"]["value"]
-    edited = flow["review_edited"]["rows"]
-    assert [row["key"] for row in edited] == ["collection_loss"]
+    edited = {row["key"]: row for row in flow["review_edited"]["rows"]}
+    assert edited["collection_loss"]["user_edit"]["edited_by"] == "Analyst A"
+    # describe_deal(sale_cost=...) is an analyst value too, recorded at ingest without an editor.
+    assert set(edited) == {"collection_loss", "sale_cost_percent"}
+    assert edited["sale_cost_percent"]["user_edit"]["edited_by"] is None
 
 
 def test_edits_survive_a_re_ingest(flow):
     assert flow["reingest"]["ok"] is True
-    rows = flow["review_after_reingest"]["rows"]
-    assert [row["key"] for row in rows] == ["collection_loss"]
-    assert rows[0]["value"] == pytest.approx(0.012)
-    assert rows[0]["user_edit"]["edited_by"] == "Analyst A"
+    rows = {row["key"]: row for row in flow["review_after_reingest"]["rows"]}
+    assert set(rows) == {"collection_loss", "sale_cost_percent"}
+    assert rows["collection_loss"]["value"] == pytest.approx(0.012)
+    assert rows["collection_loss"]["user_edit"]["edited_by"] == "Analyst A"
+    assert rows["collection_loss"]["user_edit"]["edited_at"] == flow["edit"]["edits"]["collection_loss"]["edited_at"]
 
 
 def test_run_deal_returns_headline_metrics_and_writes_the_outputs(flow):
@@ -460,9 +474,36 @@ def test_load_sample_deal_creates_a_ready_to_ingest_deal(workspace, sample_dir):
     deal = mcp_server.get_deal(loaded["deal_id"])
     assert set(deal["documents"]) == {"t12", "rent_roll"}
     assert deal["deal_type"] == "value_add"
+    assert deal["name"] == "Synthetic sample deal"
     assert deal["profile"]["millage"] == 17.0
+    assert deal["profile"]["use_market_data"] is False  # from the bare no_market_data switch
+    assert "validate" not in deal["profile"] and "rent_roll" not in deal["profile"]
     assert loaded["ignored_profile_fields"] == ["not_a_field"]
+    assert loaded["documents"] == ["rent_roll", "t12"]
+    assert loaded["pricing_defaults"]["benchmark_5yr_treasury"] == "0.04"
     assert "ingest_deal" in loaded["next_step"]
+
+
+def test_the_sample_pricing_block_prefills_solve_price_and_explicit_inputs_win():
+    defaults = service.pricing_defaults_from({"target_coc": 0.07, "benchmark": {"rate": 0.04, "as_of": "2026-10-01",
+                                                                                 "source": "illustrative"}})
+    assert defaults == {"target_coc": "0.07", "benchmark_5yr_treasury": "0.04",
+                        "benchmark_as_of": "2026-10-01", "benchmark_source": "illustrative"}
+    manifest = {"pricing_defaults": defaults}
+    target, rate, as_of, source, prefilled = service.pricing_inputs(manifest, target_coc="0.09")
+    assert (target, rate, as_of, source) == ("0.09", "0.04", "2026-10-01", "illustrative")
+    assert prefilled == ["benchmark_5yr_treasury", "benchmark_as_of", "benchmark_source"]
+    assert service.pricing_inputs({})[:2] == ("0.08", None)  # no benchmark is ever invented
+
+
+def test_a_flat_sample_profile_still_loads(workspace, sample_dir):
+    flat = {"name": "Synthetic flat sample", "deal_type": "stabilized", **PROFILE, **TAX}
+    (sample_dir / "profile.json").write_text(json.dumps(flat), encoding="utf-8")
+    (sample_dir / "sample_t12.csv").rename(sample_dir / "t12.csv")
+    (sample_dir / "sample_rent_roll.csv").rename(sample_dir / "rent_roll.csv")
+    loaded = mcp_server.load_sample_deal()
+    assert loaded["ok"] is True, loaded
+    assert loaded["name"] == "Synthetic flat sample" and loaded["profile"]["year_built"] == 1986
 
 
 def test_load_sample_deal_without_the_bundle_is_a_clear_error(workspace, monkeypatch, tmp_path):
@@ -611,3 +652,18 @@ def test_legacy_stateless_tools_still_work(minimal_deal_inputs):
     summary = mcp_server.run_deal_summary(minimal_deal_inputs)
     assert summary["status"] == "success"
     assert isinstance(summary["irr"].get("levered_irr"), (int, float))
+
+
+def test_an_unpriced_deal_ingests_and_says_what_it_needs_to_run(workspace):
+    deal_id = mcp_server.create_deal("Synthetic Unpriced", "value_add")["deal_id"]
+    for kind, name in (("t12", "t12.csv"), ("rent_roll", "rent_roll.csv")):
+        mcp_server.add_document(deal_id, kind, name, content_base64=_b64(LIBRARY_DEAL / name))
+    mcp_server.describe_deal(deal_id, start="2026-11", end="2031-10", year_built=1986)
+    ingest = mcp_server.ingest_deal(deal_id)
+    assert ingest["ok"] is True
+    assert ingest["missing_to_run"] == ["purchase_price", "ltv", "rate", "amort", "millage"]
+    assert "describe_deal" in ingest["next_step"]
+    assert "describe_deal" in mcp_server.get_deal(deal_id)["next_step"]
+    run = mcp_server.run_deal(deal_id)
+    assert run["error"]["code"] == "NOT_READY"
+    assert run["missing_to_run"] == ingest["missing_to_run"]
