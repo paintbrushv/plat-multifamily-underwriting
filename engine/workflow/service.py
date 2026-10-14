@@ -349,6 +349,7 @@ def get_deal(deal_id: str) -> dict[str, Any]:
         last_ingest=manifest.get("last_ingest"),
         last_run=manifest.get("last_run"),
         last_price=manifest.get("last_price"),
+        pricing_defaults=manifest.get("pricing_defaults"),
         files=files,
         **_workspace_field(ws, deal_id),
     )
@@ -943,8 +944,45 @@ def headline_metrics(results: Mapping[str, Any]) -> dict[str, Any]:
             "value": _get(m, "exit", "gross_sale_price"),
             "net_sale_proceeds": _get(m, "exit", "net_sale_proceeds"),
             "noi": _get(m, "exit", "exit_noi"),
+            "noi_window": _get(m, "exit", "exit_noi_window"),
+            "sale_costs": _get(m, "exit", "sale_costs"),
+            "loan_payoff": _get(m, "exit", "loan_payoff"),
         },
     }
+
+
+_ANNUAL_FIELDS = (
+    ("effective_gross_income", "effective_gross_income"),
+    ("total_opex", "total_opex"),
+    ("net_operating_income", "net_operating_income"),
+    ("capex_charge", "replacement_reserves"),
+    ("other_capex", "total_capex"),
+    ("debt_service", "debt_service"),
+)
+
+
+def annual_cash_flow(results: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The monthly cash flow summed by analysis year (twelve months from the analysis start).
+
+    Operating only: the sale (net proceeds, loan payoff) is left out of both cash flows and reported
+    under the exit. ``capex_charge`` is the charge below NOI, max(recurring capex, the reserve).
+    """
+    months = [m for m in (_get(results, "cashflow", "by_month") or []) if isinstance(m, Mapping)]
+    years: list[dict[str, Any]] = []
+    for index in range(0, len(months), 12):
+        chunk = months[index:index + 12]
+        row: dict[str, Any] = {"analysis_year": index // 12 + 1, "start": chunk[0].get("month"),
+                               "end": chunk[-1].get("month"), "months": len(chunk)}
+        for name, source in _ANNUAL_FIELDS:
+            row[name] = round(sum(float(m.get(source) or 0.0) for m in chunk), 2)
+        sale = sum(float(m.get("net_sale_proceeds") or 0.0) for m in chunk)
+        payoff = sum(float(m.get("loan_payoff") or 0.0) for m in chunk)
+        row["cash_flow_before_debt"] = round(
+            sum(float(m.get("unleveraged_cash_flow") or 0.0) for m in chunk) - sale, 2)
+        row["cash_flow_after_debt"] = round(
+            sum(float(m.get("leveraged_cash_flow") or 0.0) for m in chunk) - sale + payoff, 2)
+        years.append(row)
+    return years
 
 
 def _pct(value: Any) -> str:
@@ -1019,6 +1057,7 @@ def run_deal(deal_id: str) -> dict[str, Any]:
               f"export_deal(deal_id='{deal_id}') for the workbook.",
               deal_id=deal_id, metrics=metrics, capital_plan=results.get("capital_plan"),
               exit_cap_grid=_grid(results.get("exit_cap_sensitivity")),
+              annual_cash_flow=annual_cash_flow(results),
               validation={"status": validation["status"], "warning_count": validation["warning_count"]},
               files=[f"{run_dir}/{name}" for name in ("results.json", "underwriting.xlsx", "assumptions.html",
                                                       "canonical.json", "validation.json")])
