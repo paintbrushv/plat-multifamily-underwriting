@@ -1,5 +1,9 @@
 # plat-multifamily-underwriting
 
+**New? Start here → [docs/USER_GUIDE.md](docs/USER_GUIDE.md)**: the flow step by step, a
+ten-minute walkthrough on a bundled sample deal, and how to read the results.
+Every assumption and house value is in the [assumption glossary](docs/ASSUMPTION_GLOSSARY.md).
+
 Deterministic multifamily underwriting engine: rent roll / T12 ingestion,
 a schema-validated canonical deal format, monthly cashflow + waterfall math,
 and a statute-cited property-tax regime module. **Numbers come from the

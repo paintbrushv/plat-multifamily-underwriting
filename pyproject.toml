@@ -104,6 +104,8 @@ include = ["engine*"]
 # The bundled synthetic sample deal (load_sample_deal) ships with the package.
 engine = ["schemas/*.json", "samples/sample_deal/*"]
 "engine.schemas" = ["*.json"]
+# The sample deal (docs/USER_GUIDE.md): documents and profile; build_sample.py ships as a module.
+"engine.samples.sample_deal" = ["*.xlsx", "*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
