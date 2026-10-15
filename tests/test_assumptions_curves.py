@@ -259,8 +259,11 @@ def test_market_precedence_for_vacancy_and_concessions():
     entries = _entries(deal)
 
     vacancy = entries["physical_vacancy"]
-    assert vacancy["value"] == {"start": 0.2, "stabilized": 0.06, "window_months": 12}
-    assert vacancy["source"] == "market:synthetic"
+    # Built from evidence (decision o): the 6% submarket base plus half of the
+    # T12's 25 bp gap to it (6.25% vacancy loss / GPR).
+    assert vacancy["value"] == {"start": 0.2, "stabilized": 0.06125, "window_months": 12}
+    assert vacancy["source"] == "house:stabilized_vacancy_model"
+    assert vacancy["detail"]["vacancy_build"]["market_base"]["source"] == "market:synthetic"
 
     concessions = entries["concessions"]
     assert concessions["value"] == {"year1": 0.01, "stabilized": 0.02, "year1_months": 12}
@@ -279,14 +282,18 @@ def test_market_precedence_for_vacancy_and_concessions():
 
 def test_msa_vacancy_when_the_submarket_has_none():
     deal = _ingest(year_built=1984, market=_registry(vacancy_stabilized__sub=None), **_geo_kwargs())
-    assert _entries(deal)["physical_vacancy"]["value"]["stabilized"] == 0.065
+    build = _entries(deal)["physical_vacancy"]["detail"]["vacancy_build"]
+    assert (build["market_base"]["value"], build["market_base"]["level"]) == (0.065, "metro")
+    # 6.5% metro base, less half of the T12's 25 bp gap below it.
+    assert _entries(deal)["physical_vacancy"]["value"]["stabilized"] == 0.06375
 
 
 def test_house_precedence_without_market_data():
     deal = _ingest(year_built=1984, market=None)
     entries = _entries(deal)
     assert entries["physical_vacancy"]["value"] == {"start": 0.2, "stabilized": 0.0575, "window_months": 12}
-    assert entries["physical_vacancy"]["source"] == "house:vintage_1980s"
+    assert entries["physical_vacancy"]["source"] == "house:stabilized_vacancy_model"
+    assert entries["physical_vacancy"]["detail"]["vacancy_build"]["market_base"]["source"] == "house:vintage_1980s"
     assert float(house.typical_physical_vacancy_rate(1984)) == 0.0575
     assert entries["concessions"]["value"] == 0.01  # T12 year 1; 1980s typical-low stabilized is 0%
     assert [row["concession_id"] for row in deal["concession_schedule"]] == ["assumption_year1_concessions"]

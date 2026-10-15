@@ -280,6 +280,7 @@
       h('details', {}, [h('summary', {}, 'Why this default'), h('div', { class: 'body' }, [
         why.rationale ? h('p', {}, why.rationale) : null,
         why.basis || why.default_basis ? h('p', { class: 'muted' }, why.basis || why.default_basis) : null,
+        r.breakdown ? h('ul', { class: 'small' }, r.breakdown.map(function (b) { return h('li', {}, [h('strong', {}, b.label + ': '), b.text]); })) : null,
         guard ? h('p', {}, [h('strong', {}, 'House floor: '), guard.basis || '']) : null,
         h('p', { class: 'small muted' }, 'Value source: ' + r.source + (r.confidence ? ' · confidence ' + r.confidence : '') + (r.as_of ? ' · as of ' + r.as_of : ''))
       ])]),

@@ -390,6 +390,10 @@ def _why_cell(row: Mapping[str, Any]) -> str:
     basis = why.get("basis")
     if basis and basis != default_basis:
         parts.append(f'<p class="basis"><strong>Current value:</strong> {_e(basis)}</p>')
+    breakdown = row.get("breakdown")
+    if breakdown:
+        items = "".join(f"<li><strong>{_e(line['label'])}:</strong> {_e(line['text'])}</li>" for line in breakdown)
+        parts.append(f"<details open><summary>How the stabilized vacancy was built</summary><ul>{items}</ul></details>")
     parts.append(_candidates_html(row))
     return "".join(parts)
 

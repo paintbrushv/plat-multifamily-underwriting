@@ -87,10 +87,11 @@ def test_unknown_vintage_leaves_only_the_insurance_and_reserve_floors(minimal_de
     assert floors["replacement_reserve_per_unit"].source == "house:replacement_reserve"
     for key in ("loss_to_lease", "collection_loss", "concessions", "r_and_m_per_unit"):
         assert floors[key].value is None, key
-    assert floors["physical_vacancy"].value == Decimal("0")
+    # No vintage, no vacancy floor: the rent roll and T12 are evidence, never floors (ADR 0003 decision o).
+    assert floors["physical_vacancy"].value is None
 
 
-def test_context_anchors_raise_but_never_lower_a_floor(minimal_deal_inputs):
+def test_context_anchors_raise_but_never_lower_a_floor_and_vacancy_is_evidence(minimal_deal_inputs):
     deal = _below_floor_deal(minimal_deal_inputs)
     context = {
         "broker_snapshot": {"underwriting_notes": {"loss_to_lease": "0.5%", "bad_debt": "3%"}},
@@ -100,9 +101,11 @@ def test_context_anchors_raise_but_never_lower_a_floor(minimal_deal_inputs):
     assert floors["loss_to_lease"].value == Decimal("0.010")  # broker 0.5% is below the vintage floor
     assert floors["collection_loss"].value == Decimal("0.03")
     assert floors["collection_loss"].source == "deal:om"
-    assert floors["physical_vacancy"].value == Decimal("0.08")
-    assert floors["physical_vacancy"].source == "deal:t12"
-    assert summary["base_case_selected_anchor"] == ["t12_vacancy_gpr"]
+    # T12 vacancy of 8% is evidence, not a floor: the vacancy floor stays the vintage floor (decision o).
+    assert floors["physical_vacancy"].value == Decimal("0.050")
+    assert floors["physical_vacancy"].source == "house:vintage_1980s"
+    assert summary["evidence_candidates"]["t12_vacancy_gpr"] == 0.08
+    assert summary["evidence_above_floor"] == ["t12_vacancy_gpr"]
 
 
 # ── underwrite mode ──────────────────────────────────────────────────────

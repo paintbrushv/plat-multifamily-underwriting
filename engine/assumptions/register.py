@@ -506,6 +506,67 @@ _SHOWN_FIELDS = frozenset({
 })
 
 
+def _pct(value: Any) -> str:
+    number = _number(value)
+    return "n/a" if number is None else f"{number:.2%}"
+
+
+def _signed_pct(value: Any) -> str:
+    number = _number(value)
+    return "n/a" if number is None else f"{number:+.2%}"
+
+
+def vacancy_breakdown(entry: Mapping[str, Any]) -> Optional[list[dict[str, str]]]:
+    """Compact lines of the stabilized vacancy build (``detail.vacancy_build``), or None."""
+    detail = entry.get("detail") if isinstance(entry, Mapping) else None
+    build = detail.get("vacancy_build") if isinstance(detail, Mapping) else None
+    if not isinstance(build, Mapping):
+        return None
+    start = build.get("year1_start") or {}
+    base = build.get("market_base") or {}
+    supply = build.get("supply") or {}
+    gap = build.get("asset_vs_market") or {}
+    floor = build.get("floor") or {}
+    level = {"submarket": "submarket", "metro": "metro aggregate", "house": "house vintage default"}.get(
+        str(base.get("level")), str(base.get("level")))
+    base_text = f"{_pct(base.get('value'))} {level} ({base.get('source')}"
+    if base.get("star_tier_matched"):
+        base_text += f", {base['star_tier_matched']}"
+    if base.get("as_of"):
+        base_text += f", as of {base['as_of']}"
+    base_text += ")"
+    if supply.get("available"):
+        supply_text = (
+            f"{_signed_pct(supply.get('value'))} ({_pct(supply.get('deliveries_pct_inventory'))} of inventory "
+            f"delivering over {supply.get('horizon_months')} months vs {_pct(supply.get('normal_pct_inventory'))} "
+            f"normal; {supply.get('bps_per_pct'):g} bp per point" + (", capped" if supply.get("capped") else "") + ")"
+        )
+    else:
+        missing = "supply_pipeline_norm" if supply.get("deliveries_pct_inventory") is not None else "supply_pipeline"
+        supply_text = f"none: no {missing} from the market data"
+    if gap.get("available"):
+        gap_text = (
+            f"{_signed_pct(gap.get('value'))} ({_pct(gap.get('carried_share'))} of a {_signed_pct(gap.get('gap'))} "
+            f"gap: T12 {_pct(gap.get('asset_vacancy_stabilized'))} vs market {_pct(gap.get('market_comparator'))}"
+            + (", capped" if gap.get("capped") else "") + ")"
+        )
+    else:
+        gap_text = f"none: {gap.get('note') or 'not available'}"
+    years = (supply.get("years") or 0)
+    return [
+        {"label": "Year 1 (rent roll)",
+         "text": f"{_pct(start.get('value'))} (evidence, not a floor)" if start.get("value") is not None
+         else "no rent-roll vacancy"},
+        {"label": "Market base", "text": base_text},
+        {"label": f"Supply (years 1-{years})", "text": supply_text},
+        {"label": "Asset vs market", "text": gap_text},
+        {"label": "Stabilized", "text": str(build.get("formula") or _pct(build.get("stabilized")))},
+        {"label": "Pricing floor",
+         "text": (f"{_pct(floor.get('value'))} ({floor.get('source')}), the vintage floor only"
+                  if floor.get("value") is not None else "none (year built unknown)")},
+    ]
+
+
 def _default_provenance(entry: Mapping[str, Any]) -> dict[str, Any]:
     """Where the default came from: the entry itself, or (for an overridden
     entry) the default provenance the resolver keeps on its analyst candidate."""
@@ -648,6 +709,9 @@ def register_row(key: str, entry: Any, *, include_candidates: bool = True) -> di
         "flags": flags,
         "extra": extra or None,
     }
+    breakdown = vacancy_breakdown(entry)
+    if breakdown is not None:
+        row["breakdown"] = breakdown
     if include_candidates:
         row["candidates"] = _candidates(entry, unit, default_source)
     else:

@@ -2371,11 +2371,12 @@ def _market_data_status(
     not market-sourced, gets the block's fallback note on its basis and a
     ``detail.market_data`` record.
     """
-    from engine.market_data.diagnostics import MSA_ONLY, market_data_status
+    from engine.market_data.diagnostics import COMPONENT_SLOTS, MSA_ONLY, market_data_status
 
     curves = _curves()
     if ctx.market is not None:
         slots = {spec.key: spec.market_metrics for spec in specs if spec.market_metrics}
+        slots.update(COMPONENT_SLOTS)
         status = market_data_status(
             ctx.market,
             curves.profile_geo(ctx.profile),

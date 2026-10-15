@@ -1,15 +1,17 @@
 """House guardrail floors and the two guardrail modes (ADR 0003 §5, slice 6).
 
 One place defines the house floors for a (deal_type -> strategy, year_built)
-profile: physical vacancy (the property-level vacancy anchor), loss to lease,
+profile: physical vacancy (the vintage floor alone; rent roll, T12, broker and
+benchmark vacancies are evidence for the stabilized vacancy build, ADR 0003
+decision o), loss to lease,
 collection loss, year-1 concessions, insurance per unit, R&M per unit (floor
 and top-up), replacement reserves per unit (the house lender-style reserve,
 ``HOUSE_REPLACEMENT_RESERVE_PER_UNIT``, the same for every vintage) and
 recurring capex per unit (the vintage band: low end stabilized, midpoint
 value-add, high end with deferred maintenance). The vintage values come from
 ``engine/underwriting_policy.py``; deal evidence
-passed in ``context`` (broker notes, trailing actuals) can raise a floor,
-exactly as backsolve has always done.
+passed in ``context`` (broker notes, trailing actuals) can raise the loss-to-lease,
+collection-loss and concession floors, exactly as backsolve has always done.
 
 Two modes:
 
@@ -62,8 +64,6 @@ from engine.assumptions.registry import (
     SOURCE_ANALYST,
     SOURCE_DEAL_OM,
     SOURCE_DEAL_PCA,
-    SOURCE_DEAL_RENT_ROLL,
-    SOURCE_DEAL_T12,
     house_vintage_source,
     market_source,
     requires_review,
@@ -144,6 +144,8 @@ _UNITS = {
 R_AND_M_TOP_UP_CATEGORY = "Repairs & Maintenance Vintage Floor Top-Up"
 # The year-1 pct_rent row the concessions floor adds when no row covers year 1.
 YEAR1_CONCESSION_FLOOR_ID = "house_year1_concessions"
+# Retired with decision (o): the vacancy floor is the vintage floor alone, so no
+# entry takes these as its floor source now. A stored canonical may still carry them.
 SOURCE_HOUSE_VACANCY_ANCHOR = "house:vacancy_anchor"
 SOURCE_SUPPLIED_MARKET_VACANCY = market_source("supplied_benchmark")
 
@@ -169,12 +171,6 @@ PRICING_LABEL_NOTES = frozenset({
 SOURCE_HOUSE_BACKSOLVE_POLICY = HOUSE_BACKSOLVE_POLICY
 SOURCE_HOUSE_PRICING_NORMALIZATION = HOUSE_PRICING_NORMALIZATION
 
-_VACANCY_ANCHOR_SOURCES = {
-    "broker_om": SOURCE_DEAL_OM,
-    "rent_roll_vacant": SOURCE_DEAL_RENT_ROLL,
-    "t12_vacancy_gpr": SOURCE_DEAL_T12,
-    "supplied_market_benchmark": SOURCE_SUPPLIED_MARKET_VACANCY,
-}
 
 
 # ── profile ──────────────────────────────────────────────────────────────
@@ -451,16 +447,42 @@ def rent_roll_unit_counts(canonical: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ingested_t12_vacancy(canonical: Mapping[str, Any]) -> Decimal | None:
+    """T12 vacancy loss / GPR from the ingest evidence (``ingest_gate.evidence.t12``)."""
+    t12 = (((canonical.get("metadata") or {}).get("ingest_gate") or {}).get("evidence") or {}).get("t12") or {}
+    gpr, vacancy = t12.get("gross_potential_rent"), t12.get("vacancy_loss")
+    if not gpr or vacancy is None or dec(gpr) <= 0:
+        return None
+    return abs(dec(vacancy)) / dec(gpr)
+
+
+def _vacancy_build(canonical: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    entry = (((canonical.get("assumptions") or {}).get("entries") or {}).get("physical_vacancy")) or {}
+    build = (entry.get("detail") or {}).get("vacancy_build") if isinstance(entry, Mapping) else None
+    return deepcopy(dict(build)) if isinstance(build, Mapping) else None
+
+
 def vacancy_anchor_summary(
     canonical: dict[str, Any],
     *,
-    default_vacancy: Decimal,
+    default_vacancy: Decimal | None,
     broker_vacancy: Decimal | None,
     trailing_actuals: dict[str, Any] | None,
     broker_snapshot: dict[str, Any] | None,
     strict: bool = True,
-) -> tuple[Decimal, dict[str, Any]]:
-    """Property-level vacancy anchor: the max of the deal and house anchors."""
+) -> tuple[Decimal | None, dict[str, Any]]:
+    """The physical-vacancy floor and the vacancy evidence behind the stabilized build.
+
+    The floor is the house vintage floor alone (``default_vacancy``, already
+    raised for deferred maintenance; None when the vintage is unknown). The
+    rent roll's vacant share (and vacant plus notice), the T12 vacancy / GPR
+    (``trailing_actuals``, else the ingested T12), the broker's vacancy and a
+    supplied ``market_vacancy_benchmark`` are evidence: they are listed, and
+    the ones above the floor named, but none of them is a floor (ADR 0003
+    decision o). The resolver's evidence build
+    (``assumptions.entries.physical_vacancy.detail.vacancy_build``) is copied
+    in when the canonical carries one.
+    """
     property_summary = (canonical.get("metadata") or {}).get("property_summary") or {}
     status_counts = (property_summary.get("house_box_score") or {}).get("status_counts") or {}
     rent_roll = rent_roll_unit_counts(canonical)
@@ -471,6 +493,8 @@ def vacancy_anchor_summary(
         rent_roll_vacant = Decimal(vacant_units) / Decimal(total_units)
         vacant_plus_notice = Decimal(vacant_units + (rent_roll["notice_units"] or 0)) / Decimal(total_units)
     t12_vacancy = t12_vacancy_rate(trailing_actuals)
+    if t12_vacancy is None:
+        t12_vacancy = _ingested_t12_vacancy(canonical)
     broker_table_vacancy = broker_vacancy_rate(broker_snapshot)
     broker_anchor = broker_vacancy if broker_vacancy is not None else broker_table_vacancy
     market = market_vacancy_benchmark(canonical, broker_snapshot, strict=strict)
@@ -485,40 +509,29 @@ def vacancy_anchor_summary(
     ]
     worst_cohort = max(cohort_rates) if cohort_rates else None
 
-    base_candidates = {
+    evidence = {
         "broker_om": broker_anchor,
         "rent_roll_vacant": rent_roll_vacant,
-        "t12_vacancy_gpr": t12_vacancy,
-        "vintage_house_floor": default_vacancy,
-        "supplied_market_benchmark": market_vacancy,
-    }
-    conservative_candidates = {
-        "broker_om": broker_anchor,
         "rent_roll_vacant_plus_notice": vacant_plus_notice,
         "t12_vacancy_gpr": t12_vacancy,
-        "vintage_house_floor": default_vacancy,
         "supplied_market_benchmark": market_vacancy,
     }
-    usable_base = {k: v for k, v in base_candidates.items() if v is not None}
-    usable_conservative = {k: v for k, v in conservative_candidates.items() if v is not None}
-    base_rate = max(usable_base.values()) if usable_base else Decimal("0")
-    conservative_rate = max(usable_conservative.values()) if usable_conservative else base_rate
+    floor = default_vacancy
 
-    def fmt_candidates(values: dict[str, Decimal | None]) -> dict[str, float | None]:
-        return {k: (float(v) if v is not None else None) for k, v in values.items()}
-
-    return base_rate, {
-        "method": "base_case_max_property_level_anchors",
-        "base_case_candidates": fmt_candidates(base_candidates),
-        "base_case_selected_rate": float(base_rate),
-        "base_case_selected_anchor": [
-            k for k, v in usable_base.items() if v == base_rate
+    return floor, {
+        "method": "vintage_floor_with_evidence",
+        "rule": (
+            "The physical-vacancy floor is the house vintage floor alone (raised for deferred maintenance). "
+            "The rent roll, T12, broker and supplied benchmark vacancies are evidence for the stabilized vacancy "
+            "build (vacancy_build), not floors: a value above the floor is never enforced (ADR 0003 decision o)."
+        ),
+        "floor": float(floor) if floor is not None else None,
+        "floor_anchor": "vintage_house_floor" if floor is not None else None,
+        "evidence_candidates": {k: (float(v) if v is not None else None) for k, v in evidence.items()},
+        "evidence_above_floor": [
+            k for k, v in evidence.items() if v is not None and floor is not None and v > floor
         ],
-        "conservative_downside_candidates": fmt_candidates(conservative_candidates),
-        "conservative_downside_selected_rate": float(conservative_rate),
-        "conservative_downside_selected_anchor": [
-            k for k, v in usable_conservative.items() if v == conservative_rate
-        ],
+        "vacancy_build": _vacancy_build(canonical),
         "stress_flag_worst_cohort_vacancy": float(worst_cohort) if worst_cohort is not None else None,
         "stress_flag_note": (
             "Worst cohort vacancy is logged for review/stress only and is not "
@@ -570,18 +583,20 @@ def house_floors(
     *,
     strict: bool = True,
 ) -> tuple[dict[str, Floor], dict[str, Any]]:
-    """Every house floor for ``profile``, plus the vacancy anchor summary.
+    """Every house floor for ``profile``, plus the vacancy evidence summary.
 
     ``context`` may carry ``broker_snapshot`` and ``trailing_actuals``: broker
-    notes and T12 vacancy are anchors that raise a floor, never lower it.
+    notes are anchors that raise the loss-to-lease, collection-loss and
+    concession floors, never lower them. Broker and T12 vacancy are evidence
+    in the vacancy summary only: the vacancy floor is the vintage floor.
     """
     gp = GuardrailProfile.coerce(profile, canonical)
     context = context or {}
     notes = _broker_notes(context)
     vintage_vacancy = gp.physical_vacancy()
-    anchor, vacancy_summary = vacancy_anchor_summary(
+    vacancy_floor, vacancy_summary = vacancy_anchor_summary(
         canonical,
-        default_vacancy=vintage_vacancy or Decimal("0"),
+        default_vacancy=vintage_vacancy,
         broker_vacancy=parse_percent_note(notes.get("vacancy")),
         trailing_actuals=context.get("trailing_actuals"),
         broker_snapshot=context.get("broker_snapshot"),
@@ -592,20 +607,19 @@ def house_floors(
         " Raised for deferred maintenance (deal_profile.deferred_maintenance): the upper part of the "
         "vintage band." if gp.deferred_flagged else ""
     )
-    selected = vacancy_summary["base_case_selected_anchor"]
-    if "vintage_house_floor" in selected:
-        vacancy_source = gp.vintage_source or SOURCE_HOUSE_VACANCY_ANCHOR
-    else:
-        vacancy_source = _VACANCY_ANCHOR_SOURCES.get(selected[0], SOURCE_HOUSE_VACANCY_ANCHOR)
+    above = vacancy_summary["evidence_above_floor"]
     floors = {
         "physical_vacancy": Floor(
             "physical_vacancy",
-            anchor,
-            vacancy_source,
-            f"Property-level vacancy anchor (max of {', '.join(sorted(vacancy_summary['base_case_candidates']))}); "
-            f"selected {', '.join(selected) or 'none'}." + (
-                " The vintage house floor is raised for deferred maintenance." if gp.deferred_flagged else ""
-            ),
+            vacancy_floor,
+            gp.vintage_source if vacancy_floor is not None else None,
+            (
+                "House vintage physical-vacancy floor (VINTAGE_FRAMEWORK_2026)."
+                + (" Raised for deferred maintenance (deal_profile.deferred_maintenance)." if gp.deferred_flagged
+                   else "")
+                + " Rent roll, T12, broker and benchmark vacancies are evidence for the stabilized vacancy, not "
+                "floors" + (f" ({', '.join(above)} above the floor)." if above else ".")
+            ) if vacancy_floor is not None else "No vintage vacancy floor (year built unknown).",
         ),
         "loss_to_lease": _max_floor(
             "loss_to_lease", gp.loss_to_lease(), gp.vintage_source,

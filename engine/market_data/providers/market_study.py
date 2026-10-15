@@ -15,6 +15,7 @@ Layouts read (verified against the feeder source):
    ``asking_rent_unit``, ``effective_rent_unit``,
    ``effective_rent_{studio,1br,2br,3br}``, ``effective_rent_growth_yoy``,
    ``market_cap_rate``, ``under_construction``, ``inventory_units``,
+   ``deliveries`` (net delivered units in the quarter, actual and forecast),
    ``deliveries_12mo``, ``absorption_units_12mo``.
 2. Submarket ensemble forecast, ``reports/**/forecasts/`` written by
    ``python -m etl.submarket_forecast``: ``v2_ensemble_<tier_slug>.csv``
@@ -54,6 +55,18 @@ As-of: a quarter's value counts as known from the first day of that quarter
 (the feeder publishes QTD/EST rows for the current quarter). Scalar metrics
 use the latest actual quarter visible at ``as_of``; series metrics are
 withheld when their vintage quarter starts after ``as_of``.
+
+Supply (ADR 0003 decision o): ``supply_pipeline`` is the net deliveries of the
+eight forecast quarters after the latest actual quarter (24 months,
+``metrics.SUPPLY_PIPELINE_MONTHS``) over that quarter's inventory; when the
+forecast quarters do not all carry ``deliveries`` it is units under
+construction over inventory (most deliver within 24 months), and
+``attributes["basis"]`` says which. ``supply_pipeline_norm`` is the mean
+quarterly ``deliveries`` / ``inventory_units`` over the last 40 actual
+quarters (``metrics.SUPPLY_NORM_LOOKBACK_YEARS``, at least eight), times
+eight: the normal pace over the same 24 months. ``vacancy_stabilized``
+carries ``attributes["trailing_4q_mean"]``, the mean of the last four actual
+quarters: the market's vacancy over a T12-like window.
 """
 
 from __future__ import annotations
@@ -79,6 +92,7 @@ from engine.market_data._util import (
     tier_label,
     tier_slug,
 )
+from engine.market_data.metrics import SUPPLY_NORM_LOOKBACK_YEARS, SUPPLY_PIPELINE_MONTHS
 from engine.market_data.paths import feeder_root
 from engine.market_data.types import CONFIDENCE_LEVELS, Geo, Observation, Provenance
 
@@ -100,7 +114,10 @@ _WEIGHTED = (
     "effective_rent_studio", "effective_rent_1br", "effective_rent_2br", "effective_rent_3br",
     "effective_rent_growth_yoy", "market_cap_rate",
 )
-_SUMMED = ("inventory_units", "under_construction", "deliveries_12mo", "absorption_units_12mo")
+_SUMMED = ("inventory_units", "under_construction", "deliveries", "deliveries_12mo", "absorption_units_12mo")
+_PIPELINE_QUARTERS = SUPPLY_PIPELINE_MONTHS // 3
+_NORM_QUARTERS = SUPPLY_NORM_LOOKBACK_YEARS * 4
+_NORM_MIN_QUARTERS = 8
 _BEDS = (("studio", "effective_rent_studio"), ("1br", "effective_rent_1br"),
          ("2br", "effective_rent_2br"), ("3br", "effective_rent_3br"))
 _EVIDENCE_CONFIDENCE = {
@@ -120,7 +137,7 @@ DEFAULT_CBSA_METROS: dict[str, str] = {"19100": "dallas_tx"}
 # rent_growth_long_run have no feeder output).
 SERVES = (
     "rent_growth_forecast", "effective_rent_by_bed", "vacancy_current", "vacancy_stabilized",
-    "concession_rate", "supply_risk", "market_cap_rate",
+    "concession_rate", "supply_risk", "supply_pipeline", "supply_pipeline_norm", "market_cap_rate",
 )
 COSTAR_GLOB = "data/paid/costar-submarket*/*.parquet"
 ENSEMBLE_GLOB = "reports/**/forecasts/model_diagnostics_<tier>.json + v2_ensemble_<tier>.csv"
@@ -213,7 +230,7 @@ class PlatMarketStudyAgentProvider:
         if metric == "effective_rent_by_bed":
             return self._comps(geo, as_of) or self._costar(metric, geo, as_of)
         if metric in ("vacancy_current", "vacancy_stabilized", "concession_rate",
-                      "supply_risk", "market_cap_rate"):
+                      "supply_risk", "supply_pipeline", "supply_pipeline_norm", "market_cap_rate"):
             return self._costar(metric, geo, as_of)
         return None  # renovation_premium and unknown metrics: no feeder output
 
@@ -464,6 +481,18 @@ class PlatMarketStudyAgentProvider:
         elif metric == "vacancy_stabilized":
             value, row_q = latest(lambda r: r.get("stabilized_vacancy"))
             horizon = "stabilized"
+            trailing = [finite(r.get("stabilized_vacancy")) for r in visible]
+            trailing = [v for v in trailing if v is not None][-4:]
+            if len(trailing) == 4:
+                attributes["trailing_4q_mean"] = sum(trailing) / 4
+        elif metric == "supply_pipeline":
+            if as_of is not None and quarter_start(*vintage_q) > as_of:
+                return None
+            value, row_q = _pipeline(panel, attributes)
+            horizon = f"next {SUPPLY_PIPELINE_MONTHS} months"
+        elif metric == "supply_pipeline_norm":
+            value, row_q = _pipeline_norm(visible, attributes)
+            horizon = f"{SUPPLY_PIPELINE_MONTHS} months at the trailing pace"
         elif metric == "concession_rate":
             # Same formula as plat-supply-demand concessions.py.
             def spread(r):
@@ -697,6 +726,61 @@ def _unit(metric: str) -> str:
     from engine.market_data.metrics import METRICS
 
     return METRICS[metric].unit
+
+
+def _next_quarters(label: str, count: int) -> list[str]:
+    parsed = parse_quarter(label)
+    assert parsed is not None
+    year, quarter = parsed
+    out = []
+    for _ in range(count):
+        year, quarter = (year + 1, 1) if quarter == 4 else (year, quarter + 1)
+        out.append(f"{year}Q{quarter}")
+    return out
+
+
+def _pipeline(panel: list[dict[str, Any]], attributes: dict[str, Any]) -> tuple[float | None, str | None]:
+    """Net deliveries over the next 24 months / inventory (``supply_pipeline``)."""
+    actual = [r for r in panel if not r["is_forecast"] and (finite(r.get("inventory_units")) or 0) > 0]
+    if not actual:
+        return None, None
+    base = actual[-1]
+    inventory = float(base["inventory_units"])
+    quarters = _next_quarters(base["_quarter"], _PIPELINE_QUARTERS)
+    forecast = {r["_quarter"]: r for r in panel if r["is_forecast"]}
+    deliveries = [finite((forecast.get(q) or {}).get("deliveries")) for q in quarters]
+    under_construction = finite(base.get("under_construction"))
+    attributes.update({"inventory_units": inventory, "horizon_months": SUPPLY_PIPELINE_MONTHS,
+                       "under_construction_units": under_construction})
+    if all(d is not None for d in deliveries):
+        delivered = sum(d for d in deliveries if d is not None)
+        attributes.update({"basis": "forecast_deliveries", "quarters": quarters, "deliveries_units": delivered})
+        return delivered / inventory, base["_quarter"]
+    if under_construction is None:
+        return None, None
+    attributes["basis"] = "under_construction"
+    return under_construction / inventory, base["_quarter"]
+
+
+def _pipeline_norm(visible: list[dict[str, Any]], attributes: dict[str, Any]) -> tuple[float | None, str | None]:
+    """The trailing long-run delivery pace over 24 months (``supply_pipeline_norm``)."""
+    paces = []
+    for row in visible:
+        delivered, inventory = finite(row.get("deliveries")), finite(row.get("inventory_units"))
+        if delivered is not None and inventory:
+            paces.append((row["_quarter"], delivered / inventory))
+    paces = paces[-_NORM_QUARTERS:]
+    if len(paces) < _NORM_MIN_QUARTERS:
+        return None, None
+    mean = sum(p for _, p in paces) / len(paces)
+    attributes.update({
+        "quarters_used": len(paces),
+        "first_quarter": paces[0][0],
+        "last_quarter": paces[-1][0],
+        "mean_quarterly_pct_inventory": mean,
+        "horizon_months": SUPPLY_PIPELINE_MONTHS,
+    })
+    return mean * _PIPELINE_QUARTERS, paces[-1][0]
 
 
 def _ratio(num: Any, den: Any) -> float | None:

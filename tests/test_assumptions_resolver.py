@@ -130,9 +130,11 @@ def test_every_stabilized_key_is_resolved_with_the_registry_shape(full_deal):
          ["house:long_run_rent_growth"]),
         ("collection_loss", "deal:t12", 0.015,
          ["deal:t12", "house:vintage_1980s", "house:vintage_1980s"]),
-        ("physical_vacancy", "house:vintage_1980s",
+        # Stabilized vacancy built from evidence (decision o): no market data, so the
+        # house vintage base; the T12 vacancy is a candidate (no market to compare it with).
+        ("physical_vacancy", "house:stabilized_vacancy_model",
          {"start": 0.2, "stabilized": 0.0575, "window_months": 12},
-         ["deal:rent_roll", "house:vintage_1980s", "house:vintage_1980s"]),
+         ["deal:rent_roll", "house:vintage_1980s", "deal:t12", "house:vintage_1980s"]),
         ("loss_to_lease", "house:vintage_1980s",
          {"start": 0.08737, "floor": 0.01, "burn_off_months": 12,
           "start_by_cohort": {"1br1ba": 0.117547, "2br1ba": 0.076809, "2br2ba": 0.067308}},
@@ -603,7 +605,7 @@ def test_market_is_queried_with_a_geo_and_missing_data_falls_through():
 
     assert {call[0] for call in market.calls} == {
         "rent_growth_forecast", "rent_growth_long_run", "vacancy_current", "vacancy_stabilized",
-        "concession_rate", "market_cap_rate",
+        "supply_pipeline", "supply_pipeline_norm", "concession_rate", "market_cap_rate",
     }
     assert all(call[1] == Geo(metro_slug="synthetic_metro") and call[2] is None for call in market.calls)
     without = resolve_assumptions(deal)

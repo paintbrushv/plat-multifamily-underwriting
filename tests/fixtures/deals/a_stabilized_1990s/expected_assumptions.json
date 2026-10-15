@@ -56,11 +56,11 @@
       "window_months": 12
     },
     "unit": "decimal_of_units",
-    "source": "market:synthetic",
-    "basis": "Physical vacancy moves linearly from the rent-roll 5.00% to the submarket stabilized vacancy 5.50% from synthetic over the stabilized stabilization window of 12 months, then stays flat (monthly segments per cohort).",
+    "source": "house:stabilized_vacancy_model",
+    "basis": "Physical vacancy moves linearly from the rent-roll 5.00% (year 1, evidence) to the stabilized 5.50% over the stabilized stabilization window of 12 months, then stays flat (monthly segments per cohort). Stabilized 5.50% = submarket Larkspur North stabilized vacancy 5.50% from synthetic as of 2026-09-30, +0.00% asset-vs-market (T12 vacancy 5.50% vs market 5.50%: gap +0.00%, 50% carried = +0.00%); supply: No provider supplied supply_pipeline (net deliveries over the next 24 months / inventory) for this geography, so there is no supply adjustment. The market-study feeder's CoStar submarket parquet serves it (forecast-quarter deliveries over inventory_units, else under_construction); plat-supply-demand would need to persist a deliveries forecast.",
     "as_of": "2026-09-30",
     "confidence": "high",
-    "review_required": false,
+    "review_required": true,
     "default_value": {
       "start": 0.05,
       "stabilized": 0.055,
@@ -71,7 +71,85 @@
     "override_note": null,
     "override_cohorts": null,
     "guardrail_status": null,
-    "extra": null
+    "extra": {
+      "detail": {
+        "vacancy_build": {
+          "method": "house:stabilized_vacancy_model (ADR 0003 decision o)",
+          "formula": "stabilized = market base 5.50% + asset-vs-market carry +0.00% = 5.50%; years 1-3: + supply +0.00% = 5.50%",
+          "year1_start": {
+            "value": 0.05,
+            "source": "deal:rent_roll",
+            "counts": {
+              "source": "ingest_gate.rent_roll_reconciliation",
+              "total_units": 200,
+              "vacant_units": 10,
+              "notice_units": null,
+              "note": "Parsed from the ingested rent roll; notice units are not counted separately, so the vacant-plus-notice candidate is the vacant rate."
+            },
+            "basis": "The rent roll's current physical vacancy sets year 1 only; it is evidence, not a floor."
+          },
+          "market_base": {
+            "value": 0.055,
+            "level": "submarket",
+            "source": "market:synthetic",
+            "provider": "synthetic",
+            "as_of": "2026-09-30",
+            "confidence": "high",
+            "star_tier_requested": null,
+            "star_tier_matched": null,
+            "comparator": 0.055,
+            "comparator_basis": "the market's latest stabilized vacancy",
+            "basis": "submarket Larkspur North stabilized vacancy 5.50% from synthetic as of 2026-09-30"
+          },
+          "supply": {
+            "available": false,
+            "value": 0.0,
+            "bps": 0.0,
+            "years": 3,
+            "months": 0,
+            "horizon_months": 24,
+            "bps_per_pct": 25.0,
+            "cap": 0.015,
+            "capped": false,
+            "note": "No provider supplied supply_pipeline (net deliveries over the next 24 months / inventory) for this geography, so there is no supply adjustment. The market-study feeder's CoStar submarket parquet serves it (forecast-quarter deliveries over inventory_units, else under_construction); plat-supply-demand would need to persist a deliveries forecast."
+          },
+          "asset_vs_market": {
+            "available": true,
+            "value": 0.0,
+            "carried_share": 0.5,
+            "cap": 0.02,
+            "capped": false,
+            "asset_vacancy": 0.055,
+            "asset_vacancy_basis": "T12 vacancy loss / gross potential rent",
+            "asset_vacancy_stabilized": 0.055,
+            "asset_source": "deal:t12",
+            "market_comparator": 0.055,
+            "comparator_basis": "the market's latest stabilized vacancy",
+            "gap": 0.0,
+            "note": "T12 vacancy 5.50% vs market 5.50%: gap +0.00%, 50% carried = +0.00%."
+          },
+          "stabilization_exclusions": {
+            "offline_units": null,
+            "offline_share": null,
+            "offline_source": null,
+            "offline_applied": false,
+            "t12_non_revenue_rate": null,
+            "lease_up": false,
+            "notice_units": null,
+            "pre_leased_vacant_units": 0,
+            "note": "Offline units are taken out of the T12 vacancy before it is compared with the market; an asset built within 2 years of the analysis start was in lease-up and carries no gap. Units on notice and pre-leased units are disclosed only: they describe today's roll (year 1), not the trailing year. Gap: the rent roll carries no per-status unit counts (house box score), so offline units are not separated unless the T12 books them on their own lines."
+          },
+          "stabilized": 0.055,
+          "supply_adjustment": 0.0,
+          "supply_months": 0,
+          "floor": {
+            "value": 0.05,
+            "source": "house:vintage_1990s",
+            "basis": "The pricing floor is the house vintage floor alone (raised when deferred maintenance is flagged): pricing raises any vacancy segment below it and underwrite warns. The rent roll, T12, broker and benchmark vacancies are evidence for this build, not floors."
+          }
+        }
+      }
+    }
   },
   {
     "key": "loss_to_lease",

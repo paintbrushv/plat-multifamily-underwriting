@@ -161,12 +161,19 @@ def test_backsolve_converges_and_enforces_the_r_and_m_floor(sample_run):
     assert (sample_run["out"] / "price" / "assumptions.html").is_file()
 
 
-def test_backsolve_vacancy_anchor_reads_the_sample_rent_roll(sample_run):
-    """UPL-107: the rent-roll vacancy anchor is the roll's 7 of 128 vacant, not 0.0."""
+def test_backsolve_vacancy_evidence_reads_the_sample_rent_roll(sample_run):
+    """UPL-107: the rent-roll vacancy evidence is the roll's 7 of 128 vacant, not 0.0.
+
+    UPL-108 (ADR 0003 decision o): it is evidence, not a floor; the floor is the
+    1980s vintage floor and the stabilized vacancy build is shown beside it.
+    """
     summary = _load(sample_run["out"] / "price" / "backsolve_summary.json")
-    anchor = summary["policy_summary"]["physical_vacancy_anchor_summary"]
-    assert anchor["base_case_candidates"]["rent_roll_vacant"] == pytest.approx(7 / 128)
+    policy = summary["policy_summary"]
+    anchor = policy["physical_vacancy_anchor_summary"]
+    assert anchor["evidence_candidates"]["rent_roll_vacant"] == pytest.approx(7 / 128)
     assert anchor["rent_roll_vacancy_evidence"]["source"] == "ingest_gate.rent_roll_reconciliation"
+    assert policy["physical_vacancy_floor"] == 0.05
+    assert anchor["vacancy_build"]["market_base"]["level"] == "house"
 
 
 def _usd(value: float) -> str:

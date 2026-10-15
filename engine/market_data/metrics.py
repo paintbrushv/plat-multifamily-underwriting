@@ -8,6 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# ``supply_pipeline`` and ``supply_pipeline_norm`` measure deliveries over this
+# many months (engine/underwriting_policy.HOUSE_SUPPLY_HORIZON_MONTHS), and the
+# norm averages the pace over this many trailing years of actuals.
+SUPPLY_PIPELINE_MONTHS = 24
+SUPPLY_NORM_LOOKBACK_YEARS = 10
+
 
 @dataclass(frozen=True)
 class MetricSpec:
@@ -55,6 +61,14 @@ METRICS: dict[str, MetricSpec] = {
         MetricSpec(
             "supply_risk", "decimal_of_inventory", "scalar",
             "Units under construction / existing inventory units.",
+        ),
+        MetricSpec(
+            "supply_pipeline", "decimal_of_inventory", "scalar",
+            "Net units expected to deliver over the next 24 months / existing inventory units.",
+        ),
+        MetricSpec(
+            "supply_pipeline_norm", "decimal_of_inventory", "scalar",
+            "Normal 24-month net deliveries / inventory: the trailing long-run (10-year) pace.",
         ),
     )
 }

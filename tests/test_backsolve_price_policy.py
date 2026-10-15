@@ -103,7 +103,10 @@ def test_prepare_house_assumptions_rebases_to_house_box_score_and_status_mix():
     assert prepared["unit_cohorts"][1]["unit_count"] == 138
     assert prepared["unit_cohorts"][0]["initial_inplace_rent"] == 1100.0
     assert prepared["unit_cohorts"][0]["target_monthly_rent"] == 1100.0
-    assert prepared["physical_vacancy_curve"][0]["vacancy_rate"] == 20 / 238
+    # The box score's 20 of 238 unavailable is evidence, not a floor (ADR 0003
+    # decision o): the analyst's 0% is raised to the 1984 vintage floor only.
+    assert prepared["physical_vacancy_curve"][0]["vacancy_rate"] == 0.05
+    assert policy_summary["physical_vacancy_anchor_summary"]["evidence_candidates"]["rent_roll_vacant"] == 20 / 238
     assert prepared["market_rent_curve"][0]["market_rent"] == 1100.0
     assert prepared["market_rent_curve"][0]["start_period"] == "2026-06"
     assert prepared["market_rent_curve"][0]["end_period"] == "2031-05"
@@ -424,22 +427,26 @@ def test_house_revenue_policy_logs_worst_cohort_vacancy_without_applying_propert
         trailing_actuals={"gross_potential_rent": 1000.0, "vacancy_loss": 90.0},
     )
 
-    # The 0.09 anchor floors each segment: a1 is raised to it, b1 keeps its
-    # own 0.30, which is neither lowered nor spread to a1.
+    # The floor is the 1984 vintage floor (5%); the T12's 9% is evidence, not a
+    # floor (ADR 0003 decision o). a1 sits at the floor and keeps it, b1 keeps
+    # its own 0.30, which is neither lowered nor spread to a1.
     rates = {row["cohort_id"]: row["vacancy_rate"] for row in canonical["physical_vacancy_curve"]}
-    assert rates == {"a1": 0.09, "b1": 0.30}
-    assert summary["physical_vacancy_floor"] == 0.09
-    # The summary reports the vacancy actually priced (unit-weighted), not the anchor.
-    assert summary["physical_vacancy_rate_applied"] == pytest.approx((0.09 + 0.30) / 2)
+    assert rates == {"a1": 0.05, "b1": 0.30}
+    assert summary["physical_vacancy_floor"] == 0.05
+    # The summary reports the vacancy actually priced (unit-weighted), not the floor.
+    assert summary["physical_vacancy_rate_applied"] == pytest.approx((0.05 + 0.30) / 2)
     assert summary["physical_vacancy_curve_applied"] == [
-        {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2031-05", "vacancy_rate": 0.09},
+        {"cohort_id": "a1", "start_period": "2026-06", "end_period": "2031-05", "vacancy_rate": 0.05},
         {"cohort_id": "b1", "start_period": "2026-06", "end_period": "2031-05", "vacancy_rate": 0.30},
     ]
     vacancy_overrides = [o for o in summary["policy_overrides"] if o["input"] == "physical_vacancy_curve"]
-    assert [(o["cohort_id"], o["original"], o["applied"]) for o in vacancy_overrides] == [("a1", 0.05, 0.09)]
+    assert vacancy_overrides == []
     vacancy_summary = summary["physical_vacancy_anchor_summary"]
-    assert vacancy_summary["base_case_selected_anchor"] == ["t12_vacancy_gpr"]
-    assert vacancy_summary["conservative_downside_selected_rate"] == 0.1
+    assert vacancy_summary["evidence_candidates"]["t12_vacancy_gpr"] == 0.09
+    assert vacancy_summary["evidence_candidates"]["rent_roll_vacant_plus_notice"] == 0.1
+    assert vacancy_summary["evidence_above_floor"] == [
+        "rent_roll_vacant_plus_notice", "t12_vacancy_gpr",
+    ]
     assert vacancy_summary["stress_flag_worst_cohort_vacancy"] == 0.3
 
 
@@ -464,7 +471,7 @@ def test_vacancy_anchor_counts_statuses_case_and_separator_insensitively():
         "physical_vacancy_curve": [],
     }
 
-    base_rate, summary = _vacancy_anchor_summary(
+    floor, summary = _vacancy_anchor_summary(
         canonical,
         default_vacancy=Decimal("0.05"),
         broker_vacancy=None,
@@ -472,11 +479,10 @@ def test_vacancy_anchor_counts_statuses_case_and_separator_insensitively():
         broker_snapshot=None,
     )
 
-    assert base_rate == Decimal("0.5")
-    assert summary["base_case_candidates"]["rent_roll_vacant"] == 0.5
-    assert summary["base_case_selected_anchor"] == ["rent_roll_vacant"]
-    assert summary["conservative_downside_candidates"]["rent_roll_vacant_plus_notice"] == 0.8
-    assert summary["conservative_downside_selected_anchor"] == ["rent_roll_vacant_plus_notice"]
+    assert floor == Decimal("0.05")  # evidence, not a floor (ADR 0003 decision o)
+    assert summary["evidence_candidates"]["rent_roll_vacant"] == 0.5
+    assert summary["evidence_candidates"]["rent_roll_vacant_plus_notice"] == 0.8
+    assert summary["evidence_above_floor"] == ["rent_roll_vacant", "rent_roll_vacant_plus_notice"]
 
 
 def _library_rent_roll_counts(slug: str) -> tuple[int, int]:
@@ -509,20 +515,19 @@ def test_vacancy_anchor_reads_the_ingested_rent_roll_without_a_box_score():
     canonical = dl.ingest_documents(dl.load_deal(slug))
     assert not (canonical["metadata"].get("property_summary") or {}).get("house_box_score")
 
-    base_rate, summary = _anchor(canonical)
+    floor, summary = _anchor(canonical)
 
     assert vacant > 0
-    assert summary["base_case_candidates"]["rent_roll_vacant"] == pytest.approx(vacant / total)
-    assert base_rate == Decimal(vacant) / Decimal(total)
-    assert summary["base_case_selected_anchor"] == ["rent_roll_vacant"]
+    assert summary["evidence_candidates"]["rent_roll_vacant"] == pytest.approx(vacant / total)
+    # The roll's vacancy is evidence, not a floor (ADR 0003 decision o).
+    assert floor == Decimal("0.05")
+    assert "rent_roll_vacant" in summary["evidence_above_floor"]
     evidence = summary["rent_roll_vacancy_evidence"]
     assert evidence["source"] == "ingest_gate.rent_roll_reconciliation"
     assert (evidence["vacant_units"], evidence["total_units"]) == (vacant, total)
     # The ingested roll does not separate notice units: the conservative
     # candidate is the vacant rate, disclosed as such, never 0.0.
-    assert summary["conservative_downside_candidates"]["rent_roll_vacant_plus_notice"] == pytest.approx(
-        vacant / total
-    )
+    assert summary["evidence_candidates"]["rent_roll_vacant_plus_notice"] == pytest.approx(vacant / total)
     assert evidence["notice_units"] is None
     assert "notice" in evidence["note"]
 
@@ -544,11 +549,11 @@ def test_vacancy_anchor_prefers_box_score_counts_over_the_ingested_rent_roll():
         "physical_vacancy_curve": [],
     }
 
-    base_rate, summary = _anchor(canonical)
+    floor, summary = _anchor(canonical)
 
-    assert base_rate == Decimal("0.15")
-    assert summary["base_case_candidates"]["rent_roll_vacant"] == 0.15
-    assert summary["conservative_downside_candidates"]["rent_roll_vacant_plus_notice"] == 0.2
+    assert floor == Decimal("0.05")
+    assert summary["evidence_candidates"]["rent_roll_vacant"] == 0.15
+    assert summary["evidence_candidates"]["rent_roll_vacant_plus_notice"] == 0.2
     evidence = summary["rent_roll_vacancy_evidence"]
     assert evidence["source"] == "house_box_score.status_counts"
     assert (evidence["vacant_units"], evidence["notice_units"], evidence["total_units"]) == (3, 1, 20)
@@ -561,12 +566,13 @@ def test_vacancy_anchor_reports_rent_roll_unavailable_not_zero():
         "physical_vacancy_curve": [],
     }
 
-    base_rate, summary = _anchor(canonical)
+    floor, summary = _anchor(canonical)
 
-    assert summary["base_case_candidates"]["rent_roll_vacant"] is None
-    assert summary["conservative_downside_candidates"]["rent_roll_vacant_plus_notice"] is None
-    assert base_rate == Decimal("0.05")
-    assert summary["base_case_selected_anchor"] == ["vintage_house_floor"]
+    assert summary["evidence_candidates"]["rent_roll_vacant"] is None
+    assert summary["evidence_candidates"]["rent_roll_vacant_plus_notice"] is None
+    assert floor == Decimal("0.05")
+    assert summary["floor_anchor"] == "vintage_house_floor"
+    assert summary["evidence_above_floor"] == []
     evidence = summary["rent_roll_vacancy_evidence"]
     assert evidence["source"] is None
     assert evidence["unavailable_reason"]

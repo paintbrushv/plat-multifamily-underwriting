@@ -17,9 +17,16 @@ results into curves the engine reads:
     gets the section created from this vector.
 ``physical_vacancy``
     Current physical vacancy (rent roll) moving linearly to stabilized vacancy
-    over the deal type's stabilization window, then flat. Stabilized vacancy is
-    ``vacancy_stabilized`` (submarket, else MSA), else the house value
-    max(vintage typical-band midpoint, house vacancy floor for the strategy). Written as monthly segments per cohort.
+    over the deal type's stabilization window, then flat. The stabilized
+    vacancy is built from evidence (``engine/assumptions/vacancy.py``, ADR 0003
+    decision o, ``house:stabilized_vacancy_model``, review_required): the
+    market base ``vacancy_stabilized`` (submarket, else metro, else the house
+    value max(vintage typical-band midpoint, house vacancy floor for the
+    strategy)) plus a capped share of the asset's T12 gap to the market; a
+    supply adjustment (deliveries above the normal pace) is added for the
+    lease-up years (``supply_adjustment`` for ``supply_months``). The build is
+    recorded on ``detail.vacancy_build``. Written as monthly segments per
+    cohort.
 ``loss_to_lease``
     Each cohort's rent-roll loss to lease (market vs in-place) burning off
     linearly over ``HOUSE_LTL_BURN_OFF_MONTHS`` to the house vintage LTL floor.
@@ -74,6 +81,7 @@ from typing import Any, Callable, Mapping, Optional
 from engine import underwriting_policy as house
 from engine.assumptions.canonical_ops import ensure_year1_concession_schedule
 from engine.assumptions.registry import (
+    HOUSE_STABILIZED_VACANCY_MODEL,
     MARKET_PREFIX,
     SOURCE_ANALYST,
     SOURCE_DEAL_RENT_ROLL,
@@ -293,8 +301,18 @@ def carry_market_default(
         basis=basis,
         as_of=prior.get("as_of"),
         confidence=prior.get("confidence"),
+        detail=_kept_detail(prior),
     )
     return kept, deepcopy(prior_candidates)
+
+
+def _kept_detail(prior: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """The prior entry's detail (e.g. the vacancy build), without the market-data fallback record."""
+    detail = prior.get("detail")
+    if not isinstance(detail, Mapping):
+        return None
+    kept = {k: deepcopy(v) for k, v in detail.items() if k != "market_data"}
+    return kept or None
 
 
 # "...; the resolver default is <value> from <source>." (resolver._resolve_key)
@@ -353,6 +371,7 @@ def _carry_overridden_default(
         basis=basis,
         as_of=record.get("as_of"),
         confidence=record.get("confidence"),
+        detail=_kept_detail(prior),
     )
     fresh = [c for c in candidates if not str(c.get("source", "")).startswith(MARKET_PREFIX)]
     return kept, fresh + [deepcopy(dict(c)) for c in market_seen]
@@ -625,14 +644,22 @@ def _cohort_ids(ctx: _Context, ramp: _Ramp) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
-def _ramp_values(start: float, target: Optional[float], months: int, count: int) -> list[float]:
-    if target is None or months <= 0:
-        value = target if target is not None else start
-        return [_r(value)] * count
-    return [
-        _r(start + (target - start) * i / months) if i < months else _r(target)
-        for i in range(count)
-    ]
+def _ramp_values(
+    start: float, target: Optional[float], months: int, count: int, extra: float = 0.0, extra_months: int = 0,
+) -> list[float]:
+    """Linear from ``start`` to ``target`` over ``months``, then flat.
+
+    ``extra`` (the vacancy supply adjustment) raises the target for the first
+    ``extra_months`` months: the ramp heads for ``target + extra`` and the
+    curve steps down to ``target`` after ``extra_months``.
+    """
+    if target is None:
+        return [_r(start)] * count
+    out = []
+    for i in range(count):
+        goal = target + (extra if i < extra_months else 0.0)
+        out.append(_r(start + (goal - start) * i / months) if 0 < months and i < months else _r(goal))
+    return out
 
 
 def _segments(cohort_id: str, values: list[float], grid: list[str], field: str) -> list[dict[str, Any]]:
@@ -660,7 +687,8 @@ def _ramp_rows(ctx: _Context, ramp: _Ramp, value: Any, cohorts: Optional[Mapping
                 return None
             target = _num(value.get(ramp.target_key))
             months = int(value.get(ramp.months_key) or 0)
-            values = _ramp_values(float(start), target, months, len(grid))
+            extra = _num(value.get("supply_adjustment")) or 0.0
+            values = _ramp_values(float(start), target, months, len(grid), extra, int(value.get("supply_months") or 0))
         else:
             number = _num((cohorts or {}).get(cohort_id, value))
             if number is None:
@@ -729,7 +757,7 @@ def _weighted_start(ctx: _Context, starts: Mapping[str, float]) -> float:
     return _r(sum(value * units.get(cid, 0.0) for cid, value in starts.items()) / total)
 
 
-def _ramp_reader(ramp: _Ramp, default: Callable[[_Context, str], _Choice]):
+def _ramp_reader(ramp: _Ramp, default: Callable[[_Context, str], _Choice], key: str):
     flat_reader = _cohort_reader(ramp.table, ramp.field)
 
     def read(ctx: _Context) -> _Current:
@@ -741,6 +769,15 @@ def _ramp_reader(ramp: _Ramp, default: Callable[[_Context, str], _Choice]):
         choice = default(ctx, PRESENT)
         if choice.value is not None and _same_curve(ctx, ramp, rows, _ramp_rows(ctx, ramp, choice.value)):
             return _Current(PRESENT, choice.value)
+        # The curve the last resolution wrote (e.g. a market-informed vacancy
+        # build re-read without market data) reads back as that value.
+        prior = ctx.prior_entries.get(key) if isinstance(ctx.prior_entries, Mapping) else None
+        if isinstance(prior, Mapping) and not prior.get("cohort_overrides"):
+            for value in (prior.get("value"), prior.get("default_value")):
+                if isinstance(value, (Mapping, int, float)) and not isinstance(value, bool) and _same_curve(
+                    ctx, ramp, rows, _ramp_rows(ctx, ramp, value)
+                ):
+                    return _Current(PRESENT, deepcopy(value))
         monthly = _monthly(ctx, ramp, rows)
         if monthly is None or all(len(set(values)) == 1 for values in monthly.values()):
             return flat_reader(ctx)  # flat (or unreadable) curve: resolver v1 shape
@@ -764,19 +801,6 @@ def _ramp_writer(ramp: _Ramp):
 
 
 # ── physical vacancy ─────────────────────────────────────────────────────
-
-
-def _stabilized_vacancy(ctx: _Context) -> Optional[tuple[float, str, str, Optional[MarketPick]]]:
-    pick = market_pick(ctx, "vacancy_stabilized")
-    if pick is not None:
-        value = float(pick.observation.scalar)
-        return value, pick.source, (
-            f"{pick.level} stabilized vacancy {value:.2%} from {pick.observation.provenance.provider}"
-        ), pick
-    house_value = house_stabilized_vacancy(ctx)
-    if house_value is None:
-        return None
-    return house_value[0], house_vintage_source(ctx.bucket), house_value[1], None
 
 
 def house_stabilized_vacancy(ctx: _Context) -> Optional[tuple[float, str]]:
@@ -805,38 +829,58 @@ def house_stabilized_vacancy(ctx: _Context) -> Optional[tuple[float, str]]:
 
 
 def _vacancy_default(ctx: _Context, state: str) -> _Choice:
+    from engine.assumptions.vacancy import build_stabilized_vacancy
+
     start = _num((ctx.evidence.get("rent_roll") or {}).get("physical_vacancy_rate"))
-    stabilized = _stabilized_vacancy(ctx)
+    build = build_stabilized_vacancy(ctx)
     window = int(house.HOUSE_STABILIZATION_WINDOW_MONTHS[ctx.profile.deal_type])
-    if start is None and stabilized is None:
+    if start is None and build is None:
         return _fallback(None, "No rent-roll evidence and no stabilized vacancy; no vacancy default is available.")
-    if stabilized is None:
+    if build is None:
         return _Choice(
             SOURCE_DEAL_RENT_ROLL, _r(start),
             "Current physical vacancy from the rent roll, held flat: no stabilized vacancy is available "
             "(no market data and the year built is unknown).",
             confidence="high",
         )
-    target, source, target_basis, pick = stabilized
-    as_of = pick.as_of if pick else None
-    confidence = pick.observation.confidence if pick else "medium"
+    target, supply, supply_months = _r(build.stabilized), _r(build.supply_adjustment), build.supply_months
+    extra: dict[str, Any] = {"supply_adjustment": supply, "supply_months": supply_months} if supply > 0 else {}
+    years = supply_months // 12
     if start is None:
-        return _Choice(source, _r(target), f"No rent-roll evidence; flat at the {target_basis}.",
-                       as_of=as_of, confidence=confidence)
-    if _same(_r(start), _r(target)):
-        value: Any = _r(target)
+        value: Any = {"start": _r(target + supply), "stabilized": target, "window_months": 0, **extra} if extra else target
+        path = (f"No rent-roll evidence: flat at {target + supply:.2%} for years 1-{years}, then {target:.2%}."
+                if extra else f"No rent-roll evidence: flat at the stabilized {target:.2%}.")
     else:
-        value = {"start": _r(start), "stabilized": _r(target), "window_months": window}
-    basis = (
-        f"Physical vacancy moves linearly from the rent-roll {start:.2%} to the {target_basis} over the "
-        f"{ctx.profile.deal_type} stabilization window of {window} months, then stays flat "
-        "(monthly segments per cohort)."
+        if not extra and _same(_r(start), target):
+            value = target
+        else:
+            value = {"start": _r(start), "stabilized": target, "window_months": window, **extra}
+        path = (
+            f"Physical vacancy moves linearly from the rent-roll {start:.2%} (year 1, evidence) to "
+            + (f"{target + supply:.2%} (stabilized + supply) over the {ctx.profile.deal_type} stabilization "
+               f"window of {window} months, holds through year {years}, then steps to the stabilized {target:.2%}"
+               if extra else
+               f"the stabilized {target:.2%} over the {ctx.profile.deal_type} stabilization window of {window} "
+               "months, then stays flat")
+            + " (monthly segments per cohort)."
+        )
+    return _Choice(
+        HOUSE_STABILIZED_VACANCY_MODEL, value, f"{path} {build.basis}",
+        as_of=build.as_of, confidence=build.confidence, review=True,
+        detail={"vacancy_build": build.detail},
     )
-    return _Choice(source, value, basis, as_of=as_of, confidence=confidence)
 
 
 def _vacancy_candidates_v4(ctx: _Context) -> list[dict[str, Any]]:
+    from engine.assumptions.vacancy import supply_candidates
+
     out = _vacancy_candidates(ctx)
+    t12 = ctx.evidence.get("t12") or {}
+    gpr, vacancy = _num(t12.get("gross_potential_rent")), _num(t12.get("vacancy_loss"))
+    if gpr and gpr > 0 and vacancy is not None:
+        out.append(_candidate(SOURCE_DEAL_T12, _r(vacancy / gpr),
+                              "T12 vacancy loss / gross potential rent: the asset's trailing vacancy, compared "
+                              "with the market's in the stabilized vacancy build."))
     house_value = house_stabilized_vacancy(ctx)
     if house_value is not None:
         out.append(
@@ -846,7 +890,7 @@ def _vacancy_candidates_v4(ctx: _Context) -> list[dict[str, Any]]:
                 f"House stabilized vacancy: {house_value[1]}.",
             )
         )
-    return out
+    return out + supply_candidates(ctx)
 
 
 # ── loss to lease ────────────────────────────────────────────────────────
@@ -1172,7 +1216,11 @@ def _exit_cap_candidates_v4(ctx: _Context) -> list[dict[str, Any]]:
 # Curve shapes an analyst override may carry, per key: required fields,
 # optional fields, and which fields are whole months.
 _CURVE_SHAPES: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {
-    "physical_vacancy": (("start", "stabilized", "window_months"), ("start_by_cohort",), ("window_months",)),
+    "physical_vacancy": (
+        ("start", "stabilized", "window_months"),
+        ("start_by_cohort", "supply_adjustment", "supply_months"),
+        ("window_months", "supply_months"),
+    ),
     "loss_to_lease": (("start", "floor", "burn_off_months"), ("start_by_cohort",), ("burn_off_months",)),
     "concessions": (("year1", "stabilized"), ("year1_months",), ("year1_months",)),
 }
@@ -1251,8 +1299,8 @@ def _no_adr_note(_source: str) -> Optional[int]:
 
 def apply(specs: tuple[_Spec, ...]) -> tuple[_Spec, ...]:
     """Swap in the slice-4 readers, writers, defaults and candidates."""
-    vacancy_read = _ramp_reader(_VACANCY, _vacancy_default)
-    ltl_read = _ramp_reader(_LTL, _ltl_default)
+    vacancy_read = _ramp_reader(_VACANCY, _vacancy_default, "physical_vacancy")
+    ltl_read = _ramp_reader(_LTL, _ltl_default, "loss_to_lease")
     patches: dict[str, dict[str, Any]] = {
         "rent_growth": dict(
             unit="decimal_yoy_by_analysis_year",
