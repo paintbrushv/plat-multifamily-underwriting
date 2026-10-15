@@ -175,6 +175,17 @@ python runs/ingest_deal.py --property-id SYN-A \
   and an LTV-sized refinance values the property on that forward NOI
   (`results.refi.noi_window`; `refi_event.noi_window: trailing` opts into the
   trailing `noi_months`).
+- Physical vacancy starts at the rent roll's current vacancy in year 1 and
+  glides to a stabilized vacancy built from evidence (ADR 0003 decision (o),
+  `house:stabilized_vacancy_model`, always flagged for review): the
+  submarket's stabilized vacancy for the star tier (else the metro aggregate,
+  else the house vintage default), plus half of the asset's T12 vacancy gap to
+  that market (offline units and lease-up separated first, capped at 200 bp
+  either way), plus 25 bp per point of inventory that delivers over the next
+  24 months above the submarket's normal pace, for years 1-3 (capped at
+  150 bp). The register's physical vacancy row shows each step. The rent roll,
+  T12, broker and benchmark vacancies are evidence: the only vacancy floor,
+  in underwriting and pricing, is the house vintage floor.
 - `--deferred-maintenance` also raises the house minimums for physical
   vacancy, collection loss, year-1 concessions and R&M to the upper part of
   their vintage bands (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and
@@ -345,7 +356,7 @@ there (this repository never writes them):
 
 | Provider | File it reads (under the feeder root) | How the feeder produces it |
 |---|---|---|
-| `plat_market_study_agent` | `data/paid/costar-submarket*/<costar_metro_slug>_<submarket>.parquet` (vacancy, stabilized vacancy, concessions, market cap rate, rents by bed, supply) | `uv run python etl/transform_costar_excel.py --input <CoStar export .xlsx/.csv> --out-dir data/paid/costar-submarket` from a licensed CoStar Market Analytics submarket export |
+| `plat_market_study_agent` | `data/paid/costar-submarket*/<costar_metro_slug>_<submarket>.parquet` (vacancy, stabilized vacancy, concessions, market cap rate, rents by bed, supply: units under construction, the 24-month delivery pipeline from forecast `deliveries` and its trailing 10-year norm) | `uv run python etl/transform_costar_excel.py --input <CoStar export .xlsx/.csv> --out-dir data/paid/costar-submarket` from a licensed CoStar Market Analytics submarket export |
 | `plat_market_study_agent` | `reports/**/forecasts/v2_ensemble_<tier>.csv` + `model_diagnostics_<tier>.json` (submarket rent-growth forecast) | `uv run python -m etl.submarket_forecast --config <property config.yaml>` (needs `notes.metro_slug`, `costar_submarket.parquet`, `outputs.report_path`) |
 | `plat_market_study_agent` | `comps.json` named by `PLAT_MARKET_STUDY_COMPS` (effective rent by bed) | `agents/runners/emit_comp_finder_envelope.py` (`<deal_root>/outputs/<run_id>/comps/comps.json`) |
 | `plat_supply_demand` | `data/econometrics/forecasts/<metro_id>/<metro_id>_forecast_<vintage>.parquet` (metro rent-growth forecast) | `econ forecast --metro <metro_id>`; reads `data/costar/processed/<costar_market_key>.csv` (licensed CoStar metro export) and FRED/BLS data (`FRED_API_KEY`, `BLS_API_KEY`; `--no-fetch` skips the fetch) |
@@ -392,8 +403,10 @@ PLAT_MARKET_DATA_USER_FILE=output/my_market.json python runs/ingest_deal.py --pr
   --output output/deal_mkt.json --validate
 ```
 
-The rent growth, physical vacancy and exit cap rows now show
-`market:user_file`, with the file's `as_of` and confidence. Once configured,
+The rent growth and exit cap rows now show `market:user_file`, with the
+file's `as_of` and confidence, and the physical vacancy build takes its
+market base from the file's `vacancy_stabilized` (add `supply_pipeline` and
+`supply_pipeline_norm` rows for the supply adjustment). Once configured,
 `user_file` comes first in the default provider order. For each metric the
 first provider with data wins, and every provider's observation is kept as a
 candidate. Set `PLAT_MARKET_DATA_PROVIDERS` to choose the order or the subset:

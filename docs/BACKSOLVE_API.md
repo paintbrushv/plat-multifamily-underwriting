@@ -123,12 +123,17 @@ Floors compare annual dollars: opex lines are annualized from their
 `calculation_type` first, and a floor replaces the analyst's matching line
 rather than being added beside it. Concessions are read as `pct_rent` or
 `free_months` (months / 12); any other concession type, or a percent-of-revenue
-opex line that a floor must read, refuses. The property-level vacancy anchor
-(`physical_vacancy_floor`, with `physical_vacancy_floor_source`) floors each
-`physical_vacancy_curve` segment
-separately and preserves the analyst's curve shape: a segment below the anchor
+opex line that a floor must read, refuses. The vintage vacancy floor
+(`physical_vacancy_floor`, with `physical_vacancy_floor_source`; raised for
+deferred maintenance) floors each `physical_vacancy_curve` segment
+separately and preserves the analyst's curve shape: a segment below the floor
 is raised to it, and a segment at or above it is kept as entered, so one
-cohort's higher vacancy is never lowered or spread to other cohorts. The
+cohort's higher vacancy is never lowered or spread to other cohorts. The rent
+roll's vacant share (house box score, else the ingested roll), T12 vacancy /
+GPR, broker vacancy and a supplied `market_vacancy_benchmark` are evidence, not
+floors (ADR 0003 decision o): `physical_vacancy_anchor_summary` lists them
+(`evidence_candidates`, `evidence_above_floor`) beside the floor and the
+resolver's stabilized vacancy build (`vacancy_build`). The
 resulting curve is reported as `physical_vacancy_curve_applied`, and
 `physical_vacancy_rate_applied` is that priced curve's unit- and month-weighted
 rate over the hold. Summary fields named `*_applied` (and
@@ -338,7 +343,8 @@ non-finite values, invalid dates, invalid iteration limits, and
 sub-cent price bounds refuse before underwriting. An exit cap must come from the policy or canonical inputs.
 Optional market-vacancy evidence must be supplied in
 `metadata.property_summary.market_vacancy_benchmark` with `rate`, `as_of`, and
-`source`; the solver does not load an optional local market-data package.
+`source`; it is disclosed as vacancy evidence, not a floor. The solver does not
+load an optional local market-data package.
 
 ## Results and boundaries
 
