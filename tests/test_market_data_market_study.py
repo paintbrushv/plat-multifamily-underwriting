@@ -236,3 +236,68 @@ def test_deterministic(root):
 ])
 def test_bed_key(label, expected):
     assert bed_key(label) == expected
+
+
+# ── supply pipeline (ADR 0003 decision o) ────────────────────────────────
+
+GAMMA = f"{METRO}_gamma"
+
+
+def _supply_rows(*, forecast_deliveries=10, under_construction=60, stabilized=None):
+    """2016 Q3-2026 Q2 actuals (5 units delivered a quarter on 1,000), then nine forecast quarters."""
+    rows = []
+    actual = [f"{y} Q{q}" for y in range(2016, 2027) for q in range(1, 5)][2:-2]
+    for quarter in actual:
+        for tier in ("All", "3 Star"):
+            rows.append(costar_row(
+                quarter, tier, is_forecast=False, stem=GAMMA, inventory_units=1000, deliveries=5,
+                deliveries_12mo=20, under_construction=under_construction,
+                stabilized_vacancy=(stabilized or {}).get(quarter, 0.05),
+            ))
+    forecast = ["2026 Q3", "2026 Q4", "2027 Q1", "2027 Q2", "2027 Q3", "2027 Q4", "2028 Q1", "2028 Q2", "2028 Q3"]
+    for quarter in forecast:
+        for tier in ("All", "3 Star"):
+            rows.append(costar_row(quarter, tier, is_forecast=True, stem=GAMMA, inventory_units=1000,
+                                   deliveries=forecast_deliveries))
+    return rows
+
+
+def test_supply_pipeline_sums_forecast_deliveries_over_the_next_24_months(tmp_path):
+    write_costar_submarket(tmp_path, GAMMA, _supply_rows())
+    geo = Geo(metro_slug=METRO, submarket="gamma", star_tier="3 Star")
+    pipeline = _provider(tmp_path).get("supply_pipeline", geo)
+    # 8 forecast quarters x 10 units on 1,000 units of inventory (2028 Q3 is past 24 months).
+    assert pipeline.value == pytest.approx(0.08)
+    assert pipeline.unit == "decimal_of_inventory"
+    assert pipeline.attributes["basis"] == "forecast_deliveries"
+    assert pipeline.attributes["quarters"] == ["2026Q3", "2026Q4", "2027Q1", "2027Q2", "2027Q3", "2027Q4",
+                                               "2028Q1", "2028Q2"]
+    assert pipeline.attributes["inventory_units"] == 1000
+    assert pipeline.geo.star_tier == "3 Star"
+    assert pipeline.as_of == date(2026, 6, 30)
+
+
+def test_supply_pipeline_falls_back_to_units_under_construction(tmp_path):
+    write_costar_submarket(tmp_path, GAMMA, _supply_rows(forecast_deliveries=None))
+    pipeline = _provider(tmp_path).get("supply_pipeline", Geo(metro_slug=METRO, submarket="gamma"))
+    assert pipeline.value == pytest.approx(0.06)
+    assert pipeline.attributes["basis"] == "under_construction"
+
+
+def test_supply_pipeline_norm_is_the_trailing_long_run_pace(tmp_path):
+    write_costar_submarket(tmp_path, GAMMA, _supply_rows())
+    norm = _provider(tmp_path).get("supply_pipeline_norm", Geo(metro_slug=METRO, submarket="gamma",
+                                                                star_tier="4 & 5 Star"))
+    # 5 units a quarter on 1,000 over the last 40 actual quarters = 0.5% a quarter, 4% per 24 months.
+    assert norm.value == pytest.approx(0.04)
+    assert norm.attributes["quarters_used"] == 40
+    assert norm.attributes["first_quarter"] == "2016Q3" and norm.attributes["last_quarter"] == "2026Q2"
+    assert norm.geo.star_tier == "All"  # no 4 & 5 Star slice: the provider falls back and says so
+
+
+def test_stabilized_vacancy_reports_the_trailing_four_quarters(tmp_path):
+    stabilized = {"2025 Q3": 0.04, "2025 Q4": 0.05, "2026 Q1": 0.06, "2026 Q2": 0.07}
+    write_costar_submarket(tmp_path, GAMMA, _supply_rows(stabilized=stabilized))
+    obs = _provider(tmp_path).get("vacancy_stabilized", Geo(metro_slug=METRO, submarket="gamma"))
+    assert obs.value == pytest.approx(0.07)
+    assert obs.attributes["trailing_4q_mean"] == pytest.approx(0.055)
