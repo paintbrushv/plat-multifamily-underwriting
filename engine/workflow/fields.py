@@ -182,6 +182,8 @@ FIELDS: tuple[Field, ...] = (
 
 BY_NAME = {field.name: field for field in FIELDS}
 REQUIRED_FOR_INGEST = ("start", "end")
+# What run_deal needs beyond ingest (``service.missing_to_run``); solve_price finds a price instead.
+REQUIRED_TO_RUN = ("purchase_price", "ltv", "rate", "amort", "millage")
 
 
 def check_profile_updates(updates: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:

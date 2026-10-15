@@ -55,7 +55,7 @@ to a hosted model when one is attached and `ANTHROPIC_API_KEY` is set.
 |---|---|---|---|
 | `start_here()` | RO | none | `what_it_does`, `steps` (tool, what it does, what to ask), `try_the_sample`, `resources`, `prompts`, workspace limits, `mode` |
 | `list_deals()` | RO | none | `deals`: id, name, type, steps done, last levered IRR and solved price, next step |
-| `get_deal(deal_id)` | RO | | `steps` (done, at, stale), `profile`, `missing_for_ingest`, `documents`, `edits`, `last_ingest`, `last_run`, `last_price`, `files` |
+| `get_deal(deal_id)` | RO | | `steps` (done, at, stale), `profile`, `missing_for_ingest`, `documents`, `edits`, `last_ingest`, `last_run`, `last_price`, `pricing_defaults` (the sample's illustrative pricing inputs, else null), `files` |
 | `load_sample_deal()` | not D, not I | none | A new deal from `engine/samples/sample_deal/` with its documents, profile and illustrative `pricing_defaults`; `SAMPLE_NOT_FOUND` when the bundle is missing |
 | `create_deal(name, deal_type="stabilized")` | not D, not I | `deal_type`: `stabilized` or `value_add` | `deal_id` (a slug of the name plus a random suffix) |
 | `add_document(deal_id, kind, filename, content_base64=None, path=None)` | D, I | `kind`: `t12`, `rent_roll`, `om`, `pca`; exactly one of `content_base64` or `path` | `document` (original name, stored path, bytes, sha256), `replaced` |
@@ -63,7 +63,7 @@ to a hosted model when one is attached and `ANTHROPIC_API_KEY` is set.
 | `ingest_deal(deal_id)` | D, I | | `gate` (PASS or BLOCKED, `blockers[]` each with a `fix`, the T12 and rent-roll reconciliation), `validation` (errors with a `fix`), `missing_to_run`, `assumptions` (counts and `review_keys`), `capital_plan`, `market_data` (summary and status lines) |
 | `review_assumptions(deal_id, filter="all", case="deal", include_candidates=False)` | RO | `filter`: `all`, `needs_review`, `edited`, `defaults`, `enforced`; `case`: `deal` or `priced` | `rows` (key, label, group, value, default and its source, why, user edit, guardrail, flags), `summary_counts`, `capital_plan` |
 | `edit_assumptions(deal_id, edits, editor)` | not D, I | `edits`: `{key: {"value": v, "note": "why"}}`, `{key: v}`, or `{key: null}` to clear an edit | `changed[]` (before, after, default, delta), `edits` (every recorded edit) |
-| `run_deal(deal_id)` | not D, I | | `metrics` (year-1 and stabilized NOI, year-1 cash-on-cash, levered and unlevered IRR and equity multiple, going-in cap, DSCR on the sizing basis and on NOI, exit month, cap rate, value and proceeds), `capital_plan`, `exit_cap_grid`, `files` |
+| `run_deal(deal_id)` | not D, I | | `metrics` (year-1 and stabilized NOI, year-1 cash-on-cash, levered and unlevered IRR and equity multiple, going-in cap, DSCR on the sizing basis and on NOI, exit month, cap rate, value, sale costs, loan payoff and proceeds, and the exit NOI window), `capital_plan`, `exit_cap_grid`, `annual_cash_flow` (by analysis year: EGI, opex, NOI, the capex charge, debt service and cash flow before and after debt, the sale excluded), `files` |
 | `solve_price(deal_id, target_coc=None, benchmark_5yr_treasury=None, benchmark_as_of=None, benchmark_source=None, coc_basis=None, exit_cap_rate=None, loan_sizing_noi_basis=None, min_price="1000000", max_price="100000000", max_iterations=40)` | not D, I | `target_coc` defaults to `0.08` (or the sample's own target); the benchmark is required | `pricing`: status, price, $/unit, equity, loan (amount, rate, sizing basis), going-in and exit cap, levered and unlevered IRR, minimum DSCR, `floors_enforced`, `exit_cap_grid`, capital plan, the feasible boundary and the benchmark used |
 | `export_deal(deal_id)` | RO | | `files[]`: path, bytes, description, `local_path` (local mode) and `url` (HTTP mode, `/files/<deal_id>/<path>`) |
 
@@ -165,6 +165,53 @@ source of this table). `start` and `end` are needed to ingest;
 | `guide://user-guide` | resource | `docs/USER_GUIDE.md`, or a short built-in guide when the docs are not installed |
 | `guide://glossary` | resource | `docs/ASSUMPTION_GLOSSARY.md`, or a glossary built from the assumption registry and `engine/assumptions/rationale.py` |
 | `deal://{deal_id}/assumptions.html` | resource template | The deal's assumption register page |
+| `ui://plat-underwriting/{intake,assumptions,results,pricing}` | resource (`text/html;profile=mcp-app`) | The analyst screens; see [Screens (MCP Apps)](#screens-mcp-apps) |
+
+## Screens (MCP Apps)
+
+The server implements the [MCP Apps](https://apps.extensions.modelcontextprotocol.io)
+extension (`io.modelcontextprotocol/ui`, spec 2026-01-26). It advertises the
+extension, registers four screens as `ui://` resources served as
+`text/html;profile=mcp-app`, and links tools to them with
+`_meta.ui.resourceUri` (and the older flat `_meta["ui/resourceUri"]` key some
+hosts still read). A host that supports MCP Apps renders the linked screen
+beside the tool's result; the screen gets the tool's input and result over the
+spec's postMessage JSON-RPC (`ui/initialize`, `ui/notifications/tool-input`,
+`ui/notifications/tool-result`).
+
+| Screen | Resource | Opened by | Shows |
+|---|---|---|---|
+| Deal intake | `ui://plat-underwriting/intake` | `create_deal`, `describe_deal`, `get_deal`, `load_sample_deal` | Progress through the steps (from `get_deal`), the documents (drag and drop, uploaded with `add_document`), the deal facts grouped as Property, Location, Price & financing, Taxes, Capex & condition and Hold, each with why it matters and whether it is needed to check or to run; **Check documents** (`describe_deal`, then `ingest_deal`) |
+| Check and assumptions | `ui://plat-underwriting/assumptions` | `ingest_deal`, `review_assumptions`, `edit_assumptions` | The ingest gate (PASS or BLOCKED, the fix for each blocker, the reconciliation), validation, market data status and the capital plan; the register with chips (needs review, edited, defaults, enforced in pricing), value, default and source, why this default, and inline edits with a note (`edit_assumptions`, the editor's name asked once per session) and the deltas they made |
+| Results | `ui://plat-underwriting/results` | `run_deal` | Headline tiles (NOI, cash-on-cash, levered and unlevered IRR, equity multiple, minimum DSCR on NCF with NOI beside it), the capital plan by year (three buckets, which binds), `annual_cash_flow`, the exit on forward NOI and the exit-cap grid, with inline SVG charts |
+| Pricing | `ui://plat-underwriting/pricing` | `solve_price` | Target cash-on-cash and the Treasury benchmark (never invented), the solve, the pricing panel (status, price, $/unit, loan and its sizing basis, caps, IRRs, floors enforced, each linking to its register row) and the asking price against the solved price |
+
+Every screen has the step header (1 Documents, 2 Describe, 3 Check,
+4 Assumptions, 5 Results, 6 Price, 7 Export), a **New? Start here** panel,
+**Export files** (`export_deal`) and plain empty, loading and error states
+(an error shows its `fix` first).
+
+What each host gets:
+
+- **Full support** (the host proxies `tools/call`, the `serverTools`
+  capability): the screens act directly, calling the tools above plus
+  `get_deal`, `add_document` and `export_deal`. A step that lives on another
+  screen is requested from the assistant with `ui/message`
+  ("Run the deal ... (run_deal)"), and a change made in a screen is reported
+  with `ui/update-model-context` when the host accepts it.
+- **Render only** (no `serverTools`, as in hosts with partial MCP Apps
+  support): the screen shows the result it was opened with, read-only, and
+  says what to ask the assistant ("Ask the assistant to ...", with a copy
+  button).
+- **No MCP Apps**: nothing changes; every tool returns the same JSON text.
+
+The pages are self-contained: CSS and JavaScript are inlined, no external
+URL is loaded (the default MCP Apps CSP, no `connect-src`), and the page
+carries no deal data or server paths; it reads only the tool results the host
+sends. The sources are the plain files in `engine/ui/static/`. The same
+screens run as a browser app with `plat-uw serve`
+([README](../README.md#use-it-in-your-browser)), where `POST
+/api/tools/<name>` stands in for the host.
 
 ## The sample deal
 
@@ -219,6 +266,7 @@ t12 = [".xlsx", ".csv"]
 | stdio | `plat-uw mcp` (or `plat-underwriting-mcp`) | allowed | the local client process |
 | local HTTP | `plat-uw mcp --http [--host 127.0.0.1] [--port 8765]` | allowed | loopback `Host` only; `PLAT_UW_TOKEN` enforced when set |
 | remote HTTP | `plat-uw mcp --http --host 0.0.0.0 --allow-remote` | refused | bearer token `PLAT_UW_TOKEN` (16 or more characters) on every request |
+| browser app | `plat-uw serve [--host 127.0.0.1] [--port 8766]` (`--allow-remote` as above) | refused (the browser uploads files) | as above; in remote mode the token is entered once at `/login` and kept in an HttpOnly, SameSite=Strict cookie; every POST needs the `X-Plat-UW: 1` header and a same-origin request |
 
 The MCP endpoint is `/mcp`; workspace files are served at
 `/files/<deal_id>/<path>` behind the same check. `PLAT_UW_PUBLIC_URL` sets
