@@ -34,8 +34,8 @@ REPO = Path(__file__).resolve().parents[1]
 SHIM = REPO / "runs" / "backsolve_price_for_target_coc.py"
 PAGE = "assumptions.html"
 # Deal d prices with one floor raised over PCA evidence (recurring capex) and
-# two plain enforced floors (collection loss, and physical vacancy raised to the
-# rent roll's vacant share); see tests/test_deal_library.py.
+# one plain enforced floor (collection loss); the rent roll's vacancy is
+# evidence, not a floor (ADR 0003 decision o). See tests/test_deal_library.py.
 SLUG = "d_value_add_1980s_msa_only"
 BENCHMARK = ("0.04", "2026-10-01", "synthetic:deal-library")
 
@@ -146,7 +146,7 @@ def test_enforced_floors_are_highlighted_on_their_rows_and_listed(solved):
     _, summary, html, case = solved
     findings = summary["policy_summary"]["guardrails"]["findings"]
     enforced = {f["key"] for f in findings if f["action"] in guardrails.ENFORCING_ACTIONS}
-    assert enforced == {"recurring_capex_per_unit", "collection_loss", "physical_vacancy"}
+    assert enforced == {"recurring_capex_per_unit", "collection_loss"}
     header = _section(html)
     floors = re.search(r'<ul class="floors">.*?</ul>', header, re.S).group(0)
     for key in enforced:
@@ -157,7 +157,7 @@ def test_enforced_floors_are_highlighted_on_their_rows_and_listed(solved):
     assert "$1,500" in floors and "$1,750" in floors  # PCA original -> applied
     # Values the policy set (fees) are pinned by pricing, not enforced floors.
     assert "floor-enforced" not in _row_classes(html, "acquisition_fee_pct")
-    assert "Floors enforced in pricing (3)" in header
+    assert "Floors enforced in pricing (2)" in header
 
 
 def test_opt_out_writes_no_page_from_either_cli(solved, library_canonical, tmp_path, monkeypatch):

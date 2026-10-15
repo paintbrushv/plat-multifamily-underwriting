@@ -18,6 +18,8 @@ deterministic.
 | `effective_rent_by_bed` | `usd_per_unit_month` | by bed (`studio`, `1br`, `2br`, `3br`) | effective monthly rent per unit |
 | `renovation_premium` | `usd_per_unit_month` | scalar | monthly rent premium of a renovated unit over a classic unit |
 | `supply_risk` | `decimal_of_inventory` | scalar | units under construction / inventory units |
+| `supply_pipeline` | `decimal_of_inventory` | scalar | net units expected to deliver over the next 24 months / inventory units |
+| `supply_pipeline_norm` | `decimal_of_inventory` | scalar | normal 24-month net deliveries / inventory: the trailing long-run (10-year) pace |
 
 All rates are decimals (`0.055` means 5.5%). Confidence is `high`, `medium`
 or `low`.

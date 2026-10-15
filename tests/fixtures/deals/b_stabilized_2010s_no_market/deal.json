@@ -74,7 +74,7 @@
     "ingest_gate": "PASS",
     "sources": {
       "rent_growth": "house:long_run_rent_growth",
-      "physical_vacancy": "house:vintage_2010s",
+      "physical_vacancy": "house:stabilized_vacancy_model",
       "loss_to_lease": "house:vintage_2010s",
       "concessions": "deal:t12",
       "collection_loss": "deal:t12",

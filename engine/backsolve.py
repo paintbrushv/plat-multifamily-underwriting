@@ -529,9 +529,10 @@ def _rebase_to_house_box_score(
                 }
             )
         # Keep the analyst's vacancy segments as entered. The observed
-        # unavailable rate is the rent_roll_vacant anchor, which
-        # _apply_house_revenue_policy applies per segment as a floor and
-        # discloses against the analyst's original rate.
+        # unavailable rate (vacant plus non-revenue units in the box score) is
+        # evidence, disclosed as observed_unavailable_rate and as the
+        # rent_roll_vacant candidate of the vacancy evidence summary; it is not
+        # a floor (ADR 0003 decision o): only the vintage floor raises a segment.
         for vacancy_row in vacancy_by_cohort.get(key) or [{}]:
             canonical["physical_vacancy_curve"].append(
                 {
@@ -596,9 +597,11 @@ def _apply_house_revenue_policy(
     broker_bad_debt = _parse_percent_note(broker_notes.get("bad_debt"))
     broker_concessions = _parse_percent_note(broker_notes.get("concessions"))
 
-    # The vacancy anchor is a per-segment floor: a segment below it is raised
-    # to it, a segment at or above it keeps the analyst's rate. The curve keeps
-    # its shape, and one cohort's higher rate never spreads to other cohorts.
+    # The vintage vacancy floor is a per-segment floor: a segment below it is
+    # raised to it, a segment at or above it keeps the analyst's rate. The curve
+    # keeps its shape, and one cohort's higher rate never spreads to other
+    # cohorts. The rent roll, T12, broker and benchmark vacancies are evidence
+    # (physical_vacancy_anchor_summary), never floors (ADR 0003 decision o).
     # Loss to lease, collection loss and year-1 concessions follow the same rule.
     overrides: list[dict[str, Any]] = []
     exemptions: list[dict[str, Any]] = []
@@ -650,10 +653,12 @@ def _apply_house_revenue_policy(
         ),
         # The priced vacancy: unit- and month-weighted over the hold.
         "physical_vacancy_rate_applied": float(applied_vacancy),
-        # The property-level vacancy anchor each segment is floored at.
-        "physical_vacancy_floor": float(vacancy_floor),
+        # The vintage vacancy floor each segment is floored at (None: year built unknown).
+        "physical_vacancy_floor": float(vacancy_floor) if vacancy_floor is not None else None,
         "physical_vacancy_floor_source": floors["physical_vacancy"].source,
         "physical_vacancy_curve_applied": applied_curve,
+        # The vacancy evidence (rent roll, T12, broker, benchmark) and the
+        # resolver's stabilized vacancy build: shown, never a floor.
         "physical_vacancy_anchor_summary": vacancy_summary,
         "collection_loss_rate_applied": float(applied_collection),
         "year1_concessions_rate_applied": float(applied_concessions),

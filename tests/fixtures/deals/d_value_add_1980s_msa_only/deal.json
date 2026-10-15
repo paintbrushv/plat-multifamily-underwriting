@@ -132,7 +132,7 @@
     "ingest_gate": "PASS",
     "sources": {
       "rent_growth": "market:synthetic",
-      "physical_vacancy": "market:synthetic",
+      "physical_vacancy": "house:stabilized_vacancy_model",
       "loss_to_lease": "house:vintage_1980s",
       "concessions": "market:synthetic",
       "collection_loss": "deal:t12",
@@ -172,8 +172,8 @@
         0.075
       ],
       "vacancy_stabilized": [
-        0.06,
-        0.06
+        0.065,
+        0.065
       ],
       "loss_to_lease_start": [
         0.035,
@@ -306,8 +306,7 @@
     },
     "guardrail_warnings": [
       "collection_loss",
-      "recurring_capex_per_unit",
-      "physical_vacancy"
+      "recurring_capex_per_unit"
     ],
     "guardrail_waivers": []
   }

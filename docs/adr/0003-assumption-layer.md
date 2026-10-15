@@ -110,11 +110,11 @@ key:
 |---|---|
 | `analyst` | An analyst override: `--assumption-overrides`, an edited sheet, a partial canonical patch, a value already in a hand-authored canonical, or backsolve's `insurance_per_unit_override` |
 | `deal:rent_roll` | Rent-roll evidence (current vacancy, loss to lease) |
-| `deal:t12` | T12 evidence (bad debt, concessions, opex lines, insurance, R&M) |
+| `deal:t12` | T12 evidence (bad debt, concessions, vacancy loss, opex lines, insurance, R&M) |
 | `deal:om` | The offering memorandum (exit cap) and broker notes that raise a floor |
 | `deal:comps` | Comp evidence (`renovation_premium`) |
 | `deal:pca` | A property condition assessment (`capital_plan.pca`): immediate needs and recurring capex per unit |
-| `market:<provider>` | A market-data provider: `plat_market_study_agent`, `plat_supply_demand`, `user_file`, `costar`, `yardi_matrix`, `realpage`, `synthetic` (tests); `market:supplied_benchmark` is the analyst-supplied `market_vacancy_benchmark` |
+| `market:<provider>` | A market-data provider: `plat_market_study_agent`, `plat_supply_demand`, `user_file`, `costar`, `yardi_matrix`, `realpage`, `synthetic` (tests); `market:supplied_benchmark` is the analyst-supplied `market_vacancy_benchmark` (vacancy evidence, not a floor, since decision o) |
 | `house:vintage_<bucket>` | `VINTAGE_FRAMEWORK_2026` for the year-built bucket (e.g. `house:vintage_1980s`) |
 | `house:long_run_rent_growth` | The house long-run rent growth after the forecast horizon |
 | `house:default_collection_loss` | The house default collection loss when the vintage is unknown |
@@ -129,7 +129,8 @@ key:
 | `house:property_tax_module` | `engine/property_tax.py`: the real estate tax line reassessed at the purchase price |
 | `house:management_fee_pct_egr` | The house management fee as a percent of EGR |
 | `house:year1_insurance_floor` | The $600/unit Year-1 insurance floor |
-| `house:vacancy_anchor` | The property-level vacancy anchor when no single anchor names the source |
+| `house:stabilized_vacancy_model` | Physical vacancy built from evidence (decision o): rent roll for year 1, then market base + asset-vs-market carry, plus a supply adjustment for the lease-up years; always review_required, the build on `detail.vacancy_build` |
+| `house:vacancy_anchor` | Retired by decision (o): the property-level vacancy anchor (max of the evidence) is no longer a floor; a stored canonical may still carry it |
 | `house:backsolve_policy` | `engine/backsolve_policy` values: fees, closing costs, sale cost, and in pricing any value the backsolve policy sets (an explicit policy value, or a default where the canonical has no analyst value) |
 | `house:pricing_normalization` | A backsolve pricing normalization (§5): the house box-score rebase (loss to lease and vacancy rebuilt on the rent-roll floorplans), or an opex line backsolve's preparation sets (a revenue-quality bridge paired expense). The house floors never rewrite an input. |
 | `engine_fallback` | An engine default when nothing else applies |
@@ -180,7 +181,7 @@ How each key combines sources:
 | Key | Resolution |
 |---|---|
 | `rent_growth` | Years with forecast coverage from the submarket forecast, else the MSA forecast (8-quarter ensemble, annualized to analysis years). After the horizon, a linear glide over 2 years to the long-run rate (MSA long-run, else house long-run constant). Deal evidence is not used for growth. |
-| `physical_vacancy` | Curve from current physical vacancy (rent roll) to stabilized vacancy over the profile's stabilization window. Stabilized = submarket stabilized vacancy if available, else house vintage typical. |
+| `physical_vacancy` | Curve from current physical vacancy (rent roll, year 1 only) to stabilized vacancy over the profile's stabilization window. Stabilized vacancy is built from evidence (decision o, `house:stabilized_vacancy_model`, review_required): market base (submarket stabilized vacancy for the star tier, else metro, else house vintage default) + a capped share of the asset's T12 gap to the market; a capped supply adjustment is added for the lease-up years when deliveries run above the normal pace. |
 | `loss_to_lease` | Current LTL from the rent roll (market vs in-place) burns off over the lease term (12 months) to the house vintage LTL floor. |
 | `concessions` | Year-1 rate from deal evidence (T12 concessions / GPR, or rent-roll specials), else submarket concession spread (asking − effective) / asking, else house vintage floor. Burns off to the submarket or house stabilized level. |
 | `collection_loss` | T12 bad debt / GPR, else the house default (vintage `bad_debt_typical_low`). The vintage collection-loss floor is a guardrail (§5), not the default. |
@@ -256,7 +257,7 @@ reuses the `underwriting_policy` vintage functions:
 
 | Key | Floor | Checked against |
 |---|---|---|
-| `physical_vacancy` | Property-level anchor: max of the vintage floor, rent-roll vacant share (`house_box_score`), T12 vacancy / GPR, broker vacancy, and a supplied `market_vacancy_benchmark` | each `physical_vacancy_curve` segment |
+| `physical_vacancy` | The vintage floor alone (raised with deferred maintenance). The rent-roll vacant share (box score, else the ingested roll), T12 vacancy / GPR, broker vacancy and a supplied `market_vacancy_benchmark` are evidence for the stabilized build, listed in the vacancy evidence summary, never floors (decision o) | each `physical_vacancy_curve` segment |
 | `loss_to_lease` | max(vintage LTL floor, broker LTL) | each `loss_to_lease` segment of a cohort whose market rent exceeds its in-place rent; such a cohort with no row counts as 0%. A cohort with no gap (market at or below in-place, including a rent the house box-score rebase capped) is exempt in both modes: no warning, no raise, its rows kept, and the exemption disclosed (`exempt_no_gap`) |
 | `collection_loss` | max(vintage floor, broker bad debt) | each `collection_loss_curve` segment (no curve counts as 0) |
 | `concessions` | max(vintage year-1 floor, broker concessions) | each `concession_schedule` row that applies in analysis year 1 (`free_months` read as months / 12); no year-1 row counts as 0% |
@@ -265,8 +266,9 @@ reuses the `underwriting_policy` vintage functions:
 | `replacement_reserve_per_unit` | `HOUSE_REPLACEMENT_RESERVE_PER_UNIT` ($250/unit, `house:replacement_reserve`, any vintage) | each `replacement_reserves` segment (none counts as 0) |
 | `recurring_capex_per_unit` | The vintage band pick for the deal (`house:recurring_capex_vintage`; none when the vintage is unknown). An analyst figure below it is kept and disclosed (`floor_waived_by_analyst_override`, with `waived_by`), as the insurance override is. A PCA figure below it is warned in underwrite (the record names the `evidence`) and raised to the floor in pricing, `max(PCA, floor)`, disclosed as `floor_applied_over_deal_evidence` (decision (i)). Any other value below it is warned (underwrite) or raised (pricing); a hold with none gets the floor in pricing | `capital_plan.recurring_capex.per_unit_annual` (none counts as 0) |
 
-Broker notes and trailing actuals are anchors a caller passes in `context`;
-they can only raise a floor. `apply_guardrails(canonical, *, mode, profile,
+Broker notes are anchors a caller passes in `context`; they can only raise
+the loss-to-lease, collection-loss and concession floors. Broker and T12
+vacancy are evidence only (decision o). `apply_guardrails(canonical, *, mode, profile,
 context=None)` returns `(canonical_copy, findings)`:
 
 - `mode="underwrite"`: no value changes. Each value below its floor is a
@@ -404,7 +406,10 @@ class MarketDataProvider(Protocol):
   path, vintage, content hash).
 - Metrics v1: `rent_growth_forecast`, `vacancy_current`,
   `vacancy_stabilized`, `concession_rate`, `market_cap_rate`,
-  `effective_rent_by_bed`, `renovation_premium`, `supply_risk`.
+  `effective_rent_by_bed`, `renovation_premium`, `supply_risk`, and (decision
+  o) `supply_pipeline` (net deliveries over the next 24 months / inventory)
+  and `supply_pipeline_norm` (the trailing 10-year delivery pace over 24
+  months).
 
 Providers:
 
@@ -654,7 +659,9 @@ decisions that were open with the product owner are decided and implemented:
    vacancy floor) for the vintage and strategy, so a house-only deal is
    consistent with its own floor. A market stabilized vacancy is kept as
    resolved; the property-level vacancy anchor stays a guardrail (underwrite
-   warns, pricing raises each segment below it).
+   warns, pricing raises each segment below it). Superseded in part by
+   decision (o): the house value is now the fallback market base of the
+   evidence build, and the floor is the vintage floor alone.
 
 Three later policy decisions (UPL-85, UPL-48), and the capex buckets that
 completed (f):
@@ -906,6 +913,86 @@ completed (f):
     stabilized refi whose forward year runs past the analysis end (decision
     k) now reads the projected months for its NOI and below-NOI deduction
     instead of annualizing the months left (`results.refi.noi_projected_months`).
+
+A decision on vacancy (UPL-108):
+
+15. **(o) Stabilized vacancy built from evidence.** The vacancy floor is case
+    by case: it depends on submarket occupancy, future deliveries,
+    stabilization at the asset, and more. UPL-107 made the rent roll's
+    current vacancy one of the property-level vacancy anchors, whose maximum
+    floored every pricing segment, so today's vacancy became a floor for the
+    whole hold. That is reversed: today's vacancy is evidence. The
+    `physical_vacancy` default (`engine/assumptions/vacancy.py`, source
+    `house:stabilized_vacancy_model`, always review_required) is:
+    1. **Year 1** starts at the rent roll's physical vacancy and glides to
+       the stabilized level over the deal type's window
+       (`HOUSE_STABILIZATION_WINDOW_MONTHS`, unchanged; value-add keeps its
+       renovation downtime logic).
+    2. **Market base**: the submarket `vacancy_stabilized` for the asset's
+       star tier, else the metro aggregate (the provider combines the
+       submarket files when the submarket is not found), else the house
+       vintage default max(typical-band midpoint, vintage floor). The level,
+       the star tier requested and matched, the provider and the as-of are
+       disclosed.
+    3. **Supply adjustment**, for the first `HOUSE_SUPPLY_ADJUSTMENT_YEARS`
+       (3): `supply_pipeline` (net deliveries over the next
+       `HOUSE_SUPPLY_HORIZON_MONTHS` (24) / inventory) above
+       `supply_pipeline_norm` (the trailing 10-year pace over 24 months) adds
+       `HOUSE_SUPPLY_VACANCY_BPS_PER_PCT` (25 bp) of vacancy per point of
+       inventory, capped at `HOUSE_SUPPLY_VACANCY_CAP` (150 bp). Below-normal
+       supply earns no credit. Without supply data there is no adjustment
+       and the build says why. The market-study provider serves both metrics
+       from the CoStar submarket parquet: the eight forecast quarters'
+       `deliveries` after the latest actual quarter over its
+       `inventory_units`, else `under_construction` / inventory; the norm is
+       the mean quarterly `deliveries` / `inventory_units` over the last 40
+       actual quarters (at least 8) times eight. plat-supply-demand persists
+       only the rent growth forecast: for it to serve supply it would emit a
+       per-metro (or submarket) deliveries forecast and inventory, e.g. a
+       parquet with `period`, `deliveries_units`, `inventory_units` (and
+       `star_tier`). The status block and the doctor list the
+       `vacancy_supply` slot.
+    4. **Asset vs market**: `HOUSE_ASSET_GAP_CARRY_SHARE` (50%) of the gap
+       between the asset's T12 vacancy loss / GPR (ingest now records
+       `vacancy_loss` and, kept apart, `non_revenue_loss` for model, down,
+       admin and employee unit lines) and the market's stabilized vacancy
+       over the trailing year (the provider's `trailing_4q_mean`, else the
+       latest quarter), either sign, capped at +/- `HOUSE_ASSET_GAP_CAP`
+       (200 bp). Stabilization effects are separated first: units offline
+       (box-score Down, Model, Admin, Renovation, Offline, Non-Revenue,
+       Employee) come out of the T12 vacancy unless the T12 books them on
+       their own lines, and an asset built within `HOUSE_LEASE_UP_YEARS` (2)
+       of the analysis start was in lease-up and carries no gap. Notice and
+       pre-leased units are disclosed: they describe today's roll, not the
+       trailing year. Without market vacancy or T12 vacancy there is no
+       carry. Gaps: the document rent-roll parsers count down, model and
+       offline units as vacant without a per-status count (only the house
+       box score and the Yardi lease-charges export summary separate
+       non-revenue units), and the T12 vacancy is economic (dollars over
+       GPR) where the market's is physical.
+    5. **Floor**: the vintage floor alone (`default_physical_vacancy_rate`,
+       raised for deferred maintenance by decision i). Floors only raise:
+       pricing raises a segment below it, underwrite warns. The rent roll's
+       vacant share (box score or the ingested roll, as UPL-107 reads it),
+       T12 vacancy, broker vacancy and a supplied benchmark are listed in
+       backsolve's `physical_vacancy_anchor_summary` (now the vacancy
+       evidence: `floor`, `evidence_candidates`, `evidence_above_floor`, and
+       the resolver's `vacancy_build`), never enforced. Box-score deals
+       follow the same rule.
+
+    `detail.vacancy_build` records the year-1 start (with the rent-roll
+    counts), the market base, the supply adjustment (deliveries, norm,
+    excess, bps, cap), the asset-vs-market gap (asset and market vacancy,
+    exclusions, carried share, cap), the stabilized result, the formula and
+    the floor; the register and the assumptions screen show it as a compact
+    breakdown. An analyst override with a note still wins, and the build
+    stays on the entry. The curve value carries the supply step as
+    `supply_adjustment` and `supply_months` (an override may set them).
+    Re-resolving without market data keeps the build. In the deal library
+    deal d's 6.67% rent-roll floor is gone and its stabilized vacancy rises
+    6.0% -> 6.5% (half of the T12's 1-point gap to the MSA), deal c's rises
+    6.5% -> 7.0% (the 8% vintage floor still binds in pricing); deals a and
+    b and the sample deal keep their values.
 
 Three decisions on deferred maintenance and PCA evidence:
 

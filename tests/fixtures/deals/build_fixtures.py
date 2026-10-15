@@ -221,7 +221,7 @@ DEALS: tuple[DealSpec, ...] = (
         expected={
             "sources": {
                 "rent_growth": "market:synthetic",
-                "physical_vacancy": "market:synthetic",
+                "physical_vacancy": "house:stabilized_vacancy_model",
                 "loss_to_lease": "house:vintage_1990s",
                 "concessions": "deal:t12",
                 "collection_loss": "deal:t12",
@@ -347,7 +347,7 @@ DEALS: tuple[DealSpec, ...] = (
         expected={
             "sources": {
                 "rent_growth": "house:long_run_rent_growth",
-                "physical_vacancy": "house:vintage_2010s",
+                "physical_vacancy": "house:stabilized_vacancy_model",
                 "loss_to_lease": "house:vintage_2010s",
                 "concessions": "deal:t12",
                 "collection_loss": "deal:t12",
@@ -512,7 +512,7 @@ DEALS: tuple[DealSpec, ...] = (
         expected={
             "sources": {
                 "rent_growth": "market:synthetic",
-                "physical_vacancy": "market:synthetic",
+                "physical_vacancy": "house:stabilized_vacancy_model",
                 "loss_to_lease": "house:vintage_1970s",
                 "concessions": "deal:t12",
                 "collection_loss": "deal:t12",
@@ -673,7 +673,7 @@ DEALS: tuple[DealSpec, ...] = (
         expected={
             "sources": {
                 "rent_growth": "market:synthetic",
-                "physical_vacancy": "market:synthetic",
+                "physical_vacancy": "house:stabilized_vacancy_model",
                 "loss_to_lease": "house:vintage_1980s",
                 "concessions": "market:synthetic",
                 "collection_loss": "deal:t12",
@@ -692,7 +692,8 @@ DEALS: tuple[DealSpec, ...] = (
             "bands": {
                 "rent_growth": [[0.022, 0.026], [0.027, 0.031], [0.026, 0.028], [0.025, 0.025]],
                 "vacancy_start": [0.060, 0.075],
-                "vacancy_stabilized": [0.060, 0.060],
+                # 6.0% MSA base + half of the T12's 1-point gap above it (7.0% vacancy loss).
+                "vacancy_stabilized": [0.065, 0.065],
                 "loss_to_lease_start": [0.035, 0.055],
                 "loss_to_lease_floor": [0.0125, 0.0125],
                 "concessions_year1": [0.015, 0.015],
@@ -731,9 +732,9 @@ DEALS: tuple[DealSpec, ...] = (
             },
             # The PCA recurring capex ($1,500) is below the value-add band midpoint
             # ($1,750): warned in underwrite, raised to the band in pricing. The
-            # 6.0% stabilized vacancy is below the rent roll's 6 of 90 vacant
-            # (6.67%), the property-level vacancy anchor (UPL-107).
-            "guardrail_warnings": ["collection_loss", "recurring_capex_per_unit", "physical_vacancy"],
+            # rent roll's 6 of 90 vacant (6.67%) is evidence for year 1, not a
+            # floor (ADR 0003 decision o): the vacancy stays above the 6.0% vintage floor.
+            "guardrail_warnings": ["collection_loss", "recurring_capex_per_unit"],
             "guardrail_waivers": [],
         },
     ),

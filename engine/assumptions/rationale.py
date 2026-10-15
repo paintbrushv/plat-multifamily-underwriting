@@ -71,9 +71,9 @@ SOURCE_RATIONALES: dict[str, str] = {
         "renovation premium is deal-specific evidence, so it is preferred over a generic market figure."
     ),
     "market:supplied_benchmark": (
-        "A market vacancy benchmark the analyst supplied. It can only raise the property-level vacancy "
-        "anchor, never lower it, so an outside view of the market makes the underwriting more "
-        "conservative and never less."
+        "A market vacancy benchmark the analyst supplied. It is shown beside the other vacancy evidence when "
+        "the deal is priced, but it is not a floor: the stabilized vacancy is built from market and asset "
+        "evidence, and only the house vintage floor is enforced."
     ),
     "market:synthetic": (
         "Synthetic market data used by tests and the sample deal library. It follows the same precedence "
@@ -119,9 +119,20 @@ SOURCE_RATIONALES: dict[str, str] = {
         "the floor, and the waiver is disclosed."
     ),
     "house:vacancy_anchor": (
-        "Property-level vacancy is anchored at the highest of the vintage floor and the available evidence "
-        "(rent roll, T12, broker and market benchmarks). Using the highest credible figure keeps vacancy "
-        "from being underwritten below what any source supports."
+        "Retired: property-level vacancy used to be floored at the highest of the vintage floor and the "
+        "evidence (rent roll, T12, broker and market benchmarks). Today's vacancy is evidence, not a floor: "
+        "the stabilized vacancy is built from market and asset evidence and only the vintage floor is "
+        "enforced. A saved deal may still show this source."
+    ),
+    "house:stabilized_vacancy_model": (
+        "The right vacancy is case by case: it depends on how full the submarket is, how much new supply is "
+        "coming, and how this property has run against its market. The house starts year 1 at the rent roll's "
+        "vacancy and glides to a stabilized level built from that evidence: the submarket's stabilized vacancy "
+        "for the property's class (else the metro, else the house vintage default), plus extra vacancy for the "
+        "lease-up years when deliveries run above the normal pace, plus part of any persistent gap between the "
+        "property's trailing vacancy and the market's once units offline for renovation and lease-up are set "
+        "aside. Each step is capped and shown, the only floor is the house vintage floor, and the result is "
+        "always flagged for review."
     ),
     "house:backsolve_policy": (
         "Fees, closing costs and sale costs follow the house pricing policy, so every deal is priced on "

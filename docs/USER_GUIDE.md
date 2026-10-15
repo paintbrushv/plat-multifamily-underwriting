@@ -287,7 +287,10 @@ Ingest gate: PASS
 
 The tool resolves 57 assumptions and flags 33 for review. Things to notice:
 
-- **Physical vacancy** starts from the rent roll (7 of 128 units, 5.5%).
+- **Physical vacancy** starts from the rent roll (7 of 128 units, 5.5%) and
+  glides to a stabilized 5.75% over 12 months. The sample has no market data,
+  so the stabilized build uses the 1980s house default and has no market to
+  compare the T12 with (see [Physical vacancy](#physical-vacancy)).
 - **R&M is below the house floor.** R&M plus turnover is $750 per unit a
   year. The 1980s floor is $900. Underwriting keeps $750 and warns
   (`GUARDRAIL_BELOW_FLOOR`).
@@ -455,6 +458,33 @@ Two exceptions: an explicit analyst insurance figure below the floor is kept
 in pricing (the waiver is disclosed), and a PCA recurring capex below the
 vintage band is raised to the band in pricing.
 
+The vacancy floor is the vintage floor alone. Today's rent-roll vacancy, the
+T12 vacancy, the broker's figure and a benchmark you supply are evidence for
+the stabilized vacancy, never floors: a deal with 9% vacant today is not
+priced at 9% for the whole hold.
+
+### Physical vacancy
+
+Vacancy is case by case, so the tool builds it from evidence and shows each
+step on the `physical_vacancy` row (*Why this default*):
+
+- **Year 1** starts at the rent roll's vacancy.
+- **Market base**: the submarket's stabilized vacancy for the property's
+  star tier, else the metro, else the house default for the vintage.
+- **Supply**: when more units will deliver over the next 24 months than the
+  submarket's normal pace, vacancy rises by 25 bp per point of inventory over
+  normal for years 1-3, up to 150 bp. No supply data, no adjustment (and the
+  row says so).
+- **Asset vs market**: half of the gap between the property's T12 vacancy and
+  the market's, up to 200 bp either way, after units offline (down, model,
+  renovation) and a lease-up are set aside.
+- **Stabilized** = market base + asset vs market. The curve glides from
+  year 1 to it over 12 months (24 for value-add).
+
+The row is always flagged for review. If you know the market better, edit
+it with a note: a flat rate, or a curve such as
+`{"start": 0.08, "stabilized": 0.06, "window_months": 12}`.
+
 ## Capex: the three buckets
 
 Every deal budgets capital in three buckets. None of them enters NOI.
@@ -554,7 +584,8 @@ applied value. The register page of the priced deal highlights those rows.
 ## Market data
 
 Market data is the local view: the submarket or MSA rent-growth forecast,
-stabilized vacancy, concessions and market cap rate. It is read once, at
+stabilized vacancy, the supply pipeline (deliveries over the next 24 months
+and the normal pace), concessions and market cap rate. It is read once, at
 ingest; the engine never calls it. This repository ships no market data.
 Data comes from configured feeds or from a file of your own.
 
@@ -679,7 +710,8 @@ credit with a note.
 
 **Why did pricing change my R&M (or vacancy, or capex)?** Pricing enforces
 the house floors. The *Floors enforced* list shows each change. Underwriting
-(`run_deal`) never changes your numbers.
+(`run_deal`) never changes your numbers. For vacancy the floor is the
+vintage floor only: today's rent-roll vacancy is never enforced.
 
 **The solved price is far below the ask.** Check the target cash-on-cash,
 the treasury you entered, the capex charge and the floors enforced. Pricing

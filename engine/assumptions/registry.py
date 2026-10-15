@@ -48,6 +48,9 @@ REVIEW_ON_FINDING_SOURCES = frozenset({HOUSE_R_AND_M_PAYROLL_REVIEW})
 HOUSE_LOAN_SIZING_NOI_BASIS = "house:loan_sizing_noi_basis"
 # HOUSE_EXIT_NOI_WINDOW: the exit valued on forward NOI, the 12 months after the exit month.
 HOUSE_EXIT_NOI_WINDOW = "house:exit_noi_window"
+# Stabilized vacancy built from evidence (ADR 0003 decision o): market base +
+# asset-vs-market carry, plus a supply adjustment for the lease-up years.
+HOUSE_STABILIZED_VACANCY_MODEL = "house:stabilized_vacancy_model"
 
 
 def house_vintage_source(bucket: str) -> str:

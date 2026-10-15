@@ -185,8 +185,12 @@ def test_every_entry_has_a_source_and_the_matching_review_flag(slug):
     if deal["market_data"] is None:
         assert market_sourced == set()
     else:
-        assert {"rent_growth", "physical_vacancy"} <= market_sourced
+        assert {"rent_growth"} <= market_sourced
         assert all(entries[k]["as_of"] == deal["market_data"]["as_of"] for k in market_sourced)
+        # Stabilized vacancy is built from evidence on a market base (ADR 0003 decision o).
+        vacancy = entries["physical_vacancy"]
+        assert vacancy["detail"]["vacancy_build"]["market_base"]["source"].startswith("market:")
+        assert vacancy["as_of"] == deal["market_data"]["as_of"]
         # Exit caps track entry caps: the market cap rate is a recorded candidate and
         # the steal-test reference, not the exit cap (ADR 0003 §3).
         exit_cap = entries["exit_cap_rate"]
@@ -326,11 +330,9 @@ def _below_floor_keys(canonical, deal):
     units = Decimal(sum_units(canonical))
     d = lambda value: Decimal(str(value))  # noqa: E731
     below = set()
-    # The vacancy floor is the larger of the vintage rate and the rent roll's
-    # vacant share (the rent-roll vacancy anchor, UPL-107).
-    docs = deal["expected"]["documents"]
-    rent_roll_vacant = Decimal(round(docs["rent_roll_physical_vacancy"] * docs["units"])) / units
-    vacancy_floor = max(house.default_physical_vacancy_rate(year, strategy=strategy), rent_roll_vacant)
+    # The vacancy floor is the vintage rate alone: the rent roll's vacant share
+    # is evidence for year 1, not a floor (ADR 0003 decision o).
+    vacancy_floor = house.default_physical_vacancy_rate(year, strategy=strategy)
     if any(d(r["vacancy_rate"]) < vacancy_floor for r in canonical["physical_vacancy_curve"]):
         below.add("physical_vacancy")
     # Loss to lease: cohorts with a market vs in-place gap only; such a cohort

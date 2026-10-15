@@ -873,6 +873,13 @@ _T12_GPR_PATTERNS = ("GROSS POTENTIAL", "POTENTIAL RENT", "GPR")
 _T12_MARKET_RENT_PATTERNS = ("MARKET RENT",)
 _T12_BAD_DEBT_PATTERNS = ("BAD DEBT", "WRITE OFF", "WRITE-OFF", "WRITEOFF", "COLLECTION LOSS")
 _T12_CONCESSION_PATTERNS = ("CONCESSION",)
+# Units off the market (model, down, admin, employee): a stabilization effect,
+# kept apart from vacancy so the asset-vs-market gap excludes it (ADR 0003 decision o).
+_T12_NON_REVENUE_PATTERNS = (
+    "MODEL UNIT", "DOWN UNIT", "ADMIN UNIT", "OFFICE UNIT", "EMPLOYEE UNIT", "EMPLOYEE APARTMENT",
+    "NON-REVENUE", "NON REVENUE", "NONREVENUE",
+)
+_T12_VACANCY_PATTERNS = ("VACANCY",)
 
 
 _RENT_ROLL_CHECK_LABELS = {
@@ -908,10 +915,11 @@ def _t12_rent_evidence(
     income_lines: Sequence[Mapping[str, Any]],
     statement_totals: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """GPR, net bad debt and net concessions from the T12 income section, in dollars.
+    """GPR, net bad debt, net concessions and vacancy from the T12 income section, in dollars.
 
     These are the rent basis and the losses the resolver turns into T12 rates
-    (collection loss = net bad debt / GPR, concessions / GPR):
+    (collection loss = net bad debt / GPR, concessions / GPR, the asset's
+    trailing vacancy = vacancy loss / GPR):
 
     - ``gross_potential_rent``: the statement's own gross potential rent total
       row when it prints one; else the gross potential rent lines; else, when
@@ -921,11 +929,15 @@ def _t12_rent_evidence(
       whatever sign convention the statement uses, never below zero.
     - ``concessions``: the magnitude of the signed sum of concession lines, so
       a reversal offsets the concessions it reverses.
+    - ``vacancy_loss``: the magnitude of the signed sum of vacancy lines.
+    - ``non_revenue_loss``: the magnitude of the signed sum of model, down,
+      admin and employee unit lines (units off the market), kept out of
+      ``vacancy_loss``.
     """
     lines: dict[str, list[str]] = {}
     sums: dict[str, float] = {}
     write_offs = recoveries = 0.0
-    concessions = 0.0
+    concessions = vacancy = non_revenue = 0.0
     for line in income_lines:
         raw_label = str(line.get("label", ""))
         label = raw_label.upper()
@@ -945,6 +957,12 @@ def _t12_rent_evidence(
         elif any(pattern in label for pattern in _T12_CONCESSION_PATTERNS):
             field = "concessions"
             concessions += amount
+        elif any(pattern in label for pattern in _T12_NON_REVENUE_PATTERNS):
+            field = "non_revenue_loss"
+            non_revenue += amount
+        elif any(pattern in label for pattern in _T12_VACANCY_PATTERNS):
+            field = "vacancy_loss"
+            vacancy += amount
         else:
             continue
         lines.setdefault(field, []).append(raw_label)
@@ -968,6 +986,10 @@ def _t12_rent_evidence(
         evidence["bad_debt_recoveries"] = round(recoveries, 2)
     if "concessions" in lines:
         evidence["concessions"] = round(abs(concessions), 2)
+    if "vacancy_loss" in lines:
+        evidence["vacancy_loss"] = round(abs(vacancy), 2)
+    if "non_revenue_loss" in lines:
+        evidence["non_revenue_loss"] = round(abs(non_revenue), 2)
     if not evidence:
         return {}
     source_lines = {field: labels for field, labels in lines.items() if field != "market_rent"}

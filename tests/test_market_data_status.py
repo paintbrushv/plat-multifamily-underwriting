@@ -55,8 +55,10 @@ def empty_feeders() -> dict:
 def test_slot_metrics_match_the_resolver_specs():
     from engine.assumptions.resolver import _specs_for
 
+    from engine.market_data.diagnostics import COMPONENT_SLOTS
+
     specs = _specs_for(DealProfile(deal_type="value_add", year_built=1985))
-    assert {s.key: s.market_metrics for s in specs if s.market_metrics} == SLOT_METRICS
+    assert {s.key: s.market_metrics for s in specs if s.market_metrics} | COMPONENT_SLOTS == SLOT_METRICS
 
 
 def test_status_names_each_provider_root_and_why_it_supplied_nothing():
@@ -76,7 +78,7 @@ def test_status_names_each_provider_root_and_why_it_supplied_nothing():
     assert "metro testville_zz, CBSA 99977, submarket 'North Lake/Flats'" in note
     assert f"plat_market_study_agent: plat-market-study-agent root not found: {os.environ['PLAT_MARKET_STUDY_ROOT']}" in note
     assert "plat_supply_demand: plat-supply-demand root not found" in note
-    assert status["summary"].startswith("0 of 5 market slots supplied")
+    assert status["summary"].startswith("0 of 6 market slots supplied")
     assert status["config"]["provider_order"] == "default order"
     json.dumps(status)  # JSON-serializable
 
@@ -152,7 +154,7 @@ def _ingest_cli(monkeypatch, capsys, tmp_path: Path, *flags: str) -> tuple[int, 
 def test_ingest_prints_the_market_data_status(monkeypatch, capsys, tmp_path):
     code, deal, out = _ingest_cli(monkeypatch, capsys, tmp_path)
     assert code == 0
-    assert "Market data status: 0 of 4 market slots supplied" in out
+    assert "Market data status: 0 of 5 market slots supplied" in out
     assert "plat_market_study_agent: NOT AVAILABLE" in out
     assert f"root: {os.environ['PLAT_MARKET_STUDY_ROOT']} (env PLAT_MARKET_STUDY_ROOT; not found)" in out
     assert "rent_growth: FELL BACK -> house:long_run_rent_growth" in out
@@ -181,7 +183,7 @@ def _run_deal(canonical: dict, tmp_path: Path) -> tuple[subprocess.CompletedProc
 def test_run_deal_writes_the_status_into_results_metadata(empty_feeders, tmp_path):
     proc, results = _run_deal(empty_feeders, tmp_path)
     assert results["metadata"]["market_data_status"] == empty_feeders["assumptions"]["market_data_status"]
-    assert "Market data status: 0 of 4 market slots supplied" in proc.stdout
+    assert "Market data status: 0 of 5 market slots supplied" in proc.stdout
     assert "rent_growth: FELL BACK" in proc.stdout
 
 

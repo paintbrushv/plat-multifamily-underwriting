@@ -797,6 +797,50 @@ HOUSE_DEFAULT_COLLECTION_LOSS = Decimal("0.020")
 # Months over which physical vacancy moves linearly from the rent-roll level
 # to stabilized vacancy, by deal type (ADR 0003 §1 deal_type).
 HOUSE_STABILIZATION_WINDOW_MONTHS = {"stabilized": 12, "value_add": 24}
+
+# ── Stabilized vacancy built from evidence (ADR 0003 decision o) ─────────
+# HOUSE POLICY. The vacancy floor is case by case: it depends on submarket
+# occupancy, future deliveries and stabilization at the asset. The resolver
+# (engine/assumptions/vacancy.py) builds the stabilized vacancy as
+#
+#   stabilized = market base + asset-vs-market carry
+#   years 1..HOUSE_SUPPLY_ADJUSTMENT_YEARS: stabilized + supply adjustment
+#
+# - market base: the submarket stabilized vacancy for the asset's star tier,
+#   else the metro aggregate, else the house vintage default
+#   max(typical-band midpoint, vintage floor);
+# - supply adjustment: deliveries over the next HOUSE_SUPPLY_HORIZON_MONTHS as
+#   a share of inventory (market metric ``supply_pipeline``) above the
+#   submarket's normal pace over the same span (``supply_pipeline_norm``, the
+#   trailing long-run deliveries) add HOUSE_SUPPLY_VACANCY_BPS_PER_PCT of
+#   vacancy per percentage point of inventory, capped at
+#   HOUSE_SUPPLY_VACANCY_CAP, for the lease-up years. Below-normal supply adds
+#   nothing (no credit); no supply data adds nothing and is flagged;
+# - asset-vs-market carry: HOUSE_ASSET_GAP_CARRY_SHARE of the gap between the
+#   asset's T12 vacancy loss / GPR (less units offline: down, model, admin,
+#   renovation) and the market's stabilized vacancy over the trailing year,
+#   either sign, capped at +/- HOUSE_ASSET_GAP_CAP. An asset built within
+#   HOUSE_LEASE_UP_YEARS of the analysis start was in lease-up during its T12
+#   and carries no gap.
+#
+# The rent roll's current vacancy sets year 1 only. The pricing floor is the
+# vintage floor (``default_physical_vacancy_rate``) alone: rent roll, T12,
+# broker and benchmark vacancies are evidence, never floors.
+#
+# 25 bp per point: most new supply is absorbed by demand, and lease-ups
+# compete on price (concessions) before they move stabilized occupancy, so the
+# house carries a quarter of the excess deliveries as extra vacancy, and never
+# more than 150 bp. Half of a persistent asset gap is carried because part of
+# it is management or condition the buyer can change, and part is location the
+# buyer cannot; 200 bp bounds what one trailing year can move the underwriting.
+HOUSE_SUPPLY_HORIZON_MONTHS = 24
+HOUSE_SUPPLY_VACANCY_BPS_PER_PCT = Decimal("25")
+HOUSE_SUPPLY_VACANCY_CAP = Decimal("0.0150")
+HOUSE_SUPPLY_ADJUSTMENT_YEARS = 3
+HOUSE_ASSET_GAP_CARRY_SHARE = Decimal("0.50")
+HOUSE_ASSET_GAP_CAP = Decimal("0.0200")
+HOUSE_LEASE_UP_YEARS = 2
+
 # Months over which the rent-roll loss to lease burns off to the vintage
 # floor (one lease term).
 HOUSE_LTL_BURN_OFF_MONTHS = 12

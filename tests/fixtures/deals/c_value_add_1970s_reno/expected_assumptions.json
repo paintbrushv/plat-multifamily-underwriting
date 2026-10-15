@@ -52,18 +52,18 @@
     "key": "physical_vacancy",
     "value": {
       "start": 0.08,
-      "stabilized": 0.065,
+      "stabilized": 0.07,
       "window_months": 24
     },
     "unit": "decimal_of_units",
-    "source": "market:synthetic",
-    "basis": "Physical vacancy moves linearly from the rent-roll 8.00% to the submarket stabilized vacancy 6.50% from synthetic over the value_add stabilization window of 24 months, then stays flat (monthly segments per cohort).",
+    "source": "house:stabilized_vacancy_model",
+    "basis": "Physical vacancy moves linearly from the rent-roll 8.00% (year 1, evidence) to the stabilized 7.00% over the value_add stabilization window of 24 months, then stays flat (monthly segments per cohort). Stabilized 7.00% = submarket Corvane East stabilized vacancy 6.50% from synthetic as of 2026-09-30, +0.50% asset-vs-market (T12 vacancy 7.50% vs market 6.50%: gap +1.00%, 50% carried = +0.50%); supply: No provider supplied supply_pipeline (net deliveries over the next 24 months / inventory) for this geography, so there is no supply adjustment. The market-study feeder's CoStar submarket parquet serves it (forecast-quarter deliveries over inventory_units, else under_construction); plat-supply-demand would need to persist a deliveries forecast.",
     "as_of": "2026-09-30",
     "confidence": "high",
-    "review_required": false,
+    "review_required": true,
     "default_value": {
       "start": 0.08,
-      "stabilized": 0.065,
+      "stabilized": 0.07,
       "window_months": 24
     },
     "delta": null,
@@ -72,447 +72,524 @@
     "override_cohorts": null,
     "guardrail_status": "below_floor",
     "extra": {
+      "detail": {
+        "vacancy_build": {
+          "method": "house:stabilized_vacancy_model (ADR 0003 decision o)",
+          "formula": "stabilized = market base 6.50% + asset-vs-market carry +0.50% = 7.00%; years 1-3: + supply +0.00% = 7.00%",
+          "year1_start": {
+            "value": 0.08,
+            "source": "deal:rent_roll",
+            "counts": {
+              "source": "ingest_gate.rent_roll_reconciliation",
+              "total_units": 150,
+              "vacant_units": 12,
+              "notice_units": null,
+              "note": "Parsed from the ingested rent roll; notice units are not counted separately, so the vacant-plus-notice candidate is the vacant rate."
+            },
+            "basis": "The rent roll's current physical vacancy sets year 1 only; it is evidence, not a floor."
+          },
+          "market_base": {
+            "value": 0.065,
+            "level": "submarket",
+            "source": "market:synthetic",
+            "provider": "synthetic",
+            "as_of": "2026-09-30",
+            "confidence": "high",
+            "star_tier_requested": null,
+            "star_tier_matched": null,
+            "comparator": 0.065,
+            "comparator_basis": "the market's latest stabilized vacancy",
+            "basis": "submarket Corvane East stabilized vacancy 6.50% from synthetic as of 2026-09-30"
+          },
+          "supply": {
+            "available": false,
+            "value": 0.0,
+            "bps": 0.0,
+            "years": 3,
+            "months": 0,
+            "horizon_months": 24,
+            "bps_per_pct": 25.0,
+            "cap": 0.015,
+            "capped": false,
+            "note": "No provider supplied supply_pipeline (net deliveries over the next 24 months / inventory) for this geography, so there is no supply adjustment. The market-study feeder's CoStar submarket parquet serves it (forecast-quarter deliveries over inventory_units, else under_construction); plat-supply-demand would need to persist a deliveries forecast."
+          },
+          "asset_vs_market": {
+            "available": true,
+            "value": 0.005,
+            "carried_share": 0.5,
+            "cap": 0.02,
+            "capped": false,
+            "asset_vacancy": 0.075,
+            "asset_vacancy_basis": "T12 vacancy loss / gross potential rent",
+            "asset_vacancy_stabilized": 0.075,
+            "asset_source": "deal:t12",
+            "market_comparator": 0.065,
+            "comparator_basis": "the market's latest stabilized vacancy",
+            "gap": 0.01,
+            "note": "T12 vacancy 7.50% vs market 6.50%: gap +1.00%, 50% carried = +0.50%."
+          },
+          "stabilization_exclusions": {
+            "offline_units": null,
+            "offline_share": null,
+            "offline_source": null,
+            "offline_applied": false,
+            "t12_non_revenue_rate": null,
+            "lease_up": false,
+            "notice_units": null,
+            "pre_leased_vacant_units": 0,
+            "note": "Offline units are taken out of the T12 vacancy before it is compared with the market; an asset built within 2 years of the analysis start was in lease-up and carries no gap. Units on notice and pre-leased units are disclosed only: they describe today's roll (year 1), not the trailing year. Gap: the rent roll carries no per-status unit counts (house box score), so offline units are not separated unless the T12 books them on their own lines."
+          },
+          "stabilized": 0.07,
+          "supply_adjustment": 0.0,
+          "supply_months": 0,
+          "floor": {
+            "value": 0.08,
+            "source": "house:vintage_1970s",
+            "basis": "The pricing floor is the house vintage floor alone (raised when deferred maintenance is flagged): pricing raises any vacancy segment below it and underwrite warns. The rent roll, T12, broker and benchmark vacancies are evidence for this build, not floors."
+          }
+        }
+      },
       "guardrail": {
         "floor": 0.08,
         "floor_source": "house:vintage_1970s",
         "status": "below_floor",
         "action": "warned",
-        "original": 0.065,
+        "original": 0.07,
         "segments": [
           {
             "cohort_id": "1br1ba",
             "start_period": "2026-12",
             "end_period": "2026-12",
-            "original": 0.079375
+            "original": 0.079583
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-01",
             "end_period": "2027-01",
-            "original": 0.07875
+            "original": 0.079167
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-02",
             "end_period": "2027-02",
-            "original": 0.078125
+            "original": 0.07875
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-03",
             "end_period": "2027-03",
-            "original": 0.0775
+            "original": 0.078333
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-04",
             "end_period": "2027-04",
-            "original": 0.076875
+            "original": 0.077917
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-05",
             "end_period": "2027-05",
-            "original": 0.07625
+            "original": 0.0775
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-06",
             "end_period": "2027-06",
-            "original": 0.075625
+            "original": 0.077083
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-07",
             "end_period": "2027-07",
-            "original": 0.075
+            "original": 0.076667
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-08",
             "end_period": "2027-08",
-            "original": 0.074375
+            "original": 0.07625
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-09",
             "end_period": "2027-09",
-            "original": 0.07375
+            "original": 0.075833
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-10",
             "end_period": "2027-10",
-            "original": 0.073125
+            "original": 0.075417
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-11",
             "end_period": "2027-11",
-            "original": 0.0725
+            "original": 0.075
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2027-12",
             "end_period": "2027-12",
-            "original": 0.071875
+            "original": 0.074583
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-01",
             "end_period": "2028-01",
-            "original": 0.07125
+            "original": 0.074167
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-02",
             "end_period": "2028-02",
-            "original": 0.070625
+            "original": 0.07375
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-03",
             "end_period": "2028-03",
-            "original": 0.07
+            "original": 0.073333
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-04",
             "end_period": "2028-04",
-            "original": 0.069375
+            "original": 0.072917
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-05",
             "end_period": "2028-05",
-            "original": 0.06875
+            "original": 0.0725
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-06",
             "end_period": "2028-06",
-            "original": 0.068125
+            "original": 0.072083
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-07",
             "end_period": "2028-07",
-            "original": 0.0675
+            "original": 0.071667
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-08",
             "end_period": "2028-08",
-            "original": 0.066875
+            "original": 0.07125
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-09",
             "end_period": "2028-09",
-            "original": 0.06625
+            "original": 0.070833
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-10",
             "end_period": "2028-10",
-            "original": 0.065625
+            "original": 0.070417
           },
           {
             "cohort_id": "1br1ba",
             "start_period": "2028-11",
             "end_period": "2031-10",
-            "original": 0.065
+            "original": 0.07
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2026-12",
             "end_period": "2026-12",
-            "original": 0.079375
+            "original": 0.079583
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-01",
             "end_period": "2027-01",
-            "original": 0.07875
+            "original": 0.079167
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-02",
             "end_period": "2027-02",
-            "original": 0.078125
+            "original": 0.07875
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-03",
             "end_period": "2027-03",
-            "original": 0.0775
+            "original": 0.078333
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-04",
             "end_period": "2027-04",
-            "original": 0.076875
+            "original": 0.077917
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-05",
             "end_period": "2027-05",
-            "original": 0.07625
+            "original": 0.0775
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-06",
             "end_period": "2027-06",
-            "original": 0.075625
+            "original": 0.077083
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-07",
             "end_period": "2027-07",
-            "original": 0.075
+            "original": 0.076667
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-08",
             "end_period": "2027-08",
-            "original": 0.074375
+            "original": 0.07625
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-09",
             "end_period": "2027-09",
-            "original": 0.07375
+            "original": 0.075833
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-10",
             "end_period": "2027-10",
-            "original": 0.073125
+            "original": 0.075417
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-11",
             "end_period": "2027-11",
-            "original": 0.0725
+            "original": 0.075
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2027-12",
             "end_period": "2027-12",
-            "original": 0.071875
+            "original": 0.074583
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-01",
             "end_period": "2028-01",
-            "original": 0.07125
+            "original": 0.074167
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-02",
             "end_period": "2028-02",
-            "original": 0.070625
+            "original": 0.07375
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-03",
             "end_period": "2028-03",
-            "original": 0.07
+            "original": 0.073333
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-04",
             "end_period": "2028-04",
-            "original": 0.069375
+            "original": 0.072917
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-05",
             "end_period": "2028-05",
-            "original": 0.06875
+            "original": 0.0725
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-06",
             "end_period": "2028-06",
-            "original": 0.068125
+            "original": 0.072083
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-07",
             "end_period": "2028-07",
-            "original": 0.0675
+            "original": 0.071667
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-08",
             "end_period": "2028-08",
-            "original": 0.066875
+            "original": 0.07125
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-09",
             "end_period": "2028-09",
-            "original": 0.06625
+            "original": 0.070833
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-10",
             "end_period": "2028-10",
-            "original": 0.065625
+            "original": 0.070417
           },
           {
             "cohort_id": "2br1ba",
             "start_period": "2028-11",
             "end_period": "2031-10",
-            "original": 0.065
+            "original": 0.07
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2026-12",
             "end_period": "2026-12",
-            "original": 0.079375
+            "original": 0.079583
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-01",
             "end_period": "2027-01",
-            "original": 0.07875
+            "original": 0.079167
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-02",
             "end_period": "2027-02",
-            "original": 0.078125
+            "original": 0.07875
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-03",
             "end_period": "2027-03",
-            "original": 0.0775
+            "original": 0.078333
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-04",
             "end_period": "2027-04",
-            "original": 0.076875
+            "original": 0.077917
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-05",
             "end_period": "2027-05",
-            "original": 0.07625
+            "original": 0.0775
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-06",
             "end_period": "2027-06",
-            "original": 0.075625
+            "original": 0.077083
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-07",
             "end_period": "2027-07",
-            "original": 0.075
+            "original": 0.076667
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-08",
             "end_period": "2027-08",
-            "original": 0.074375
+            "original": 0.07625
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-09",
             "end_period": "2027-09",
-            "original": 0.07375
+            "original": 0.075833
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-10",
             "end_period": "2027-10",
-            "original": 0.073125
+            "original": 0.075417
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-11",
             "end_period": "2027-11",
-            "original": 0.0725
+            "original": 0.075
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2027-12",
             "end_period": "2027-12",
-            "original": 0.071875
+            "original": 0.074583
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-01",
             "end_period": "2028-01",
-            "original": 0.07125
+            "original": 0.074167
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-02",
             "end_period": "2028-02",
-            "original": 0.070625
+            "original": 0.07375
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-03",
             "end_period": "2028-03",
-            "original": 0.07
+            "original": 0.073333
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-04",
             "end_period": "2028-04",
-            "original": 0.069375
+            "original": 0.072917
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-05",
             "end_period": "2028-05",
-            "original": 0.06875
+            "original": 0.0725
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-06",
             "end_period": "2028-06",
-            "original": 0.068125
+            "original": 0.072083
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-07",
             "end_period": "2028-07",
-            "original": 0.0675
+            "original": 0.071667
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-08",
             "end_period": "2028-08",
-            "original": 0.066875
+            "original": 0.07125
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-09",
             "end_period": "2028-09",
-            "original": 0.06625
+            "original": 0.070833
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-10",
             "end_period": "2028-10",
-            "original": 0.065625
+            "original": 0.070417
           },
           {
             "cohort_id": "2br2ba",
             "start_period": "2028-11",
             "end_period": "2031-10",
-            "original": 0.065
+            "original": 0.07
           }
         ],
-        "basis": "physical_vacancy (72 segments) is below the house floor 8.00% (house:vintage_1970s); lowest value before the guardrail 6.50%. Underwrite mode keeps the value; pricing mode would enforce the floor."
+        "basis": "physical_vacancy (72 segments) is below the house floor 8.00% (house:vintage_1970s); lowest value before the guardrail 7.00%. Underwrite mode keeps the value; pricing mode would enforce the floor."
       }
     }
   },
@@ -793,14 +870,14 @@
   },
   {
     "key": "exit_cap_rate",
-    "value": 0.068482,
+    "value": 0.068348,
     "unit": "decimal",
     "source": "house:exit_cap_spread",
-    "basis": "Entry-anchored: going-in cap 6.35% at the modeled price (year-1 NOI $1,156,014.60 / purchase price $18,210,000.00) plus the house spread 50 bps (HOUSE_EXIT_CAP_SPREAD) = 6.85%. The market cap rate 6.01% is a candidate only: the going-in cap is not more than 150 bps (HOUSE_STEAL_THRESHOLD) above it, so there is no compression.",
+    "basis": "Entry-anchored: going-in cap 6.33% at the modeled price (year-1 NOI $1,153,570.03 / purchase price $18,210,000.00) plus the house spread 50 bps (HOUSE_EXIT_CAP_SPREAD) = 6.83%. The market cap rate 6.01% is a candidate only: the going-in cap is not more than 150 bps (HOUSE_STEAL_THRESHOLD) above it, so there is no compression.",
     "as_of": null,
     "confidence": "medium",
     "review_required": true,
-    "default_value": 0.068482,
+    "default_value": 0.068348,
     "delta": 0.0,
     "override_value": null,
     "override_note": null,
@@ -810,16 +887,16 @@
       "detail": {
         "rule": "entry_anchored",
         "purchase_price": 18210000.0,
-        "year1_noi": 1156014.6,
-        "going_in_cap_rate": 0.063482,
+        "year1_noi": 1153570.03,
+        "going_in_cap_rate": 0.063348,
         "spread": 0.005,
-        "anchored_exit_cap_rate": 0.068482,
+        "anchored_exit_cap_rate": 0.068348,
         "market_cap_rate": 0.0601,
-        "excess_over_market": 0.003382,
+        "excess_over_market": 0.003248,
         "steal": false,
         "steal_scale": 0.0,
         "compression": 0.0,
-        "exit_cap_rate": 0.068482,
+        "exit_cap_rate": 0.068348,
         "noi_basis": "year-1 NOI",
         "market": {
           "rate": 0.0601,

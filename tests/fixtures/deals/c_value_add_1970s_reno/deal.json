@@ -179,7 +179,7 @@
     "ingest_gate": "PASS",
     "sources": {
       "rent_growth": "market:synthetic",
-      "physical_vacancy": "market:synthetic",
+      "physical_vacancy": "house:stabilized_vacancy_model",
       "loss_to_lease": "house:vintage_1970s",
       "concessions": "deal:t12",
       "collection_loss": "deal:t12",

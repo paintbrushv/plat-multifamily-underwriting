@@ -25,10 +25,16 @@ STATUS_VERSION = "plat.market_data_status/1"
 SLOT_METRICS: dict[str, tuple[str, ...]] = {
     "rent_growth": ("rent_growth_forecast", "rent_growth_long_run"),
     "physical_vacancy": ("vacancy_current", "vacancy_stabilized"),
+    # The supply adjustment of the stabilized vacancy build (ADR 0003 decision o).
+    "vacancy_supply": ("supply_pipeline", "supply_pipeline_norm"),
     "concessions": ("concession_rate",),
     "renovation_premium": ("renovation_premium",),
     "exit_cap_rate": ("market_cap_rate",),
 }
+# Slots no assumption key reads by itself: components of another key's build
+# (the supply adjustment of the stabilized vacancy), listed so the status and
+# the doctor say whether the feeders supply them.
+COMPONENT_SLOTS = {"vacancy_supply": SLOT_METRICS["vacancy_supply"]}
 # Metrics asked at the MSA level only (the resolver drops the submarket).
 MSA_ONLY = frozenset({"rent_growth_long_run"})
 
