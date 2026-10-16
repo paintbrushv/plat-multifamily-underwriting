@@ -527,9 +527,11 @@ def vacancy_breakdown(entry: Mapping[str, Any]) -> Optional[list[dict[str, str]]
     supply = build.get("supply") or {}
     gap = build.get("asset_vs_market") or {}
     floor = build.get("floor") or {}
-    level = {"submarket": "submarket", "metro": "metro aggregate", "house": "house vintage default"}.get(
-        str(base.get("level")), str(base.get("level")))
+    level = {"submarket": "submarket", "metro": "metro aggregate", "house": "house vintage default",
+             "analyst": "analyst submarket benchmark"}.get(str(base.get("level")), str(base.get("level")))
     base_text = f"{_pct(base.get('value'))} {level} ({base.get('source')}"
+    if base.get("source_note"):
+        base_text += f": {base['source_note']}"
     if base.get("star_tier_matched"):
         base_text += f", {base['star_tier_matched']}"
     if base.get("as_of"):
@@ -545,10 +547,14 @@ def vacancy_breakdown(entry: Mapping[str, Any]) -> Optional[list[dict[str, str]]
         missing = "supply_pipeline_norm" if supply.get("deliveries_pct_inventory") is not None else "supply_pipeline"
         supply_text = f"none: no {missing} from the market data"
     if gap.get("available"):
+        asset = {"typed_trailing_actuals": "typed trailing actuals",
+                 "broker_om_actuals": "broker OM trailing actuals"}.get(str(gap.get("asset_source_kind")), "T12")
+        confidence = gap.get("asset_confidence")
         gap_text = (
             f"{_signed_pct(gap.get('value'))} ({_pct(gap.get('carried_share'))} of a {_signed_pct(gap.get('gap'))} "
-            f"gap: T12 {_pct(gap.get('asset_vacancy_stabilized'))} vs market {_pct(gap.get('market_comparator'))}"
-            + (", capped" if gap.get("capped") else "") + ")"
+            f"gap: {asset} {_pct(gap.get('asset_vacancy_stabilized'))} vs market {_pct(gap.get('market_comparator'))}"
+            + (", capped" if gap.get("capped") else "")
+            + (f"; {confidence} confidence" if confidence and confidence != "high" else "") + ")"
         )
     else:
         gap_text = f"none: {gap.get('note') or 'not available'}"
@@ -563,6 +569,7 @@ def vacancy_breakdown(entry: Mapping[str, Any]) -> Optional[list[dict[str, str]]
         {"label": "Stabilized", "text": str(build.get("formula") or _pct(build.get("stabilized")))},
         {"label": "Pricing floor",
          "text": (f"{_pct(floor.get('value'))} ({floor.get('source')}), the vintage floor only"
+                  + (f", from {floor['applies_from']} (after the renovations)" if floor.get("applies_from") else "")
                   if floor.get("value") is not None else "none (year built unknown)")},
     ]
 

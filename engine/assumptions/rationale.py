@@ -127,12 +127,14 @@ SOURCE_RATIONALES: dict[str, str] = {
     "house:stabilized_vacancy_model": (
         "The right vacancy is case by case: it depends on how full the submarket is, how much new supply is "
         "coming, and how this property has run against its market. The house starts year 1 at the rent roll's "
-        "vacancy and glides to a stabilized level built from that evidence: the submarket's stabilized vacancy "
-        "for the property's class (else the metro, else the house vintage default), plus extra vacancy for the "
-        "lease-up years when deliveries run above the normal pace, plus part of any persistent gap between the "
-        "property's trailing vacancy and the market's once units offline for renovation and lease-up are set "
-        "aside. Each step is capped and shown, the only floor is the house vintage floor, and the result is "
-        "always flagged for review."
+        "vacancy and glides to a stabilized level built from that evidence: your own submarket vacancy "
+        "benchmark when you give one, else the submarket's stabilized vacancy for the property's class (else "
+        "the metro, else the house vintage default), plus extra vacancy for the lease-up years when deliveries "
+        "run above the normal pace, plus part of any persistent gap between the property's trailing vacancy "
+        "(the T12, else actuals typed into the price solve, else an OM's labelled actuals, never a broker pro "
+        "forma) and the market's once units offline for renovation and lease-up are set aside. Each step is "
+        "capped and shown, the only floor is the house vintage floor (on a value-add deal, only once the "
+        "renovations finish), and the result is always flagged for review."
     ),
     "house:backsolve_policy": (
         "Fees, closing costs and sale costs follow the house pricing policy, so every deal is priced on "

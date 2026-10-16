@@ -28,6 +28,9 @@ def parse_broker_snapshot_from_om(path: str | Path) -> dict[str, Any]:
     text = _extract_layout_text(om_path)
     property_facts = _extract_property_facts(text, om_path)
     trailing_actuals, forecast, notes = _extract_income_statement(text)
+    # Only a layout whose header confirms an actual column labels its trailing
+    # column; the others are read by position (see _extract_income_statement).
+    trailing_actuals_basis = notes.pop("trailing_actuals_basis", None)
     tax_notes = _extract_tax_analysis(text)
     notes.update(tax_notes)
     property_tax_evidence = _pop_property_tax_evidence(notes, om_path)
@@ -82,6 +85,7 @@ def parse_broker_snapshot_from_om(path: str | Path) -> dict[str, Any]:
             "missing_sections": missing_sections,
         },
         "trailing_actuals": trailing_actuals,
+        "trailing_actuals_basis": trailing_actuals_basis,
     }
 
 
@@ -151,6 +155,7 @@ def enrich_broker_snapshot_from_om(
 
     merged["parser_metadata"] = parsed["parser_metadata"]
     merged["trailing_actuals"] = parsed.get("trailing_actuals", {})
+    merged["trailing_actuals_basis"] = parsed.get("trailing_actuals_basis")
     return merged, parsed.get("trailing_actuals")
 
 
@@ -500,7 +505,16 @@ def _extract_asset_summary_compact_proforma(text: str) -> tuple[dict[str, float]
 
     trailing_actuals: dict[str, float] = {}
     forecast: dict[str, float] = {}
-    notes: dict[str, Any] = {"broker_table_layout": "asset_summary_compact_proforma_v1"}
+    notes: dict[str, Any] = {
+        "broker_table_layout": "asset_summary_compact_proforma_v1",
+        # The one layout whose actual column is confirmed by its header (UPL-109):
+        # the stabilized vacancy build reads only trailing actuals labelled actual.
+        "trailing_actuals_basis": {
+            "kind": "actual",
+            "period": "T3 income / T12 expenses",
+            "evidence": "column header 'Income T3 Income / T12 Expense Proforma'",
+        },
+    }
     loss_buckets = {"loss_to_lease", "vacancy_loss", "concessions", "employee_model", "bad_debt"}
 
     for raw_line in section.splitlines():

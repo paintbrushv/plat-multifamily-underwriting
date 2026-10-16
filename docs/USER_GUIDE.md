@@ -461,7 +461,9 @@ vintage band is raised to the band in pricing.
 The vacancy floor is the vintage floor alone. Today's rent-roll vacancy, the
 T12 vacancy, the broker's figure and a benchmark you supply are evidence for
 the stabilized vacancy, never floors: a deal with 9% vacant today is not
-priced at 9% for the whole hold.
+priced at 9% for the whole hold. On a value-add deal the floor applies only
+once the renovations finish (from the month after the last renovation): during
+the renovation window the programs and the build set vacancy.
 
 ### Physical vacancy
 
@@ -469,15 +471,21 @@ Vacancy is case by case, so the tool builds it from evidence and shows each
 step on the `physical_vacancy` row (*Why this default*):
 
 - **Year 1** starts at the rent roll's vacancy.
-- **Market base**: the submarket's stabilized vacancy for the property's
-  star tier, else the metro, else the house default for the vintage.
+- **Market base**: your own submarket vacancy benchmark when you give one
+  (`--submarket-vacancy 0.065 --submarket-vacancy-as-of 2026-09-30`, or
+  `submarket_vacancy` in `describe_deal`), else the submarket's stabilized
+  vacancy for the property's star tier, else the metro, else the house default
+  for the vintage.
 - **Supply**: when more units will deliver over the next 24 months than the
   submarket's normal pace, vacancy rises by 25 bp per point of inventory over
   normal for years 1-3, up to 150 bp. No supply data, no adjustment (and the
   row says so).
 - **Asset vs market**: half of the gap between the property's T12 vacancy and
   the market's, up to 200 bp either way, after units offline (down, model,
-  renovation) and a lease-up are set aside.
+  renovation) and a lease-up are set aside. Without a T12 vacancy line, actuals
+  you give the price solve (`--trailing-actuals-json`) are used, then an OM's
+  trailing actuals when the OM labels them actuals; a broker pro forma never
+  is. The row says which statement it used and at what confidence.
 - **Stabilized** = market base + asset vs market. The curve glides from
   year 1 to it over 12 months (24 for value-add).
 

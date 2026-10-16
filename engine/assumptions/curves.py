@@ -831,8 +831,12 @@ def house_stabilized_vacancy(ctx: _Context) -> Optional[tuple[float, str]]:
 def _vacancy_default(ctx: _Context, state: str) -> _Choice:
     from engine.assumptions.vacancy import build_stabilized_vacancy
 
+    return vacancy_choice(ctx, build_stabilized_vacancy(ctx))
+
+
+def vacancy_choice(ctx: _Context, build: Any) -> _Choice:
+    """The ``physical_vacancy`` default for a stabilized vacancy build (None: no build)."""
     start = _num((ctx.evidence.get("rent_roll") or {}).get("physical_vacancy_rate"))
-    build = build_stabilized_vacancy(ctx)
     window = int(house.HOUSE_STABILIZATION_WINDOW_MONTHS[ctx.profile.deal_type])
     if start is None and build is None:
         return _fallback(None, "No rent-roll evidence and no stabilized vacancy; no vacancy default is available.")

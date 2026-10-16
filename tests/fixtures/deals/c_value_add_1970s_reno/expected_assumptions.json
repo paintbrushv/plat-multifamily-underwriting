@@ -119,10 +119,22 @@
             "carried_share": 0.5,
             "cap": 0.02,
             "capped": false,
+            "asset_sources_considered": [
+              {
+                "kind": "ingested_t12",
+                "source": "deal:t12",
+                "where": "ingest_gate.evidence.t12",
+                "vacancy": 0.075,
+                "used": true
+              }
+            ],
             "asset_vacancy": 0.075,
             "asset_vacancy_basis": "T12 vacancy loss / gross potential rent",
             "asset_vacancy_stabilized": 0.075,
             "asset_source": "deal:t12",
+            "asset_source_kind": "ingested_t12",
+            "asset_source_where": "ingest_gate.evidence.t12",
+            "asset_confidence": "high",
             "market_comparator": 0.065,
             "comparator_basis": "the market's latest stabilized vacancy",
             "gap": 0.01,
@@ -145,7 +157,14 @@
           "floor": {
             "value": 0.08,
             "source": "house:vintage_1970s",
-            "basis": "The pricing floor is the house vintage floor alone (raised when deferred maintenance is flagged): pricing raises any vacancy segment below it and underwrite warns. The rent roll, T12, broker and benchmark vacancies are evidence for this build, not floors."
+            "basis": "The pricing floor is the house vintage floor alone (raised when deferred maintenance is flagged): pricing raises any vacancy segment below it and underwrite warns. The rent roll, T12, broker and benchmark vacancies are evidence for this build, not floors. Value-add renovations run 2027-01 to 2028-09: during the renovation window the programs and the stabilized vacancy build govern vacancy, so the vintage floor applies only from 2028-10 (the stabilized period).",
+            "applies_from": "2028-10",
+            "renovation_window": {
+              "first_renovation_month": "2027-01",
+              "last_renovation_month": "2028-09",
+              "floor_applies_from": "2028-10",
+              "basis": "Value-add renovations run 2027-01 to 2028-09: during the renovation window the programs and the stabilized vacancy build govern vacancy, so the vintage floor applies only from 2028-10 (the stabilized period)."
+            }
           }
         }
       },
@@ -158,138 +177,6 @@
         "segments": [
           {
             "cohort_id": "1br1ba",
-            "start_period": "2026-12",
-            "end_period": "2026-12",
-            "original": 0.079583
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-01",
-            "end_period": "2027-01",
-            "original": 0.079167
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-02",
-            "end_period": "2027-02",
-            "original": 0.07875
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-03",
-            "end_period": "2027-03",
-            "original": 0.078333
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-04",
-            "end_period": "2027-04",
-            "original": 0.077917
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-05",
-            "end_period": "2027-05",
-            "original": 0.0775
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-06",
-            "end_period": "2027-06",
-            "original": 0.077083
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-07",
-            "end_period": "2027-07",
-            "original": 0.076667
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-08",
-            "end_period": "2027-08",
-            "original": 0.07625
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-09",
-            "end_period": "2027-09",
-            "original": 0.075833
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-10",
-            "end_period": "2027-10",
-            "original": 0.075417
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-11",
-            "end_period": "2027-11",
-            "original": 0.075
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2027-12",
-            "end_period": "2027-12",
-            "original": 0.074583
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-01",
-            "end_period": "2028-01",
-            "original": 0.074167
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-02",
-            "end_period": "2028-02",
-            "original": 0.07375
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-03",
-            "end_period": "2028-03",
-            "original": 0.073333
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-04",
-            "end_period": "2028-04",
-            "original": 0.072917
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-05",
-            "end_period": "2028-05",
-            "original": 0.0725
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-06",
-            "end_period": "2028-06",
-            "original": 0.072083
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-07",
-            "end_period": "2028-07",
-            "original": 0.071667
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-08",
-            "end_period": "2028-08",
-            "original": 0.07125
-          },
-          {
-            "cohort_id": "1br1ba",
-            "start_period": "2028-09",
-            "end_period": "2028-09",
-            "original": 0.070833
-          },
-          {
-            "cohort_id": "1br1ba",
             "start_period": "2028-10",
             "end_period": "2028-10",
             "original": 0.070417
@@ -302,138 +189,6 @@
           },
           {
             "cohort_id": "2br1ba",
-            "start_period": "2026-12",
-            "end_period": "2026-12",
-            "original": 0.079583
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-01",
-            "end_period": "2027-01",
-            "original": 0.079167
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-02",
-            "end_period": "2027-02",
-            "original": 0.07875
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-03",
-            "end_period": "2027-03",
-            "original": 0.078333
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-04",
-            "end_period": "2027-04",
-            "original": 0.077917
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-05",
-            "end_period": "2027-05",
-            "original": 0.0775
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-06",
-            "end_period": "2027-06",
-            "original": 0.077083
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-07",
-            "end_period": "2027-07",
-            "original": 0.076667
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-08",
-            "end_period": "2027-08",
-            "original": 0.07625
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-09",
-            "end_period": "2027-09",
-            "original": 0.075833
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-10",
-            "end_period": "2027-10",
-            "original": 0.075417
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-11",
-            "end_period": "2027-11",
-            "original": 0.075
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2027-12",
-            "end_period": "2027-12",
-            "original": 0.074583
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-01",
-            "end_period": "2028-01",
-            "original": 0.074167
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-02",
-            "end_period": "2028-02",
-            "original": 0.07375
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-03",
-            "end_period": "2028-03",
-            "original": 0.073333
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-04",
-            "end_period": "2028-04",
-            "original": 0.072917
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-05",
-            "end_period": "2028-05",
-            "original": 0.0725
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-06",
-            "end_period": "2028-06",
-            "original": 0.072083
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-07",
-            "end_period": "2028-07",
-            "original": 0.071667
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-08",
-            "end_period": "2028-08",
-            "original": 0.07125
-          },
-          {
-            "cohort_id": "2br1ba",
-            "start_period": "2028-09",
-            "end_period": "2028-09",
-            "original": 0.070833
-          },
-          {
-            "cohort_id": "2br1ba",
             "start_period": "2028-10",
             "end_period": "2028-10",
             "original": 0.070417
@@ -443,138 +198,6 @@
             "start_period": "2028-11",
             "end_period": "2031-10",
             "original": 0.07
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2026-12",
-            "end_period": "2026-12",
-            "original": 0.079583
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-01",
-            "end_period": "2027-01",
-            "original": 0.079167
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-02",
-            "end_period": "2027-02",
-            "original": 0.07875
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-03",
-            "end_period": "2027-03",
-            "original": 0.078333
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-04",
-            "end_period": "2027-04",
-            "original": 0.077917
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-05",
-            "end_period": "2027-05",
-            "original": 0.0775
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-06",
-            "end_period": "2027-06",
-            "original": 0.077083
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-07",
-            "end_period": "2027-07",
-            "original": 0.076667
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-08",
-            "end_period": "2027-08",
-            "original": 0.07625
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-09",
-            "end_period": "2027-09",
-            "original": 0.075833
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-10",
-            "end_period": "2027-10",
-            "original": 0.075417
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-11",
-            "end_period": "2027-11",
-            "original": 0.075
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2027-12",
-            "end_period": "2027-12",
-            "original": 0.074583
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-01",
-            "end_period": "2028-01",
-            "original": 0.074167
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-02",
-            "end_period": "2028-02",
-            "original": 0.07375
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-03",
-            "end_period": "2028-03",
-            "original": 0.073333
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-04",
-            "end_period": "2028-04",
-            "original": 0.072917
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-05",
-            "end_period": "2028-05",
-            "original": 0.0725
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-06",
-            "end_period": "2028-06",
-            "original": 0.072083
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-07",
-            "end_period": "2028-07",
-            "original": 0.071667
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-08",
-            "end_period": "2028-08",
-            "original": 0.07125
-          },
-          {
-            "cohort_id": "2br2ba",
-            "start_period": "2028-09",
-            "end_period": "2028-09",
-            "original": 0.070833
           },
           {
             "cohort_id": "2br2ba",
@@ -589,7 +212,14 @@
             "original": 0.07
           }
         ],
-        "basis": "physical_vacancy (72 segments) is below the house floor 8.00% (house:vintage_1970s); lowest value before the guardrail 7.00%. Underwrite mode keeps the value; pricing mode would enforce the floor."
+        "basis": "physical_vacancy (6 segments) is below the house floor 8.00% (house:vintage_1970s); lowest value before the guardrail 7.00%. Underwrite mode keeps the value; pricing mode would enforce the floor. Value-add renovations run 2027-01 to 2028-09: during the renovation window the programs and the stabilized vacancy build govern vacancy, so the vintage floor applies only from 2028-10 (the stabilized period).",
+        "floor_applies_from": "2028-10",
+        "renovation_window": {
+          "first_renovation_month": "2027-01",
+          "last_renovation_month": "2028-09",
+          "floor_applies_from": "2028-10",
+          "basis": "Value-add renovations run 2027-01 to 2028-09: during the renovation window the programs and the stabilized vacancy build govern vacancy, so the vintage floor applies only from 2028-10 (the stabilized period)."
+        }
       }
     }
   },

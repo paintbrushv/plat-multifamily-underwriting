@@ -125,7 +125,8 @@
               "description": "Deal evidence captured at ingest for the assumption resolver (ADR 0003): rent-roll physical vacancy and loss to lease, T12 GPR / bad debt / concessions, and T12 insurance and R&M annual dollars. Provenance only; the engine ignores it.",
               "properties": {
                 "rent_roll": { "type": "object" },
-                "t12": { "type": "object" }
+                "t12": { "type": "object" },
+                "om_trailing_actuals": { "type": "object", "description": "UPL-109: the broker OM's trailing GPR and vacancy loss with the parser's trailing_actuals_basis label; read for the vacancy gap only when labelled actual and no T12 vacancy exists." }
               }
             }
           }
@@ -473,6 +474,8 @@
             "original": { "type": ["number", "null"] },
             "applied": { "type": "number" },
             "segments": { "type": "array", "items": { "type": "object" } },
+            "floor_applies_from": { "type": "string", "description": "UPL-109: the first month a value-add vacancy floor applies (the month after the last renovation)." },
+            "renovation_window": { "type": ["object", "null"] },
             "basis": { "type": "string" }
           }
         }

@@ -118,6 +118,15 @@
             "carried_share": 0.5,
             "cap": 0.02,
             "capped": false,
+            "asset_sources_considered": [
+              {
+                "kind": "ingested_t12",
+                "source": "deal:t12",
+                "where": "ingest_gate.evidence.t12",
+                "vacancy": 0.05,
+                "used": true
+              }
+            ],
             "note": "No submarket or metro stabilized vacancy to compare the asset with: no asset-vs-market adjustment."
           },
           "stabilization_exclusions": {
