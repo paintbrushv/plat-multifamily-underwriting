@@ -65,7 +65,8 @@ from engine.market_data.types import Observation
 
 METHOD = "house:stabilized_vacancy_model (ADR 0003 decision o)"
 # Rent-roll statuses of units off the market: not vacancy the market would see.
-OFFLINE_STATUSES = ("Down", "Model", "Admin", "Renovation", "Offline", "Non-Revenue", "Non Revenue", "Employee")
+OFFLINE_STATUSES = ("Down", "Model", "Admin", "Renovation", "Offline", "Non-Revenue", "Non Revenue", "Employee",
+                    "Uninhabitable", "Vacant Down")
 SUPPLY_METRICS = ("supply_pipeline", "supply_pipeline_norm")
 NO_PIPELINE_NOTE = (
     "No provider supplied supply_pipeline (net deliveries over the next 24 months / inventory) for this "
@@ -408,6 +409,13 @@ def stabilization_exclusions(ctx: _Context, statement: Optional[Mapping[str, Any
     metadata = ctx.canonical.get("metadata") or {}
     box = ((metadata.get("property_summary") or {}).get("house_box_score")) or {}
     counts = box.get("status_counts") or {}
+    counts_source = "house_box_score.status_counts"
+    if not counts:
+        # UPL-110 (ADR 0003 decision q): without a box score, the rent roll's modeled
+        # down units are the offline units (a capital project, not weak demand).
+        from engine.assumptions.down_units import offline_status_counts
+
+        counts, counts_source = offline_status_counts(ctx), "rent_roll.down_units"
     statement = statement if statement is not None else asset_statement(ctx)
     gpr = statement.get("gpr")
     non_revenue = statement.get("non_revenue_loss")
@@ -429,11 +437,13 @@ def stabilization_exclusions(ctx: _Context, statement: Optional[Mapping[str, Any
         out.update({
             "offline_units": offline,
             "offline_share": _r(offline / total),
-            "offline_source": "house_box_score.status_counts",
+            "offline_source": counts_source,
             "notice_units": status_count(counts, "Notice"),
         })
         # A T12 that books down and model units on their own lines already keeps them out of vacancy.
-        out["offline_applied"] = bool(offline) and t12_non_revenue_rate is None
+        # A $0 (or zero-rate) model / storage / down-unit line books nothing apart, so it
+        # does not block the exclusion (UPL-110, ADR 0003 decision q).
+        out["offline_applied"] = bool(offline) and not t12_non_revenue_rate
     start_year = int(ctx.start[:4]) if len(ctx.start) == 7 else None
     if ctx.year_built is not None and start_year is not None:
         out["lease_up"] = start_year - ctx.year_built < int(house.HOUSE_LEASE_UP_YEARS)
@@ -481,9 +491,16 @@ def asset_vs_market(
         return out
     asset = _r(float(statement["vacancy"]))
     stabilized_asset = asset
-    if exclusions.get("offline_applied"):
-        stabilized_asset = _r(max(0.0, asset - float(exclusions["offline_share"])))
     comparator = float(base["comparator"])
+    offline_capped = False
+    if exclusions.get("offline_applied"):
+        # UPL-110 (ADR 0003 decision q): offline units can explain away vacancy above
+        # the market, never earn a credit below it (the roll shows which units are
+        # offline today, not for how long).
+        uncapped = _r(max(0.0, asset - float(exclusions["offline_share"])))
+        stabilized_asset = _r(max(uncapped, min(asset, comparator)))
+        offline_capped = stabilized_asset > uncapped
+        out.update({"asset_vacancy_stabilized_uncapped": uncapped, "offline_exclusion_capped": offline_capped})
     out.update({
         "asset_vacancy": asset,
         "asset_vacancy_basis": statement["label"],
@@ -514,6 +531,7 @@ def asset_vs_market(
         "note": (
             f"{asset_name} vacancy {asset:.2%}"
             + (f" less {float(exclusions['offline_share']):.2%} offline = {stabilized_asset:.2%}"
+               + (" (capped at the market: offline units never earn a below-market credit)" if offline_capped else "")
                if exclusions.get("offline_applied") else "")
             + f" vs market {comparator:.2%}: gap {_signed(gap)}, {share:.0%} carried = {_signed(raw)}"
             + (f", capped at {_signed(value)}" if abs(raw) > cap else "") + "."

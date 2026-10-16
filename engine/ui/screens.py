@@ -87,6 +87,8 @@ FIELD_LABELS: dict[str, str] = {
     "pca_immediate_capex": "PCA immediate needs", "pca_recurring_capex_per_unit": "PCA recurring capex per unit",
     "pca_as_of": "PCA date", "pca_reference": "PCA report", "immediate_capex": "Immediate capex at close",
     "immediate_capex_funding": "Immediate capex funded by", "recurring_capex_per_unit": "Recurring capex per unit",
+    "down_unit_scope": "Down units: scope of work", "down_unit_cost_per_unit": "Down units: cost per unit",
+    "down_unit_pace_per_month": "Down units started per month", "down_unit_funding": "Down units funded by",
     "exit_cap": "Exit cap rate", "sale_cost": "Sale costs", "rent_growth": "Rent growth", "vacancy": "Physical vacancy",
     "collection_loss": "Collection loss", "sponsor_pct": "Sponsor share of equity", "pref_return": "Preferred return",
     "acq_fee": "Acquisition fee", "am_fee": "Asset management fee", "disp_fee": "Disposition fee",
@@ -110,9 +112,11 @@ FIELD_GROUPS: tuple[dict[str, Any], ...] = (
     {"label": "Taxes", "lead": "The engine re-taxes the property at the purchase price: price x assessment ratio x "
                                "millage / 1,000.", "fields": ["millage", "assessment_ratio"]},
     {"label": "Capex & condition", "lead": "Three buckets: immediate capex at close, recurring capex per unit a "
-                                           "year and the replacement reserve. A PCA outranks your own figures.",
+                                           "year and the replacement reserve. A PCA outranks your own figures. "
+                                           "Down units on the rent roll are restored on their own schedule.",
      "fields": ["immediate_capex", "immediate_capex_funding", "recurring_capex_per_unit", "pca_immediate_capex",
-                "pca_recurring_capex_per_unit", "pca_as_of", "pca_reference"]},
+                "pca_recurring_capex_per_unit", "pca_as_of", "pca_reference", "down_unit_scope",
+                "down_unit_cost_per_unit", "down_unit_pace_per_month", "down_unit_funding"]},
     {"label": "Hold", "lead": "The analysis window (a five-year hold starting the month after closing is typical) "
                               "and the exit.", "fields": ["start", "end", "exit_month", "exit_cap", "sale_cost"]},
     {"label": "Operating overrides", "more": True,

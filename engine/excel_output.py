@@ -233,6 +233,10 @@ def _write_capital_plan_summary(ws: Any, plan: Any, row: int) -> int:
          f"({immediate.get('funding', 'equity_at_close')}; not in NOI)"),
         ("   Renovation budget:", (plan.get("renovation_budget") or {}).get("amount", 0), CURRENCY_FORMAT,
          "(separate budget)"),
+        *([("   Down-unit restoration:", plan["down_unit_restoration"].get("amount", 0), CURRENCY_FORMAT,
+            f"({plan['down_unit_restoration'].get('units', 0)} units, "
+            f"{plan['down_unit_restoration'].get('funding', 'equity_at_close')}; separate budget)")]
+          if isinstance(plan.get("down_unit_restoration"), dict) else []),
         ("2. Recurring capex, $/unit yr 1:", (charge.get("recurring_capex") or {}).get("per_unit_annual_year_1"),
          CURRENCY_FORMAT, f"(grows {(charge.get('recurring_capex') or {}).get('growth_rate', 0):.1%}/yr)"),
         ("   Recurring capex, year 1:", year1.get("recurring_capex_by_vintage"), CURRENCY_FORMAT, ""),

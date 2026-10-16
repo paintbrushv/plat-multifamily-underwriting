@@ -297,6 +297,46 @@
             "end_period": { "$ref": "#/$defs/month" }
           }
         },
+        "down_unit_restoration": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0003 decision q: units the rent roll shows as down, restored on a construction schedule (engine/modules/down_units.py). Its own capital-plan line, separate from immediate_capex and from the renovation budget. Each unit is offline (no rent) until restored and leased, its cost spread evenly over its work months; the budget is funded at close (equity_at_close: in total_equity_basis and total_unlevered_basis; lender_holdback: in total_unlevered_basis only), less amount_in_stated_basis, never in operating cash flow. Restored units lease at market rent plus rent_premium_monthly.",
+          "required": ["units"],
+          "properties": {
+            "units": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["unit_id"],
+                "properties": {
+                  "unit_id": { "type": "string" },
+                  "cohort_id": { "type": ["string", "null"] },
+                  "status": { "type": ["string", "null"], "description": "The rent-roll status, as printed." },
+                  "market_rent": { "type": ["number", "null"], "minimum": 0 },
+                  "vacant": { "type": "boolean" },
+                  "scope": { "type": "string", "enum": ["make_ready", "heavy_repair", "full_gut"] },
+                  "scope_source": { "type": "string" },
+                  "cost": { "type": "number", "minimum": 0, "description": "Restoration cost of this unit (PCA, analyst, or the house cost for its own scope)." },
+                  "cost_source": { "type": "string" },
+                  "analyst_cost": { "type": "number", "minimum": 0, "description": "An analyst cost the PCA superseded, kept for the record." },
+                  "start_lag_months": { "type": "integer", "minimum": 0 },
+                  "duration_months": { "type": "integer", "minimum": 1 },
+                  "schedule_source": { "type": "string" }
+                }
+              }
+            },
+            "scope": { "type": "string", "enum": ["make_ready", "heavy_repair", "full_gut"], "description": "Scope of every unit without its own." },
+            "cost_per_unit": { "type": "number", "minimum": 0, "description": "Cost of a unit at the block scope without its own cost." },
+            "start_lag_months": { "type": "integer", "minimum": 0 },
+            "duration_months": { "type": "integer", "minimum": 1 },
+            "pace_units_per_month": { "type": "integer", "minimum": 1, "description": "Units the crew starts per month." },
+            "months_to_lease": { "type": "integer", "minimum": 0, "description": "Months a restored unit is marketed; rent starts the month after." },
+            "funding": { "type": "string", "enum": ["equity_at_close", "lender_holdback"], "default": "equity_at_close" },
+            "rent_premium_monthly": { "type": "number", "minimum": 0, "description": "Analyst premium over market rent for a restored unit (default 0)." },
+            "amount_in_stated_basis": { "type": "number", "minimum": 0, "description": "How much of the budget the stated purchase_assumptions bases already include (backsolve's priced case sets it); the engine adds the rest." }
+          }
+        },
         "pca": {
           "type": "object",
           "additionalProperties": false,
@@ -304,6 +344,7 @@
           "properties": {
             "immediate_capex": { "type": "number", "minimum": 0, "description": "PCA immediate needs (total dollars)." },
             "recurring_capex_per_unit": { "type": "number", "minimum": 0, "description": "PCA annual capital needs per unit (year 1)." },
+            "down_unit_costs": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0 }, "description": "PCA restoration cost per down unit, by unit id (outranks analyst and house costs)." },
             "as_of": { "type": "string" },
             "reference": { "type": "string" }
           }

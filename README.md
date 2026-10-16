@@ -157,8 +157,25 @@ python runs/ingest_deal.py --property-id SYN-A \
      floor, not an addition: the charge below NOI each month is
      max(recurring capex, reserve).
 
+  Down units on the rent roll (down, offline, uninhabitable, under
+  renovation, vacant-down) are a fourth, separate line, **Down-unit
+  restoration** (`capital_plan.down_unit_restoration`, ADR 0003 decision q):
+  each unit gets a scope (make_ready, heavy_repair, full_gut; the house
+  assumes heavy_repair and flags it), a cost (PCA `down_unit_costs` > analyst
+  > house scope x vintage) and a construction schedule (start lag, duration,
+  a crew pace and a month to lease). The units earn no rent until restored,
+  then lease at market; the cost is spent evenly over each unit's work
+  months, funded at close (equity, or a lender holdback), shown in
+  `results.capital_plan` and the cash flow, never in operating cash flow, and
+  never part of immediate capex or a renovation program. Backsolve carries it
+  in the equity basis at every candidate price. The down units also leave the
+  vacancy comparison with the market (never below it: offline units only
+  explain away vacancy above the market) and the year-1 vacancy. Flags:
+  `--down-unit-scope`, `--down-unit-cost-per-unit`, `--down-unit-pace`,
+  `--down-unit-funding`, `--down-unit-scopes JSON`.
+
   Precedence is PCA > analyst > house: `--pca pca.json`
-  (`{"immediate_capex", "recurring_capex_per_unit", "as_of", "reference"}`)
+  (`{"immediate_capex", "recurring_capex_per_unit", "down_unit_costs", "as_of", "reference"}`)
   beats `--immediate-capex` / `--recurring-capex-per-unit`. A deal built
   before 2000 without a PCA is flagged for review (`CAPEX_PCA_MISSING`). A PCA
   recurring capex below the vintage band is warned at ingest and raised to the

@@ -485,6 +485,144 @@ IMMEDIATE_CAPEX_LENDER_HOLDBACK = "lender_holdback"
 IMMEDIATE_CAPEX_FUNDING_MODES = (IMMEDIATE_CAPEX_EQUITY_AT_CLOSE, IMMEDIATE_CAPEX_LENDER_HOLDBACK)
 
 
+# ── Down units: a capital project with a schedule (ADR 0003 decision q) ─
+# HOUSE POLICY, NOT MARKET DATA. A unit the rent roll shows as down (down,
+# offline, uninhabitable, under renovation, "vacant-down") needs repair or
+# renovation, sometimes a full gut, before it can be leased. It is budgeted
+# as its own capital-plan line ("Down-unit restoration"), separate from
+# bucket 1 immediate capex and from the value-add renovation budget, spent
+# as the units are worked and funded at close.
+#
+# Scope classes, from least to most work:
+# - make_ready: repair to rent-ready (paint, flooring patches, appliances,
+#   fixtures): a heavy turn.
+# - heavy_repair: replace finishes and some systems in place (flooring,
+#   cabinets and counters, drywall sections, plumbing and electrical
+#   fixtures, an HVAC component) without taking the unit to the studs.
+# - full_gut: to the studs and back (fire, flood, mold, long-abandoned
+#   units): new drywall, insulation, kitchen, bath, flooring, rough-in
+#   repairs, permits and inspections.
+DOWN_UNIT_SCOPE_MAKE_READY = "make_ready"
+DOWN_UNIT_SCOPE_HEAVY_REPAIR = "heavy_repair"
+DOWN_UNIT_SCOPE_FULL_GUT = "full_gut"
+DOWN_UNIT_SCOPES = (DOWN_UNIT_SCOPE_MAKE_READY, DOWN_UNIT_SCOPE_HEAVY_REPAIR, DOWN_UNIT_SCOPE_FULL_GUT)
+# A rent roll says a unit is down, never how much work it needs. The house
+# assumes the prudent middle: a make-ready understates a unit that has been
+# held off the market (if a turn were enough, the operator would have turned
+# it), and a full gut overstates most down units. The entry is always flagged
+# so the analyst walks the units and classifies them.
+HOUSE_DOWN_UNIT_DEFAULT_SCOPE = DOWN_UNIT_SCOPE_HEAVY_REPAIR
+
+# Cost per unit, 2026 dollars, garden multifamily, before the vintage factor.
+# There is no public primary survey of what down units cost to restore; these
+# are house estimates bracketed by the published figures below, and a PCA or
+# contractor bid replaces them unit by unit.
+# - make_ready: the top of the vintage framework's turn band
+#   (VINTAGE_FRAMEWORK_2026 ``turn_high``, $2,000-$6,500 by vintage), not
+#   this table. For scale: Zego's property-manager survey (630 managers of
+#   250+ unit communities, reported by Multifamily Dive, 2022-2023) put the
+#   full cost of a turnover near $3,900, of which unit repairs were about
+#   $775; an NAA property-manager survey found 53.8% of respondents put total
+#   turn cost (lost rent, marketing, screening, cleaning, repairs) at
+#   $1,500-$3,500. A down unit needs more than an average turn, so the top of
+#   the band.
+# - heavy_repair $20,000: the middle of the $15,000-$25,000 "deep" value-add
+#   interior tier practitioners quote (industry guides, no primary survey),
+#   above Kidder Mathews' "typical full-unit remodel on an older building
+#   around $15,000" (REBusinessOnline) and below single-family remodel costs
+#   for the same rooms (Zonda Cost vs. Value 2024 national midrange: minor
+#   kitchen remodel $27,492, bathroom remodel $25,251).
+# - full_gut $45,000: no primary source covers an apartment gutted to the
+#   studs. Fire and water reconstruction guides quote roughly $25-$60 per
+#   square foot for drywall, insulation, flooring, cabinets and paint before
+#   systems; an 850 sq ft garden unit at about $50/sq ft is about $42,500,
+#   and the Cost vs. Value midrange kitchen plus bath ($52,743, single-family
+#   scale) is an upper reference. HIGH UNCERTAINTY: a fire, mold or
+#   structural scope can exceed it; replace it with the insurance adjuster's
+#   estimate, a PCA or bids.
+HOUSE_DOWN_UNIT_COST_PER_UNIT = {
+    DOWN_UNIT_SCOPE_HEAVY_REPAIR: Decimal("20000"),
+    DOWN_UNIT_SCOPE_FULL_GUT: Decimal("45000"),
+}
+# Opening up an older unit costs more: pre-1978 housing falls under the EPA
+# lead renovation, repair and painting rule (40 CFR 745 subpart E: certified
+# firms, containment, cleaning verification), pre-1980 finishes often need an
+# asbestos survey and abatement before demolition (EPA asbestos NESHAP, 40 CFR
+# 61 subpart M), and galvanized plumbing and aluminum or undersized wiring
+# surface once walls are open. House factors (judgment, not a survey) apply to
+# heavy_repair and full_gut (make_ready is already by vintage); an unknown
+# vintage takes the highest factor and is flagged.
+HOUSE_DOWN_UNIT_VINTAGE_COST_FACTORS = {
+    "1960s": Decimal("1.20"),
+    "1970s": Decimal("1.20"),
+    "1980s": Decimal("1.00"),
+    "1990s": Decimal("1.00"),
+    "2000s": Decimal("0.90"),
+    "2010s": Decimal("0.90"),
+    "2020s": Decimal("0.90"),
+}
+
+# Construction schedule by scope (months). The start lag is scoping, bids,
+# materials and, for a full gut, design and permits: published first-review
+# times for multifamily alteration permits run two to eight weeks (e.g.
+# Centennial CO 10-15 business days, Tempe AZ 15-20 calendar days, Marion
+# County OR 20 business days, Alameda County CA 40 business days), plus
+# corrections and contractor mobilization, so a full gut waits a quarter.
+# Duration: vendor benchmarks put a heavy turn with flooring and appliances
+# at 10-21 days, so a make-ready takes a month; a heavy repair two; a gut to
+# the studs four (demolition, rough-in inspections, drywall, finishes, final
+# inspection). House judgment, overridable.
+HOUSE_DOWN_UNIT_START_LAG_MONTHS = {
+    DOWN_UNIT_SCOPE_MAKE_READY: 0,
+    DOWN_UNIT_SCOPE_HEAVY_REPAIR: 1,
+    DOWN_UNIT_SCOPE_FULL_GUT: 3,
+}
+HOUSE_DOWN_UNIT_DURATION_MONTHS = {
+    DOWN_UNIT_SCOPE_MAKE_READY: 1,
+    DOWN_UNIT_SCOPE_HEAVY_REPAIR: 2,
+    DOWN_UNIT_SCOPE_FULL_GUT: 4,
+}
+# Crew pace: units started per month across all down units (one dedicated
+# crew or contractor), the same convention as a renovation program's
+# monthly_pace. Overridable per deal.
+HOUSE_DOWN_UNIT_PACE_UNITS_PER_MONTH = 4
+# Lease-up after completion: a restored unit is marketed for this many months
+# and earns rent from the month after (vendor-reported national days vacant
+# between residents were about five to six weeks in 2025). Once leased it is
+# part of the property and follows its vacancy curve; it leases at market
+# rent, with no premium unless the analyst sets one.
+HOUSE_DOWN_UNIT_MONTHS_TO_LEASE = 1
+# Funded at close like the value-add renovation budget (equity at close), or
+# a lender holdback: either way it never reduces operating cash flow.
+DOWN_UNIT_FUNDING_MODES = IMMEDIATE_CAPEX_FUNDING_MODES
+HOUSE_DOWN_UNIT_FUNDING = IMMEDIATE_CAPEX_EQUITY_AT_CLOSE
+
+
+def down_unit_vintage_factor(year_built: Optional[int]) -> Decimal:
+    """The house cost factor for a down unit's vintage (the highest when unknown)."""
+    bucket = vintage_bucket(year_built)
+    if bucket is None:
+        return max(HOUSE_DOWN_UNIT_VINTAGE_COST_FACTORS.values())
+    return HOUSE_DOWN_UNIT_VINTAGE_COST_FACTORS[bucket]
+
+
+def default_down_unit_cost_per_unit(scope: str, year_built: Optional[int]) -> Decimal:
+    """House cost to restore one down unit of ``scope`` (2026 dollars).
+
+    make_ready: the vintage turn band high end (unknown vintage: the 1980s
+    band x the unknown-vintage factor). heavy_repair and full_gut:
+    ``HOUSE_DOWN_UNIT_COST_PER_UNIT`` x ``down_unit_vintage_factor``.
+    """
+    if scope not in DOWN_UNIT_SCOPES:
+        raise ValueError(f"down-unit scope must be one of {DOWN_UNIT_SCOPES}")
+    bucket = vintage_bucket(year_built)
+    if scope == DOWN_UNIT_SCOPE_MAKE_READY:
+        if bucket is None:
+            return VINTAGE_FRAMEWORK_2026["1980s"]["turn_high"] * down_unit_vintage_factor(None)
+        return VINTAGE_FRAMEWORK_2026[bucket]["turn_high"]
+    return HOUSE_DOWN_UNIT_COST_PER_UNIT[scope] * down_unit_vintage_factor(year_built)
+
+
 def default_replacement_reserve_per_unit(
     year_built: Optional[int] = None,
     *,

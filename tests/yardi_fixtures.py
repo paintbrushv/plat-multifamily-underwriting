@@ -358,14 +358,36 @@ def rr_expected() -> dict[str, Any]:
     }
 
 
+def _rr_units(off_market: dict[str, str] | None) -> list[tuple[Any, ...]]:
+    """``RR_UNITS`` with the ``off_market`` units (unit -> resident marker such
+    as ``DOWN`` or ``MODEL``) carrying that marker and no charges."""
+    out = []
+    for unit, unit_type, sqft, resident, market, charges, move_in, lease_end in RR_UNITS:
+        if off_market and unit in off_market:
+            out.append((unit, unit_type, sqft, off_market[unit], market, [], None, None))
+        else:
+            out.append((unit, unit_type, sqft, resident, market, charges, move_in, lease_end))
+    return out
+
+
 def yardi_rent_roll_rows(
     *,
     summary: bool = True,
     summary_overrides: dict[str, float] | None = None,
+    off_market: dict[str, str] | None = None,
+    off_market_in_non_rev: bool = True,
 ) -> list[list[Any]]:
     """Rows of the synthetic export. ``summary_overrides`` corrupts the Summary
     Groups figures (``units``, ``vacant_units``, ``market_rent_total``) to
-    exercise the reconciliation gate."""
+    exercise the reconciliation gate.
+
+    ``off_market`` marks units down or non-revenue (unit -> resident/name
+    marker, e.g. ``{"105": "DOWN", "110": "MODEL"}``): no charges, no
+    deposit. The Summary Groups block counts them under "Total Non Rev Units"
+    (``off_market_in_non_rev``, the default) or, for an export that treats a
+    down unit as plain vacant, under "Total Vacant Units"."""
+    units = _rr_units(off_market)
+    marked = [u for u in units if off_market and u[0] in off_market]
     rows: list[list[Any]] = [
         ["Rent Roll with Lease Charges"],
         [f"{PROPERTY} ({PROPERTY_CODE})"],
@@ -377,10 +399,11 @@ def yardi_rent_roll_rows(
     ]
     charge_totals: dict[str, float] = {}
     lease_charges = 0.0
-    for unit, unit_type, sqft, resident, market, charges, move_in, lease_end in RR_UNITS:
+    for unit, unit_type, sqft, resident, market, charges, move_in, lease_end in units:
         vacant = resident == "VACANT"
-        name = "VACANT" if vacant else "Resident"
-        deposit = 0 if vacant else 200
+        off = bool(off_market) and unit in off_market
+        name = "VACANT" if vacant else resident if off else "Resident"
+        deposit = 0 if vacant or off else 200
         first_code, first_amount = charges[0] if charges else (None, 0)
         rows.append([int(unit), unit_type, sqft, resident, name, market, first_code, first_amount,
                      deposit, 0, move_in, lease_end, None, 0])
@@ -400,18 +423,21 @@ def yardi_rent_roll_rows(
         rows.append([None, None, None, None, None, None, "Total", 0, None, None, None, None, None, None])
         rows.append([None] * 14)
 
-    market_total = float(sum(u[4] for u in RR_UNITS))
-    sqft_total = sum(u[2] for u in RR_UNITS)
-    occupied = [u for u in RR_UNITS if u[3] != "VACANT"]
-    vacant = [u for u in RR_UNITS if u[3] == "VACANT"]
+    market_total = float(sum(u[4] for u in units))
+    sqft_total = sum(u[2] for u in units)
+    occupied = [u for u in units if u[3] != "VACANT" and u not in marked]
+    vacant = [u for u in units if u[3] == "VACANT"]
+    non_rev = marked if off_market_in_non_rev else []
+    if not off_market_in_non_rev:
+        vacant = vacant + marked
     rows.append([None, None, None, "Total", f"{PROPERTY}({PROPERTY_CODE})", market_total, None,
                  lease_charges, 200 * len(occupied), 0, None, None, None, 0])
     if not summary:
         return rows
 
-    figures = {"units": len(RR_UNITS), "vacant_units": len(vacant), "market_rent_total": market_total}
+    figures = {"units": len(units), "vacant_units": len(vacant), "market_rent_total": market_total}
     figures.update(summary_overrides or {})
-    occ_pct = round(100 * len(occupied) / len(RR_UNITS), 2)
+    occ_pct = round(100 * len(occupied) / len(units), 2)
     rows += [
         [None] * 14,
         ["Summary Groups", None, None, None, None, "Square", "Market", "Lease", "Security", "Other",
@@ -424,7 +450,9 @@ def yardi_rent_roll_rows(
          float(sum(u[4] for u in RR_FUTURE)), 0, 0, 0, len(RR_FUTURE), None, None, 0],
         ["Occupied Units", None, None, None, None, sum(u[2] for u in occupied),
          float(sum(u[4] for u in occupied)), None, None, None, len(occupied), occ_pct, occ_pct, None],
-        ["Total Non Rev Units", None, None, None, None, 0, 0, None, None, None, 0, 0, 0, None],
+        ["Total Non Rev Units", None, None, None, None, sum(u[2] for u in non_rev),
+         float(sum(u[4] for u in non_rev)), None, None, None, len(non_rev),
+         round(100 * len(non_rev) / len(units), 2), round(100 * len(non_rev) / len(units), 2), None],
         ["Total Vacant Units", None, None, None, None, sum(u[2] for u in vacant),
          float(sum(u[4] for u in vacant)), None, None, None, figures["vacant_units"],
          round(100 - occ_pct, 2), round(100 - occ_pct, 2), None],

@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from engine.assumptions.profile import ASSET_CLASSES, STAR_TIERS, SUPPORTED_DEAL_TYPES
-from engine.underwriting_policy import IMMEDIATE_CAPEX_FUNDING_MODES, LOAN_SIZING_NOI_BASES
+from engine.underwriting_policy import (
+    DOWN_UNIT_FUNDING_MODES,
+    DOWN_UNIT_SCOPES,
+    IMMEDIATE_CAPEX_FUNDING_MODES,
+    LOAN_SIZING_NOI_BASES,
+)
 
 _MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -158,6 +163,21 @@ FIELDS: tuple[Field, ...] = (
           "(analyst figure).",
           "Capex bucket 2 when no PCA covers it; the charge below NOI is max(this, the replacement reserve).",
           minimum=0),
+    # ── down units (ADR 0003 decision q) ─────────────────────────────────
+    Field("down_unit_scope", "choice", "Capital plan", "Scope of work for every down unit on the rent roll.",
+          "Down units are restored on a construction schedule before they earn rent; the scope sets the house "
+          "cost, the start lag and the duration. The house assumes heavy_repair and flags it until you classify "
+          "the units.", choices=DOWN_UNIT_SCOPES),
+    Field("down_unit_cost_per_unit", "float", "Capital plan", "Restoration cost per down unit, dollars "
+          "(analyst figure).",
+          "Replaces the house scope x vintage cost for units without a PCA cost; the budget is reserved at close "
+          "and lowers cash-on-cash and the solved price.", minimum=0),
+    Field("down_unit_pace_per_month", "int", "Capital plan", "Down units the crew starts per month.",
+          "Sets when each unit is restored and leased: a slower crew keeps units offline (no rent) longer.",
+          minimum=1, maximum=500),
+    Field("down_unit_funding", "choice", "Capital plan", "How the down-unit restoration budget is funded.",
+          "equity_at_close adds it to the equity basis at every price backsolve tries; lender_holdback upsizes the "
+          "loan instead. Either way it never reduces operating cash flow.", choices=DOWN_UNIT_FUNDING_MODES),
     # ── exit ─────────────────────────────────────────────────────────────
     Field("exit_cap", "rate", "Exit", "Exit cap rate as a decimal (analyst figure).",
           "Sets the sale price; omitted, the house rule (going-in cap plus a spread) sets it.",

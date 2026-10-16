@@ -296,7 +296,7 @@ BOX = {"total_units": 10, "status_counts": {"Occupied": 8, "Vacant": 1, "Down": 
 
 
 def test_offline_units_are_separated_before_the_gap_is_measured():
-    deal = _resolve(BASE, t12_vacancy=0.15, box_score=BOX)
+    deal = _resolve(BASE, t12_vacancy=0.18, box_score=BOX)
     build = _build(deal)
     exclusions = build["stabilization_exclusions"]
     assert exclusions["offline_units"] == 1
@@ -304,12 +304,13 @@ def test_offline_units_are_separated_before_the_gap_is_measured():
     assert exclusions["offline_source"] == "house_box_score.status_counts"
     assert exclusions["offline_applied"] is True
     gap = build["asset_vs_market"]
-    # 15% T12 vacancy less 10% of units offline = 5%, 1 point under the market.
-    assert gap["asset_vacancy"] == pytest.approx(0.15)
-    assert gap["asset_vacancy_stabilized"] == pytest.approx(0.05)
-    assert gap["gap"] == pytest.approx(-0.01)
-    assert gap["value"] == pytest.approx(-0.005)
-    assert _entry(deal)["value"]["stabilized"] == pytest.approx(0.055)
+    # 18% T12 vacancy less 10% of units offline = 8%, 2 points over the market.
+    # (The exclusion never takes the asset below the market: ADR 0003 decision q.)
+    assert gap["asset_vacancy"] == pytest.approx(0.18)
+    assert gap["asset_vacancy_stabilized"] == pytest.approx(0.08)
+    assert gap["gap"] == pytest.approx(0.02)
+    assert gap["value"] == pytest.approx(0.01)
+    assert _entry(deal)["value"]["stabilized"] == pytest.approx(0.07)
 
 
 def test_without_exclusions_the_same_t12_carries_the_full_gap():

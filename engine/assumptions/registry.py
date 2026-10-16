@@ -51,6 +51,13 @@ HOUSE_EXIT_NOI_WINDOW = "house:exit_noi_window"
 # Stabilized vacancy built from evidence (ADR 0003 decision o): market base +
 # asset-vs-market carry, plus a supply adjustment for the lease-up years.
 HOUSE_STABILIZED_VACANCY_MODEL = "house:stabilized_vacancy_model"
+# Down units, a capital project with a schedule (ADR 0003 decision q):
+# HOUSE_DOWN_UNIT_DEFAULT_SCOPE, default_down_unit_cost_per_unit (scope x
+# vintage), the schedule constants and HOUSE_DOWN_UNIT_FUNDING.
+HOUSE_DOWN_UNIT_SCOPE = "house:down_unit_scope"
+HOUSE_DOWN_UNIT_COST = "house:down_unit_cost"
+HOUSE_DOWN_UNIT_SCHEDULE = "house:down_unit_schedule"
+HOUSE_DOWN_UNIT_FUNDING = "house:down_unit_funding"
 
 
 def house_vintage_source(bucket: str) -> str:

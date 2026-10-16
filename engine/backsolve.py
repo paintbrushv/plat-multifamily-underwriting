@@ -23,6 +23,7 @@ from engine.engine import (
 from engine.modules.analysis_years import aggregate_analysis_years
 from engine.modules import loan_sizing
 from engine.modules.debt import LOAN_ROUNDING_STEP, compute_agency_loan_terms
+from engine.modules.down_units import BLOCK_KEY as DOWN_UNIT_BLOCK, rentable_cohorts, restoration_budget
 from engine.modules.metrics import compute_cash_on_cash_for_year, stabilized_analysis_year
 from engine.modules.renovations import compute_renovations
 from engine.modules.time_grid import TimeGrid
@@ -1007,7 +1008,8 @@ def _renovation_plan(canonical: dict[str, Any]) -> dict[str, Any] | None:
     grid = canonical["time_grid"]
     result = compute_renovations(
         time_grid=TimeGrid.build(grid["analysis_start_date"], grid["analysis_end_date"]),
-        unit_cohorts=canonical.get("unit_cohorts") or [],
+        # The engine's pool: down units are restored, never renovated too (ADR 0003 decision q).
+        unit_cohorts=rentable_cohorts(canonical),
         renovation_programs=programs,
         unit_renovations=unit_renovations,
     )
@@ -1073,6 +1075,27 @@ def _immediate_capex(canonical: dict[str, Any]) -> tuple[Decimal, str]:
     return dec(block.get("amount") or 0), funding
 
 
+def _down_unit_summary(prepared: dict[str, Any]) -> dict[str, Any]:
+    """The down-unit restoration line as priced (ADR 0003 decision q), or nothing."""
+    amount, funding, _ = restoration_budget(prepared)
+    if amount <= 0:
+        return {}
+    units = len(((prepared.get("capital_plan") or {}).get(DOWN_UNIT_BLOCK) or {}).get("units") or [])
+    return {"down_unit_restoration": {
+        "amount": float(amount),
+        "funding": funding,
+        "units": units,
+        # Equity at close: in the total equity basis at every candidate price;
+        # a lender holdback upsizes the loan instead.
+        "included_in_total_equity_basis": funding == IMMEDIATE_CAPEX_EQUITY_AT_CLOSE,
+        "loan_upsized_by_holdback": funding == IMMEDIATE_CAPEX_LENDER_HOLDBACK,
+        "coc_note": (
+            "The year-1 cash-on-cash of a stabilized deal carries both the restoration reserve in the equity basis "
+            "and the rent the down units lose until restored and leased; the CoC basis itself is unchanged."
+        ),
+    }}
+
+
 def _capital_plan_summary(
     prepared: dict[str, Any], units: int, profile: GuardrailProfile, reserve_floor: Decimal | None,
 ) -> dict[str, Any]:
@@ -1099,6 +1122,7 @@ def _capital_plan_summary(
         },
         # The value-add renovation budget, shown beside bucket 1, never inside it.
         "renovation_budget": float(renovation_plan["renovation_budget"]) if renovation_plan else 0.0,
+        **_down_unit_summary(prepared),
         "recurring_capex_per_unit": float(recurring_per_unit) if recurring_per_unit is not None else None,
         "recurring_capex_growth": (
             float(recurring["growth_rate"]) if recurring.get("growth_rate") is not None else None
@@ -1619,6 +1643,10 @@ def _build_price_case(
     commitment = dec(agency_terms["loan_amount"])
     holdback = immediate_capex if immediate_capex_funding == IMMEDIATE_CAPEX_LENDER_HOLDBACK else Decimal("0")
     equity_immediate = immediate_capex - holdback
+    # Down-unit restoration (ADR 0003 decision q): reserved at close like bucket 1.
+    down_unit_budget, down_unit_funding, _ = restoration_budget(case)
+    down_unit_holdback = down_unit_budget if down_unit_funding == IMMEDIATE_CAPEX_LENDER_HOLDBACK else Decimal("0")
+    holdback += down_unit_holdback
     closing_costs = price * purchase_closing_cost_pct
     acquisition_fee = price * acquisition_fee_pct
     upfront_capex = sum(
@@ -1634,6 +1662,7 @@ def _build_price_case(
         + upfront_capex
         + renovation_budget
         + equity_immediate
+        + (down_unit_budget - down_unit_holdback)
     )
     case["purchase_assumptions"] = {
         "purchase_price": persisted_price,
@@ -1641,10 +1670,15 @@ def _build_price_case(
         "closing_costs": float(closing_costs),
         "total_equity_basis": float(total_equity_basis),
     }
-    if renovation_budget > 0 or immediate_capex > 0:
+    if renovation_budget > 0 or immediate_capex > 0 or down_unit_budget > 0:
         case["purchase_assumptions"]["total_unlevered_basis"] = float(
-            price + closing_costs + upfront_capex + renovation_budget + immediate_capex
+            price + closing_costs + upfront_capex + renovation_budget + immediate_capex + down_unit_budget
         )
+    if down_unit_budget > 0:
+        # The bases above already carry the restoration budget: the engine must not add it again.
+        plan = deepcopy(case.get("capital_plan") or {})
+        plan[DOWN_UNIT_BLOCK]["amount_in_stated_basis"] = float(down_unit_budget)
+        case["capital_plan"] = plan
     stated_block = (case.get("capital_plan") or {}).get("immediate_capex")
     if immediate_capex > 0 or (isinstance(stated_block, dict) and "amount_in_stated_basis" in stated_block):
         # The bases above already carry bucket 1: the engine must not add it again.

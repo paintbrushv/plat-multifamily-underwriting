@@ -836,7 +836,10 @@ def _vacancy_default(ctx: _Context, state: str) -> _Choice:
 
 def vacancy_choice(ctx: _Context, build: Any) -> _Choice:
     """The ``physical_vacancy`` default for a stabilized vacancy build (None: no build)."""
-    start = _num((ctx.evidence.get("rent_roll") or {}).get("physical_vacancy_rate"))
+    from engine.assumptions.down_units import year1_vacancy_start
+
+    # Down units are offline in the restoration schedule (ADR 0003 decision q), not year-1 vacancy.
+    start = year1_vacancy_start(ctx, _num((ctx.evidence.get("rent_roll") or {}).get("physical_vacancy_rate")))
     window = int(house.HOUSE_STABILIZATION_WINDOW_MONTHS[ctx.profile.deal_type])
     if start is None and build is None:
         return _fallback(None, "No rent-roll evidence and no stabilized vacancy; no vacancy default is available.")

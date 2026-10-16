@@ -155,6 +155,8 @@ def _spec_notes(spec: Any, guardrail_keys: frozenset[str], categorical: dict[str
         notes.append("Can be edited per floor plan (`cohort_overrides`).")
     if spec.value_add_only:
         notes.append("Value-add deals only.")
+    if spec.down_units_only:
+        notes.append("Deals whose rent roll shows down units only.")
     if spec.price_linked:
         notes.append("Moves with the purchase price.")
     if spec.key in categorical:

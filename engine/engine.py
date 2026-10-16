@@ -15,6 +15,13 @@ from engine.modules.capital_plan import (
     metric_basis as capital_plan_metric_basis,
 )
 from engine.modules import loan_sizing
+from engine.modules.down_units import (
+    LABEL as DOWN_UNIT_LABEL,
+    compute_down_unit_restoration,
+    rentable_cohorts,
+    restoration_budget as down_unit_restoration_budget,
+    restored_cohort_id,
+)
 from engine.modules.exit_cap_grid import compute_exit_cap_grid
 from engine.modules.cashflow import compute_cashflow
 from engine.modules.debt import REFI_NOI_WINDOW_FORWARD, compute_debt, compute_preferred_equity, size_refi_loan
@@ -477,6 +484,55 @@ def _build_renovation_context(
     )
 
 
+def _restored_cohorts(inputs: Dict[str, Any], down_unit_result: Dict[str, Any]) -> Dict[str, Any]:
+    """The restored-unit cohort of each cohort with down units (ADR 0003 decision q).
+
+    A restored unit leases at its cohort's market rent (the grown curve) plus
+    the analyst's ``rent_premium_monthly`` (0 by default), with no loss to
+    lease on the new lease, and follows the cohort's vacancy curve. Its unit
+    count each month is the number of that cohort's down units restored and
+    leased by then.
+    """
+    premium = dec(down_unit_result.get("rent_premium_monthly") or 0)
+    out: Dict[str, Any] = {
+        "cohorts": [], "market_rent_curve": [], "loss_to_lease": [], "physical_vacancy_curve": [],
+        "dynamic_unit_counts": {},
+    }
+    by_id = {str(c["cohort_id"]): c for c in inputs["unit_cohorts"]}
+    for cohort_id, counts in down_unit_result["restored_by_cohort"].items():
+        target = by_id[cohort_id]
+        restored_id = restored_cohort_id(cohort_id)
+        if restored_id in by_id:
+            raise ValueError(f"cohort_id {restored_id!r} is reserved for restored down units")
+        segments = sorted(
+            (r for r in inputs["market_rent_curve"] if str(r["cohort_id"]) == cohort_id),
+            key=lambda r: r["start_period"],
+        )
+        first_market = dec(segments[0]["market_rent"]) if segments else dec(target.get("initial_inplace_rent") or 0)
+        out["cohorts"].append({
+            **{k: v for k, v in target.items()
+               if k not in ("cohort_id", "unit_count", "unit_type", "initial_inplace_rent")},
+            "cohort_id": restored_id,
+            "unit_type": f"{target.get('unit_type', cohort_id)} (restored down units)",
+            "unit_count": 0,
+            "initial_inplace_rent": first_market + premium,
+        })
+        for seg in segments:
+            out["market_rent_curve"].append({
+                "cohort_id": restored_id, "start_period": seg["start_period"], "end_period": seg["end_period"],
+                "market_rent": float(dec(seg["market_rent"]) + premium),
+            })
+            out["loss_to_lease"].append({
+                "cohort_id": restored_id, "start_period": seg["start_period"], "end_period": seg["end_period"],
+                "ltl_percent": 0.0,
+            })
+        for seg in inputs["physical_vacancy_curve"]:
+            if str(seg["cohort_id"]) == cohort_id:
+                out["physical_vacancy_curve"].append({**seg, "cohort_id": restored_id})
+        out["dynamic_unit_counts"][restored_id] = dict(counts)
+    return out
+
+
 def _apply_growth_assumptions(
     time_grid: TimeGrid,
     inputs: Dict[str, Any],
@@ -577,6 +633,17 @@ def _build_operations(
     augmented_ltl = list(inputs["loss_to_lease"])
     augmented_vac = list(inputs["physical_vacancy_curve"])
 
+    # Down-unit restoration (ADR 0003 decision q): the down units are offline
+    # until restored, so they leave their cohort's rentable pool (and any
+    # renovation program's pool: a unit is never budgeted twice) and come back
+    # as a restored cohort leased at market.
+    down_unit_result = compute_down_unit_restoration(
+        time_grid, inputs, market_rent_curve=inputs["market_rent_curve"]
+    )
+    pool_inputs = inputs
+    if down_unit_result is not None:
+        pool_inputs = {**inputs, "unit_cohorts": rentable_cohorts(inputs)}
+
     unit_renovations = inputs.get("unit_renovations", [])
     if inputs.get("renovation_programs") or unit_renovations:
         (
@@ -586,13 +653,27 @@ def _build_operations(
             output_mr_curve,
             output_ltl,
             output_vac,
-        ) = _build_renovation_context(time_grid, inputs, unit_renovations=unit_renovations)
+        ) = _build_renovation_context(time_grid, pool_inputs, unit_renovations=unit_renovations)
 
         augmented_cohorts.extend(output_cohort_entries)
         augmented_mr_curve.extend(output_mr_curve)
         augmented_ltl.extend(output_ltl)
         augmented_vac.extend(output_vac)
 
+    if down_unit_result is not None:
+        if dynamic_unit_counts is None:
+            dynamic_unit_counts = {
+                c["cohort_id"]: {m: int(c["unit_count"]) for m in time_grid.month_ids}
+                for c in pool_inputs["unit_cohorts"]
+            }
+        restored = _restored_cohorts(inputs, down_unit_result)
+        augmented_cohorts.extend(restored["cohorts"])
+        augmented_mr_curve.extend(restored["market_rent_curve"])
+        augmented_ltl.extend(restored["loss_to_lease"])
+        augmented_vac.extend(restored["physical_vacancy_curve"])
+        dynamic_unit_counts.update(restored["dynamic_unit_counts"])
+
+    if (inputs.get("renovation_programs") or unit_renovations) or down_unit_result is not None:
         # Post-augmentation validation: catch cohort_id collisions or overlapping
         # segments introduced by _build_renovation_context (e.g., the cohort-collision bug
         # where output_cohort collides with an existing canonical cohort_id).
@@ -672,6 +753,7 @@ def _build_operations(
         "inputs": inputs,
         "rent_growth": rent_growth_disclosure,
         "renovation_result": renovation_result,
+        "down_unit_result": down_unit_result,
         "base_rent": base_rent,
         "programs": programs,
         "revenue_totals": revenue_totals,
@@ -996,6 +1078,7 @@ def run_underwriting(
     inputs = operations["inputs"]
     rent_growth_disclosure = operations["rent_growth"]
     renovation_result = operations["renovation_result"]
+    down_unit_result = operations["down_unit_result"]
     base_rent = operations["base_rent"]
     programs = operations["programs"]
     revenue_totals = operations["revenue_totals"]
@@ -1394,6 +1477,29 @@ def run_underwriting(
             ),
         }
 
+    # Down-unit restoration (ADR 0003 decision q): reserved at close (equity, or
+    # a lender holdback), spent as the units are worked. Shown on its months and
+    # years, never in operating cash flow; the Day-0 bases carry what the stated
+    # bases do not (the immediate-capex convention).
+    down_unit_amount, down_unit_funding, down_unit_in_basis = down_unit_restoration_budget(inputs)
+    if down_unit_result is not None:
+        spend = {row["month"]: row["capex"] for row in down_unit_result["by_month"]}
+        for cf_m in cashflow_result["by_month"]:
+            cf_m["down_unit_restoration_capex"] = spend.get(cf_m["month"], 0.0)
+        for cf_y in cashflow_result["by_year"]:
+            cf_y["down_unit_restoration_capex"] = round2(sum(
+                (dec(v) for m, v in spend.items() if m.startswith(cf_y["year"])), Decimal("0")
+            ))
+        down_unit_added = down_unit_amount - down_unit_in_basis
+        if down_unit_added != 0:
+            inputs = {
+                **inputs,
+                "purchase_assumptions": _immediate_capex_purchase_assumptions(
+                    inputs.get("purchase_assumptions"), down_unit_added,
+                    equity_funded=down_unit_funding == IMMEDIATE_CAPEX_EQUITY_AT_CLOSE,
+                ),
+            }
+
     # Inject exit proceeds into cashflow (before metrics and fund waterfall)
     exit_result = compute_exit_proceeds(
         time_grid=time_grid,
@@ -1544,11 +1650,14 @@ def run_underwriting(
         result["renovations"] = renovation_result
     if capex_funding_result is not None:
         result["capex_funding"] = capex_funding_result
+    if down_unit_result is not None:
+        result["down_unit_restoration"] = down_unit_result
     if inputs.get("capital_plan") or capital_charge is not None:
         result["capital_plan"] = _capital_plan_result(
             capital_charge, renovation_result, renovation_funding,
             immediate_amount, immediate_funding, immediate_in_basis,
             dscr_basis,
+            down_unit=_down_unit_line(down_unit_result, down_unit_amount, down_unit_funding, down_unit_in_basis),
         )
 
     # Pass renovation_detail sidecar through untouched
@@ -1674,13 +1783,16 @@ def _capital_plan_result(
     immediate_funding: str,
     immediate_in_basis: Decimal,
     dscr_basis: Optional[str] = None,
+    *,
+    down_unit: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """The three capex buckets as run (ADR 0003 §3), next to the renovation budget."""
+    """The three capex buckets as run (ADR 0003 §3), next to the renovation budget
+    and the down-unit restoration (ADR 0003 decision q)."""
     equity_funded = immediate_funding == IMMEDIATE_CAPEX_EQUITY_AT_CLOSE
     renovation_budget = (
         float(renovation_result["summary"]["total_renovation_cost"]) if renovation_result else 0.0
     )
-    return {
+    out = {
         "immediate_capex": {
             "amount": float(round2(immediate_amount)),
             "funding": immediate_funding,
@@ -1695,6 +1807,50 @@ def _capital_plan_result(
         "renovation_budget": {"amount": renovation_budget, "funding": renovation_funding},
         "below_noi_capex_charge": capital_charge,
         "metric_basis": capital_plan_metric_basis(dscr_basis),
+    }
+    if down_unit is not None:
+        # Its own line: never part of bucket 1 or of the renovation budget.
+        out["down_unit_restoration"] = down_unit
+    return out
+
+
+def _down_unit_line(
+    result: Optional[Dict[str, Any]],
+    amount: Decimal,
+    funding: str,
+    in_basis: Decimal,
+) -> Optional[Dict[str, Any]]:
+    """The down-unit restoration line of ``results.capital_plan``, or None."""
+    if result is None:
+        return None
+    summary = result["summary"]
+    equity_funded = funding == IMMEDIATE_CAPEX_EQUITY_AT_CLOSE
+    return {
+        "label": DOWN_UNIT_LABEL,
+        "amount": float(round2(amount)),
+        "funding": funding,
+        "units": summary["units"],
+        "units_by_scope": summary["units_by_scope"],
+        "in_total_equity_basis": bool(amount > 0 and equity_funded),
+        "in_total_unlevered_basis": bool(amount > 0),
+        "amount_in_stated_basis": float(round2(in_basis)),
+        "added_by_engine": float(round2(amount - in_basis)),
+        "excluded_from_operating_cash_flow": True,
+        "first_start_month": summary["first_start_month"],
+        "last_completion_month": summary["last_completion_month"],
+        "last_rent_start_month": summary["last_rent_start_month"],
+        "capex_after_analysis_end": summary["capex_after_analysis_end"],
+        "by_analysis_year": [
+            {k: row[k] for k in ("analysis_year", "months", "capex", "units_completed", "units_rent_starting",
+                                 "down_unit_loss")}
+            for row in result["by_analysis_year"]
+        ],
+        "note": (
+            "Separate from immediate capex (bucket 1) and from the value-add renovation budget: the down units "
+            "are kept out of every renovation program's pool. Funded at close and spent as the units are worked; "
+            "the units earn no rent until restored and leased, so year-1 cash-on-cash carries both the reserve in "
+            "the equity basis and the lost rent."
+        ),
     }
 
 
