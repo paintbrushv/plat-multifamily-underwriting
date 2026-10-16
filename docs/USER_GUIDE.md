@@ -154,7 +154,9 @@ shows it. Every screen has the step header (1 Documents, 2 Describe, 3 Check,
   - property tax: the combined millage (mills per $1,000 of assessed value)
     and the assessment ratio (assessed value / purchase price);
   - optional: exit cap, exit month, sale cost, deferred maintenance flag,
-    immediate capex, recurring capex per unit, PCA figures, fund terms.
+    immediate capex, recurring capex per unit, PCA figures, fund terms, and
+    for a rent roll with down units their scope, cost per unit, crew pace
+    and funding (see [Down units](#down-units)).
 - **You get back:** the facts as recorded, and what is still missing.
 - **Good looks like:** nothing required is missing. Rates are decimals:
   `0.0575` is 5.75%.
@@ -470,7 +472,8 @@ the renovation window the programs and the build set vacancy.
 Vacancy is case by case, so the tool builds it from evidence and shows each
 step on the `physical_vacancy` row (*Why this default*):
 
-- **Year 1** starts at the rent roll's vacancy.
+- **Year 1** starts at the rent roll's vacancy (without its down units, which
+  are restored on a schedule: see [Down units](#down-units)).
 - **Market base**: your own submarket vacancy benchmark when you give one
   (`--submarket-vacancy 0.065 --submarket-vacancy-as-of 2026-09-30`, or
   `submarket_vacancy` in `describe_deal`), else the submarket's stabilized
@@ -520,6 +523,47 @@ does more than budget capex: it raises the house minimums for physical
 vacancy, collection loss, year-1 concessions and R&M to the upper part of the
 vintage band (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and $1,700 per
 unit).
+
+### Down units
+
+A unit the rent roll shows as down (down, offline, uninhabitable, under
+renovation, "vacant-down") is not vacancy: something is wrong with it, and it
+needs repair or renovation, sometimes a full gut, before it can be leased. The
+tool budgets it as its own capital-plan line, **Down-unit restoration**,
+separate from immediate capex and from any value-add renovation budget, and
+times the spend with a construction schedule.
+
+- **What the tool reads.** Every unit is classed as down, non-revenue
+  (model, admin, employee, office), notice, vacant or occupied. The
+  `down_units` row shows the counts and the down unit ids. The rent-roll gate
+  still ties: a down unit is counted as not occupied, whether the export's
+  summary lists it as non-revenue or as vacant.
+- **Scope.** Each down unit is a make-ready, a heavy repair or a full gut.
+  The rent roll never says which, so the house assumes a **heavy repair** and
+  flags `down_unit_scope` until you classify the units: set it for all of them,
+  or a unit's own scope (`describe_deal` `down_unit_scope`, or the unit in
+  `capital_plan.down_unit_restoration`).
+- **Cost.** A PCA cost for the unit wins, then yours, then the house cost for
+  its scope and vintage (`down_unit_cost_per_unit`; the row lists every
+  unit's cost and the total). The house figures (2026 dollars): a make-ready
+  is the top of the vintage turn band; a heavy repair $20,000 and a full gut
+  $45,000, both x 1.20 before 1980 and x 0.90 from 2000. No public survey
+  prices down units, so replace them with bids or a PCA.
+- **Schedule.** A heavy repair starts after a month (scoping, bids) and takes
+  two; a full gut waits three months (design, permits) and takes four; a
+  make-ready starts at once and takes one. The crew starts four units a month;
+  a restored unit takes a month to lease. Each value is a row you can edit.
+- **Cash flow.** A down unit earns no rent until it is restored and leased,
+  then leases at market rent (no premium unless you set one). Its cost is
+  spent evenly over its work months, shown as `down_unit_restoration_capex`
+  in the monthly and annual cash flow, and funded at close (equity, or a
+  lender holdback with `down_unit_funding`), so it never reduces operating
+  cash flow. Down units also leave the vacancy comparison with the market
+  and the year-1 vacancy: they are offline in the schedule instead.
+- **Pricing.** The restoration budget is in the equity basis at every price
+  `solve_price` tries (a holdback upsizes the loan), so the solved price
+  falls. A stabilized deal's year-1 cash-on-cash carries both the reserve and
+  the lost rent.
 
 ### The R&M payroll review
 

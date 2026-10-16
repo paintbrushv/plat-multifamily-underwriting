@@ -113,7 +113,7 @@ key:
 | `deal:t12` | T12 evidence (bad debt, concessions, vacancy loss, opex lines, insurance, R&M) |
 | `deal:om` | The offering memorandum (exit cap) and broker notes that raise a floor |
 | `deal:comps` | Comp evidence (`renovation_premium`) |
-| `deal:pca` | A property condition assessment (`capital_plan.pca`): immediate needs and recurring capex per unit |
+| `deal:pca` | A property condition assessment (`capital_plan.pca`): immediate needs, recurring capex per unit, and restoration costs per down unit (`down_unit_costs`, decision q) |
 | `market:<provider>` | A market-data provider: `plat_market_study_agent`, `plat_supply_demand`, `user_file`, `costar`, `yardi_matrix`, `realpage`, `synthetic` (tests); `market:supplied_benchmark` is the analyst-supplied `market_vacancy_benchmark` (vacancy evidence, not a floor, since decision o) |
 | `house:vintage_<bucket>` | `VINTAGE_FRAMEWORK_2026` for the year-built bucket (e.g. `house:vintage_1980s`) |
 | `house:long_run_rent_growth` | The house long-run rent growth after the forecast horizon |
@@ -130,6 +130,10 @@ key:
 | `house:management_fee_pct_egr` | The house management fee as a percent of EGR |
 | `house:year1_insurance_floor` | The $600/unit Year-1 insurance floor |
 | `house:stabilized_vacancy_model` | Physical vacancy built from evidence (decision o): rent roll for year 1, then market base + asset-vs-market carry, plus a supply adjustment for the lease-up years; always review_required, the build on `detail.vacancy_build` |
+| `house:down_unit_scope` | `HOUSE_DOWN_UNIT_DEFAULT_SCOPE`: down units are a heavy repair until the analyst classifies them (decision q; always review_required) |
+| `house:down_unit_cost` | `default_down_unit_cost_per_unit`: the restoration cost by scope x vintage factor, for a unit without a PCA or analyst cost (decision q) |
+| `house:down_unit_schedule` | The down-unit start lag and duration by scope, crew pace and months to lease (decision q) |
+| `house:down_unit_funding` | `HOUSE_DOWN_UNIT_FUNDING`: the restoration budget reserved with equity at close (decision q) |
 | `house:vacancy_anchor` | Retired by decision (o): the property-level vacancy anchor (max of the evidence) is no longer a floor; a stored canonical may still carry it |
 | `house:backsolve_policy` | `engine/backsolve_policy` values: fees, closing costs, sale cost, and in pricing any value the backsolve policy sets (an explicit policy value, or a default where the canonical has no analyst value) |
 | `house:pricing_normalization` | A backsolve pricing normalization (§5): the house box-score rebase (loss to lease and vacancy rebuilt on the rent-roll floorplans), or an opex line backsolve's preparation sets (a revenue-quality bridge paired expense). The house floors never rewrite an input. |
@@ -1054,6 +1058,132 @@ A decision on vacancy follow-ups (UPL-109):
        levered IRR at that price moves 9.77% -> 9.75%: the higher year-1 NOI
        raises the entry-anchored exit cap (decision e). Deals a and d and the
        sample deal keep their prices.
+
+A decision on down units (UPL-110):
+
+17. **(q) Down units are a capital project with a schedule.** The product
+    owner: "down units often mean substantial repair and renovation
+    (sometimes full gut reno) so those capex dollars needed have to be
+    accounted and timed in the budget with the likely construction
+    schedule." A down unit is not weak demand and not vacancy to carry:
+    1. **Parse.** `classify_unit_status` (`engine/ingest/rent_roll_parser.py`)
+       sorts every unit into `down` (down, offline, uninhabitable,
+       renovation, under construction, vacant-down), `non_revenue` (model,
+       admin, employee, office, corporate, storage), `notice`, `vacant` or
+       `occupied`; down is tested first, and "Renovated" is not down. A Yardi
+       lease-charges export marks them in the resident / name columns
+       (DOWN, MODEL, ADMIN, OFFLINE). The parse and the ingest evidence record
+       `status_counts`, the down units (id, cohort, status, market rent) and
+       `physical_vacancy_rate_excluding_down`; the reconciliation records the
+       classification. The gate's counts are unchanged (a down unit is not
+       occupied, as before), so it ties whether the export's Summary Groups
+       count a down unit under "Total Non Rev Units" (the vacant check already
+       allows that many) or "Total Vacant Units". Yardi does not document
+       which: the summary depends on how the property's unit statuses are set
+       up, so the synthetic fixture exercises both.
+    2. **Vacancy.** Without a house box score, the modeled down units are
+       the offline units of `stabilization_exclusions` (decision o;
+       `offline_source: rent_roll.down_units`; `OFFLINE_STATUSES` gains
+       Uninhabitable and Vacant Down): they come out of the trailing vacancy
+       before the asset-vs-market gap unless the T12 books them on a line of
+       their own. The year-1 vacancy start excludes them too (the rent
+       roll's vacant units less the down ones, over the units less the down
+       ones), because they are offline in the restoration schedule; counting
+       them vacant as well would charge them twice.
+    3. **Scope and cost.** Scopes `make_ready`, `heavy_repair`, `full_gut`
+       (`DOWN_UNIT_SCOPES`). The house default is `heavy_repair`
+       (`HOUSE_DOWN_UNIT_DEFAULT_SCOPE`, source `house:down_unit_scope`,
+       always flagged): a rent roll says a unit is down, never how much work
+       it needs; a turn would usually have been done already, and a gut is
+       the exception. The analyst sets the scope for every down unit
+       (`down_unit_scope`) or per unit (`capital_plan.down_unit_restoration.
+       units[].scope`, or `down_unit_scopes` at ingest). Cost precedence per
+       unit: a PCA (`capital_plan.pca.down_unit_costs`, `deal:pca`) > an
+       analyst cost > the house cost by scope x vintage
+       (`default_down_unit_cost_per_unit`, `house:down_unit_cost`):
+
+       | Scope | House cost per unit (2026 $) | Sources and uncertainty |
+       |---|---|---|
+       | make_ready | the vintage turn band high end (`turn_high`, $2,000-$6,500) | Zego / Multifamily Dive: a turnover costs about $3,900 all-in, about $775 of it unit repairs; an NAA manager survey: 54% put total turn cost at $1,500-$3,500. A down unit needs more than an average turn. |
+       | heavy_repair | $20,000 x vintage factor | The $15,000-$25,000 "deep" value-add interior tier practitioners quote (no primary survey); Kidder Mathews (REBusinessOnline): a typical full-unit remodel on an older building about $15,000; Zonda Cost vs. Value 2024 midrange minor kitchen $27,492 and bath $25,251 (single-family scale, an upper reference). |
+       | full_gut | $45,000 x vintage factor | No primary source prices an apartment gutted to the studs. Fire / water reconstruction guides: roughly $25-$60 per sq ft before systems, so about $42,500 for an 850 sq ft unit at $50; Cost vs. Value kitchen + bath $52,743 as an upper reference. High uncertainty: replace with an adjuster's estimate, a PCA or bids. |
+
+       Vintage factor (`HOUSE_DOWN_UNIT_VINTAGE_COST_FACTORS`, house judgment):
+       1.20 for the 1960s-1970s (the EPA lead renovation rule covers pre-1978
+       housing, 40 CFR 745 subpart E; asbestos surveys before demolition under
+       the NESHAP, 40 CFR 61 subpart M; galvanized plumbing and old wiring
+       once walls are open), 1.00 for the 1980s-1990s, 0.90 from 2000, and
+       1.20 when the vintage is unknown (flagged).
+    4. **Schedule** (`house:down_unit_schedule`, every value overridable):
+       start lag 0 / 1 / 3 months and duration 1 / 2 / 4 months for
+       make_ready / heavy_repair / full_gut (`HOUSE_DOWN_UNIT_START_LAG_MONTHS`,
+       `HOUSE_DOWN_UNIT_DURATION_MONTHS`: scoping and bids, plus design and
+       permits for a gut, where published first-review times for multifamily
+       alterations run two to eight weeks before corrections; vendor
+       benchmarks put a heavy turn at 10-21 days); a crew starts at most
+       `HOUSE_DOWN_UNIT_PACE_UNITS_PER_MONTH` (4) units a month (units in
+       order of their earliest start); a restored unit is marketed for
+       `HOUSE_DOWN_UNIT_MONTHS_TO_LEASE` (1) month and earns rent from the
+       month after. Until then it is offline: no rent, out of gross potential
+       rent and of the per-unit revenue programs. It then leases at its
+       cohort's market rent (a restored cohort with no loss to lease on the
+       new lease; `rent_premium_monthly` only when the analyst sets it) and
+       follows the cohort's vacancy curve.
+    5. **Budget.** Its own capital-plan line, "Down-unit restoration"
+       (`capital_plan.down_unit_restoration`), separate from bucket 1 and from
+       the value-add renovation budget: renovation programs draw only on the
+       rentable units (`rentable_cohorts`, in the engine and in backsolve's
+       renovation budget), so no unit is budgeted twice. Each unit's cost is
+       spread evenly over its work months (cents exact, so the months sum to
+       the budget; no S-curve). It is funded at close (`down_unit_funding`,
+       `house:down_unit_funding`: `equity_at_close`, the value-add renovation
+       convention, or `lender_holdback`), never in operating cash flow:
+       `results.capital_plan.down_unit_restoration` (amount, funding, units,
+       bases, schedule, by analysis year), `results.down_unit_restoration`
+       (the unit schedule, by month and year, the rent lost) and
+       `down_unit_restoration_capex` on the monthly and annual cash flow.
+       The engine adds it to the Day-0 bases (equity at close: equity and
+       unlevered; holdback: unlevered) less `amount_in_stated_basis`.
+    6. **Pricing.** Backsolve adds the budget to the total equity basis at
+       every candidate price (a holdback upsizes the loan instead) and states
+       it in `amount_in_stated_basis`, so the engine adds nothing more. The
+       CoC basis is unchanged: a stabilized deal's year-1 cash-on-cash carries
+       both the reserve and the rent the units lose until restored (disclosed
+       as `coc_note`); a value-add deal's first stabilized year carries the
+       reserve. The entry-anchored exit cap adds the down units' year-1 lost
+       rent back to its anchor NOI, so a temporary, capital-driven hole in
+       year-1 NOI does not compress the exit cap.
+    7. **Why a dedicated module.** `engine/modules/down_units.py`, not a
+       generated renovation program: a program spends a unit's cost in one
+       month, takes days of downtime from an occupied unit's rent, moves
+       units by turnover or pace from the start month, and is funded through
+       the value-add renovation budget. A down unit is offline from day one,
+       waits for a start lag, is worked over months, then leases up; and its
+       budget must stay apart from the renovation budget.
+
+    Register entries (present only when the roll shows down units):
+    `down_units` (count, `deal:rent_roll`, with the counts by status and the
+    ids; an override models fewer, 0 models none), `down_unit_scope`,
+    `down_unit_cost_per_unit` (with the per-unit cost table and the total
+    budget), `down_unit_start_lag_months`, `down_unit_duration_months`,
+    `down_unit_pace_per_month`, `down_unit_months_to_lease`,
+    `down_unit_funding`. `describe_deal` takes `down_unit_scope`,
+    `down_unit_cost_per_unit`, `down_unit_pace_per_month` and
+    `down_unit_funding` (ignored, with the intake flag
+    `down_unit_inputs_ignored_no_down_units`, when the roll has none).
+
+    No library deal and not the sample deal has down units, so their values
+    and prices are unchanged. On synthetic variants with six occupied units
+    marked Down: deal a's budget is $120,000 and its solved price falls
+    $28,024,900.49 -> $27,645,077.07 (as full guts, $270,000 and
+    $27,151,273.00); deal c's budget is $144,000, price $13,566,209.46 ->
+    $13,447,537.39. Open: those variants' T12s do not carry the down units,
+    so taking today's down share out of the trailing vacancy earns a
+    below-market credit (deal a's stabilized vacancy 5.5% -> 4.0%, raised to
+    the 5.0% vintage floor in pricing). The rent roll says which units are
+    down today, not for how long; a guard that offline units can only remove
+    vacancy above the market (never earn a credit below it) would apply to
+    the box-score path too, so it belongs with decision (o).
 
 Three decisions on deferred maintenance and PCA evidence:
 
