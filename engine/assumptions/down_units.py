@@ -534,8 +534,14 @@ def offline_status_counts(ctx: Any) -> dict[str, int]:
     roll (``{}`` without modeled down units): the vacancy build's offline
     statuses (``vacancy.OFFLINE_STATUSES``) then take the down units out of
     the trailing vacancy before it is compared with the market, unless the
-    T12 books them on a line of its own. Today's down share stands in for the
-    trailing year's, as for a box score.
+    T12 books them on a non-zero line of its own. Today's down share stands in
+    for the trailing year's, as for a box score, and the exclusion never takes
+    the asset below the market comparator (``vacancy.asset_vs_market``).
+
+    Model, admin, employee and office units are left out on purpose: they are
+    non-revenue by the operator's choice, not a capital problem, so the
+    rent-roll path never counts them offline (a house box score that lists
+    them keeps its own treatment).
     """
     units = modeled_units(ctx.canonical)
     if not units:

@@ -77,13 +77,25 @@ Assumption layer (ADR 0003):
       --immediate-capex-funding equity_at_close --recurring-capex-per-unit 1500
 
     --pca takes a JSON object {"immediate_capex": dollars,
-    "recurring_capex_per_unit": dollars per unit per year, "as_of": "YYYY-MM-DD",
-    "reference": "..."} (deal evidence, source deal:pca). The precedence is
+    "recurring_capex_per_unit": dollars per unit per year, "down_unit_costs":
+    {unit id: dollars}, "as_of": "YYYY-MM-DD", "reference": "..."} (deal
+    evidence, source deal:pca). The precedence is
     PCA > analyst > house vintage band: --immediate-capex and
     --recurring-capex-per-unit are analyst figures, used for a bucket the PCA
     does not cover. --deferred-maintenance sets deal_profile.deferred_maintenance
     (recurring capex defaults to the high end of the vintage band). The charge
     below NOI is max(recurring capex, the $250/unit replacement reserve).
+
+    Down units on the rent roll (ADR 0003 decision q) are restored on a
+    construction schedule, their own capital-plan line:
+    python runs/ingest_deal.py ... --down-unit-scope full_gut \
+      --down-unit-cost-per-unit 42000 --down-unit-pace 2 \
+      --down-unit-funding equity_at_close --down-unit-scopes '{"203": "make_ready"}'
+
+    --down-unit-scopes takes a JSON object {unit id: scope} inline or as a file
+    path. The flags are ignored, and the intake flag
+    down_unit_inputs_ignored_no_down_units says so, when the roll shows no
+    down units.
 
     Market data (rent-growth forecast, stabilized vacancy, concession rate,
     market cap rate) comes from engine.market_data.default_registry(); pass
@@ -138,11 +150,12 @@ from engine.ingest.ingestion_pipeline import (
     analyst_property_tax_policy,
     apply_analyst_property_tax_policy,
     apply_capital_plan_inputs,
+    apply_down_unit_inputs,
     build_deal_from_documents,
     clean_pca,
     sync_ingest_gate_assumptions,
 )
-from engine.underwriting_policy import IMMEDIATE_CAPEX_FUNDING_MODES
+from engine.underwriting_policy import DOWN_UNIT_FUNDING_MODES, DOWN_UNIT_SCOPES, IMMEDIATE_CAPEX_FUNDING_MODES
 from engine.validator import PROPERTY_TAX_MILLAGE_MISSING
 
 
@@ -164,6 +177,8 @@ _PROFILE_FLAGS = (
     "deal_type", "msa", "submarket", "metro_slug", "year_built", "asset_class", "star_tier", "deferred_maintenance",
 )
 _CAPITAL_PLAN_FLAGS = ("pca", "immediate_capex", "immediate_capex_funding", "recurring_capex_per_unit")
+_DOWN_UNIT_FLAGS = ("down_unit_scope", "down_unit_cost_per_unit", "down_unit_pace", "down_unit_funding",
+                    "down_unit_scopes")
 MILLAGE_SOURCE_LOCATOR = "cli:--millage"
 MILLAGE_AND_RATIO_SOURCE_LOCATOR = "cli:--millage,--assessment-ratio"
 
@@ -198,6 +213,31 @@ def _profile_from_args(
 
 def _capital_plan_flags_given(args: argparse.Namespace) -> bool:
     return any(getattr(args, name) is not None for name in _CAPITAL_PLAN_FLAGS)
+
+
+def _down_unit_kwargs(args: argparse.Namespace) -> dict:
+    """``down_unit_inputs`` and ``down_unit_scopes`` from the down-unit flags. Raises ValueError."""
+    inputs = {
+        field: getattr(args, name) for name, field in (
+            ("down_unit_scope", "scope"), ("down_unit_cost_per_unit", "cost_per_unit"),
+            ("down_unit_pace", "pace_units_per_month"), ("down_unit_funding", "funding"),
+        ) if getattr(args, name) is not None
+    }
+    scopes = None
+    if args.down_unit_scopes is not None:
+        text = args.down_unit_scopes.strip()
+        try:
+            scopes = json.loads(text) if text.startswith("{") else _load_json(Path(text))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"--down-unit-scopes must be a JSON object or a JSON file: {exc}") from None
+        if not isinstance(scopes, dict):
+            raise ValueError("--down-unit-scopes must be a JSON object {unit id: scope}")
+        scopes = {str(k): v for k, v in scopes.items()}
+    return {"down_unit_inputs": inputs or None, "down_unit_scopes": scopes}
+
+
+def _down_unit_flags_given(args: argparse.Namespace) -> bool:
+    return any(getattr(args, name) is not None for name in _DOWN_UNIT_FLAGS)
 
 
 def _load_pca(args: argparse.Namespace) -> dict | None:
@@ -272,12 +312,25 @@ def _capital_plan_lines(entries: dict) -> list[str]:
     binds = ""
     if isinstance(recurring, (int, float)) and isinstance(reserve, (int, float)):
         binds = " -> recurring capex binds" if recurring > reserve else " -> replacement reserve binds"
-    return [
+    lines = [
         "  Capital plan (charge below NOI = max(recurring capex, reserve)):",
         f"    1. Immediate capex at close: {show('immediate_capex', '')}",
         f"    2. Recurring capex (year 1): {show('recurring_capex_per_unit', '/unit/yr')}",
         f"    3. Replacement reserve:      {show('replacement_reserve_per_unit', '/unit/yr')}{binds}",
     ]
+    if "down_units" in entries:
+        cost = entries.get("down_unit_cost_per_unit") or {}
+        budget = (cost.get("detail") or {}).get("total_budget")
+        scope = (entries.get("down_unit_scope") or {}).get("value")
+        funding = (entries.get("down_unit_funding") or {}).get("value")
+        flag = " REVIEW" if any((entries.get(k) or {}).get("review_required")
+                               for k in entries if k.startswith("down_unit")) else ""
+        lines.append(
+            f"    Down-unit restoration (separate line): {entries['down_units'].get('value')} units, {scope}, "
+            + (f"${budget:,.0f} budget, " if isinstance(budget, (int, float)) else "")
+            + f"{funding}{flag}"
+        )
+    return lines
 
 
 def _rent_roll_reconciliation_lines(recon: object) -> list[str]:
@@ -454,7 +507,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "recurring capex defaults to the high end of the vintage band.")
     p.add_argument("--pca", type=Path, default=None, metavar="PATH",
                    help='Property condition assessment evidence: a JSON object {"immediate_capex": $, '
-                        '"recurring_capex_per_unit": $/unit/yr, "as_of", "reference"} (source deal:pca).')
+                        '"recurring_capex_per_unit": $/unit/yr, "down_unit_costs": {unit id: $}, "as_of", '
+                        '"reference"} (source deal:pca).')
     p.add_argument("--immediate-capex", type=float, default=None, metavar="DOLLARS",
                    help="Bucket 1: immediate / deferred capex at close, total dollars (analyst figure; "
                         "the PCA immediate needs win when given).")
@@ -463,6 +517,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--recurring-capex-per-unit", type=float, default=None, metavar="DOLLARS",
                    help="Bucket 2: recurring capex per unit per year, year 1 (analyst figure; the PCA "
                         "figure wins when given). The charge below NOI is max(this, the replacement reserve).")
+    # Down units: a capital project with a schedule (ADR 0003 decision q)
+    p.add_argument("--down-unit-scope", default=None, choices=list(DOWN_UNIT_SCOPES),
+                   help="Scope of every down unit on the rent roll (house default heavy_repair, flagged).")
+    p.add_argument("--down-unit-cost-per-unit", type=float, default=None, metavar="DOLLARS",
+                   help="Restoration cost per down unit (analyst figure; a PCA down_unit_costs entry wins).")
+    p.add_argument("--down-unit-pace", type=int, default=None, metavar="UNITS",
+                   help="Down units the crew starts per month (house default 4).")
+    p.add_argument("--down-unit-funding", default=None, choices=list(DOWN_UNIT_FUNDING_MODES),
+                   help="How the restoration budget is funded: equity_at_close (default) or lender_holdback.")
+    p.add_argument("--down-unit-scopes", default=None, metavar="JSON",
+                   help='Per-unit scopes: a JSON object {"unit id": "make_ready" | "heavy_repair" | '
+                        '"full_gut"} inline, or a path to a JSON file.')
     p.add_argument("--no-market-data", action="store_true",
                    help="Resolve assumptions without market data. By default the market-data "
                         "registry (engine.market_data.default_registry) is used; missing feeder "
@@ -561,9 +627,14 @@ def main() -> int:
         om_source_locator = None
         if analyst_tax_policy is not None:
             apply_analyst_property_tax_policy(result, analyst_tax_policy)
-        if assumption_overrides is not None or _profile_flags_given(args) or _capital_plan_flags_given(args):
+        if (assumption_overrides is not None or _profile_flags_given(args) or _capital_plan_flags_given(args)
+                or _down_unit_flags_given(args)):
             try:
                 capital_overrides = apply_capital_plan_inputs(result, **_capital_plan_kwargs(args, pca_evidence))
+                down = _down_unit_kwargs(args)
+                capital_overrides.update(
+                    apply_down_unit_inputs(result, down["down_unit_inputs"], down["down_unit_scopes"],
+                                           note_prefix="cli"))
                 result = resolve_assumptions(
                     result,
                     deal_profile=(
@@ -641,6 +712,9 @@ def main() -> int:
             _profile_from_args(args)
             normalize_overrides(assumption_overrides)
             apply_capital_plan_inputs({}, **_capital_plan_kwargs(args, pca_evidence))  # validate only
+            down_unit_kwargs = _down_unit_kwargs(args)
+            apply_down_unit_inputs({"metadata": {}}, down_unit_kwargs["down_unit_inputs"],
+                                   down_unit_kwargs["down_unit_scopes"])  # validate only
             market_vacancy_benchmark = _market_vacancy_benchmark(args)
         except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -684,6 +758,7 @@ def main() -> int:
             market=market,
             deferred_maintenance=bool(args.deferred_maintenance),
             **_capital_plan_kwargs(args, pca_evidence),
+            **down_unit_kwargs,
             property_tax_millage=args.millage,
             property_tax_assessment_ratio=args.assessment_ratio,
             property_tax_source_locator=(
