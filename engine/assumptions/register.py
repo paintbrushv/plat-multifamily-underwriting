@@ -90,6 +90,7 @@ _GROUP_BY_KEY: dict[str, str] = {
 }
 _GROUP_BY_PREFIX: tuple[tuple[str, str], ...] = (
     ("opex.", GROUP_OPEX),
+    ("down_unit", GROUP_CAPITAL),
     ("capex.", GROUP_CAPITAL),
     ("reserve", GROUP_CAPITAL),
     ("replacement_reserve", GROUP_CAPITAL),
@@ -163,6 +164,14 @@ _LABELS: dict[str, str] = {
     "partnership_closing_costs": "Partnership closing costs",
     "purchase_closing_cost_pct": "Purchase closing costs",
     "loan_closing_costs": "Loan closing costs",
+    "down_units": "Down-unit restoration: down units modeled",
+    "down_unit_scope": "Down-unit restoration: scope (make-ready, heavy repair, full gut)",
+    "down_unit_cost_per_unit": "Down-unit restoration: cost per unit",
+    "down_unit_start_lag_months": "Down-unit restoration: start lag (months)",
+    "down_unit_duration_months": "Down-unit restoration: construction duration (months)",
+    "down_unit_pace_per_month": "Down-unit restoration: crew pace (units started per month)",
+    "down_unit_months_to_lease": "Down-unit restoration: months to lease after completion",
+    "down_unit_funding": "Down-unit restoration: funding",
 }
 _OPEX_PART_LABELS = {"base": "base (year 1)", "growth": "growth"}
 _WORD_LABELS = {"pct": "%", "r": "R", "and": "&", "m": "M", "yoy": "YoY", "egr": "EGR", "ltl": "LTL",
@@ -210,6 +219,10 @@ _UNIT_LABELS: dict[str, str] = {
     "usd_per_unit_year": "$ per unit a year",
     "usd_per_unit_month": "$ per unit a month",
     "usd_per_turn": "$ per turn",
+    "usd_per_unit": "$ per unit",
+    "units": "units",
+    "units_per_month": "units a month",
+    "months": "months",
 }
 
 
@@ -762,6 +775,7 @@ def capital_plan_summary(entries: Mapping[str, Any]) -> Optional[dict[str, Any]]
             "review_required": bool(entry.get("review_required")) if entry else False,
         })
     growth = entries.get("recurring_capex_growth")
+    down_units = down_unit_summary(entries)
     recurring = _number(buckets[1]["value"])
     reserve = _number(buckets[2]["value"])
     binding = None
@@ -774,6 +788,42 @@ def capital_plan_summary(entries: Mapping[str, Any]) -> Optional[dict[str, Any]]
         "recurring_capex_growth": _jsonable(growth.get("value")) if isinstance(growth, Mapping) else None,
         "binding_year_1": binding,
         "charge_year_1_per_unit": max(recurring, reserve) if binding else None,
+        **({"down_unit_restoration": down_units} if down_units else {}),
+    }
+
+
+DOWN_UNIT_NOTE = (
+    "Its own capital-plan line, separate from immediate capex (bucket 1) and from the value-add renovation "
+    "budget: funded at close and spent as the units are worked; the units earn no rent until restored and leased."
+)
+
+
+def down_unit_summary(entries: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """The down-unit restoration line beside the three buckets, or None without down units."""
+    count = entries.get("down_units")
+    if not isinstance(count, Mapping):
+        return None
+
+    def value(key: str) -> Any:
+        entry = entries.get(key)
+        return _jsonable(entry.get("value")) if isinstance(entry, Mapping) else None
+
+    cost = entries.get("down_unit_cost_per_unit")
+    detail = cost.get("detail") if isinstance(cost, Mapping) and isinstance(cost.get("detail"), Mapping) else {}
+    keys = [key for key in entries if str(key).startswith("down_unit")]
+    return {
+        "label": "Down-unit restoration",
+        "units": value("down_units"),
+        "scope": value("down_unit_scope"),
+        "cost_per_unit": value("down_unit_cost_per_unit"),
+        "total_budget": _jsonable(detail.get("total_budget")),
+        "start_lag_months": value("down_unit_start_lag_months"),
+        "duration_months": value("down_unit_duration_months"),
+        "pace_units_per_month": value("down_unit_pace_per_month"),
+        "months_to_lease": value("down_unit_months_to_lease"),
+        "funding": value("down_unit_funding"),
+        "review_required": any(bool((entries.get(k) or {}).get("review_required")) for k in keys),
+        "note": DOWN_UNIT_NOTE,
     }
 
 

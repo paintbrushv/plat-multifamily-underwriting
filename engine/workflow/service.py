@@ -701,6 +701,13 @@ def _ingest_kwargs(ws: Workspace, manifest: Mapping[str, Any], market: Any) -> d
         "immediate_capex": p.get("immediate_capex"),
         "immediate_capex_funding": p.get("immediate_capex_funding"),
         "recurring_capex_per_unit": p.get("recurring_capex_per_unit"),
+        # Down units (ADR 0003 decision q): ignored, and flagged, when the rent roll has none.
+        "down_unit_inputs": {
+            field: p.get(name) for name, field in (
+                ("down_unit_scope", "scope"), ("down_unit_cost_per_unit", "cost_per_unit"),
+                ("down_unit_pace_per_month", "pace_units_per_month"), ("down_unit_funding", "funding"),
+            ) if p.get(name) is not None
+        } or None,
         "property_tax_millage": p.get("millage"),
         "property_tax_assessment_ratio": p.get("assessment_ratio"),
         "property_tax_source_locator": "describe_deal:millage",

@@ -288,6 +288,8 @@ def parse_rent_roll(
             cohort_dict["target_monthly_rent_source"] = "missing"
             blockers.append(f"target_monthly_rent_missing_for_cohort_{cohort_id}")
         unit_cohorts.append(cohort_dict)
+        for unit_row in units:
+            unit_row["_cohort_id"] = cohort_id
         # Export the same non-zero market-rent average used by
         # target_monthly_rent.  Vacant rows often carry blank/$0 market-rent
         # placeholders; including those zeros dilutes the engine's
@@ -316,6 +318,7 @@ def parse_rent_roll(
     if bed_bath_inference:
         flags.append("bed_bath_inferred_from_floorplan_letter_code")
 
+    classification = classify_units(rows)
     result = {
         "unit_cohorts": unit_cohorts,
         "physical_vacancy_rate": round(vacancy_rate, 4),
@@ -325,7 +328,16 @@ def parse_rent_roll(
         "cohort_id_provenance": cohort_id_provenance,
         "export_summary": meta.get("export_summary"),
         "reconciliation": reconcile_rent_roll(rows, meta.get("export_summary")),
+        "status_counts": classification["counts"],
+        "down_units": classification["down_units"],
+        "non_revenue_units": classification["non_revenue_unit_ids"],
     }
+    down = len(classification["down_units"])
+    if down and total > down:
+        # The vacancy of the units that can be leased today: down units are a
+        # capital project (restored on a schedule), not vacancy.
+        down_vacant = sum(1 for unit in classification["down_units"] if unit["vacant"])
+        result["physical_vacancy_rate_excluding_down"] = round((vacant - down_vacant) / (total - down), 4)
     if meta.get("layout"):
         result["layout"] = meta["layout"]
     if meta.get("pre_leased_vacant_units"):
@@ -399,7 +411,84 @@ def reconcile_rent_roll(
         else "PASS" if core == {"PASS"}
         else "UNVERIFIED"
     )
+    classification = classify_units(rows)
+    result["status_classification"] = {
+        "counts": classification["counts"],
+        "down_unit_ids": [unit["unit"] for unit in classification["down_units"]],
+        "non_revenue_unit_ids": classification["non_revenue_unit_ids"],
+        "note": STATUS_CLASSIFICATION_NOTE,
+    }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Unit status classes (ADR 0003 decision q, UPL-110).
+#
+# Every unit is one of: ``down`` (down, offline, uninhabitable, under
+# renovation, "vacant-down": a capital project, restored on a schedule),
+# ``non_revenue`` (model, admin, employee, office, corporate, storage),
+# ``notice``, ``vacant`` or ``occupied``. Down is tested first, so
+# "Vacant-Down" is down, and "Renovation" means a unit under renovation while
+# "Renovated" (a finished unit) is not down. The classes are disclosure: the
+# vacancy and reconciliation counts keep ``_is_occupied``, so the gate still
+# ties to the export's own summary.
+# ---------------------------------------------------------------------------
+
+UNIT_STATUS_CLASSES = ("occupied", "notice", "vacant", "down", "non_revenue")
+_DOWN_STATUS = re.compile(
+    r"\b(down|off[\s-]?line|uninhabitable|renovation|under\s+construction|construction|"
+    r"fire|flood|damaged|unrentable)\b"
+)
+_NON_REVENUE_STATUS = re.compile(
+    r"\b(model|admin|administrative|employee|staff|office|corporate|storage|non[\s-]?rev(?:enue)?|nonrev)\b"
+)
+_NOTICE_STATUS = re.compile(r"\b(notice|ntv|on\s+notice)\b")
+_VACANT_STATUS = re.compile(r"\b(vacant|vacancy|unknown|available|excluded)\b")
+STATUS_CLASSIFICATION_NOTE = (
+    "Units are classed down, non_revenue, notice, vacant or occupied from the status (or, in a Yardi lease "
+    "charges export, the resident / name marker). A down unit counts as not occupied here, as the parser always "
+    "has, so the vacant-unit check ties whether the export's Summary Groups count it under Total Non Rev Units "
+    "(the check allows that many) or Total Vacant Units. Yardi does not document which, and properties set it "
+    "up both ways; the down units are restored on a schedule in the capital plan, not carried as vacancy."
+)
+
+
+def classify_unit_status(status: Any) -> str:
+    """The status class of a rent-roll status string (``UNIT_STATUS_CLASSES``)."""
+    text = " ".join(str(status if status is not None else "").strip().lower().replace("_", " ").split())
+    if text in ("", "0"):
+        return "vacant"
+    if _DOWN_STATUS.search(text.replace("-", " ")) or "off-line" in text:
+        return "down"
+    if _NON_REVENUE_STATUS.search(text):
+        return "non_revenue"
+    if _NOTICE_STATUS.search(text.replace("-", " ")):
+        return "notice"
+    if _VACANT_STATUS.search(text.replace("-", " ")):
+        return "vacant"
+    return "occupied"
+
+
+def classify_units(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-class unit counts, the down units and the non-revenue unit ids."""
+    counts = {name: 0 for name in UNIT_STATUS_CLASSES}
+    down_units: list[dict[str, Any]] = []
+    non_revenue: list[str] = []
+    for index, row in enumerate(rows):
+        status_class = classify_unit_status(row.get("status"))
+        counts[status_class] += 1
+        unit_id = str(row.get("unit") or f"row_{index + 1}")
+        if status_class == "down":
+            down_units.append({
+                "unit": unit_id,
+                "cohort_id": row.get("_cohort_id"),
+                "status": row.get("status"),
+                "market_rent": float(row.get("market_rent") or 0.0),
+                "vacant": not _is_occupied(row),
+            })
+        elif status_class == "non_revenue":
+            non_revenue.append(unit_id)
+    return {"counts": counts, "down_units": down_units, "non_revenue_unit_ids": non_revenue}
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +890,7 @@ def _parse_excel_rows(
 # Charge codes that are the unit's contract rent; every other code (pest,
 # trash, cable, parking, employee discount, ...) is not rent.
 RENT_CHARGE_CODES = frozenset({"rent", "rnt"})
-_NON_REVENUE_RESIDENT_MARKERS = ("model", "down", "admin")
+_NON_REVENUE_RESIDENT_MARKERS = ("model", "down", "admin", "offline")
 
 
 def _is_lease_charges_layout(headers: list[str]) -> bool:
@@ -1419,7 +1508,16 @@ def _normalize_row(raw: dict) -> dict:
         "unit_type": str(unit_type_val or "").strip(),
         "beds": beds_int,
         "baths": _to_float(baths_val) or 1.0,
+        "unit": _unit_label(_get_unit_value(raw)),
     }
+
+
+def _unit_label(value: Any) -> str | None:
+    """A unit id as text (``101`` for an Excel 101.0), or None."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    text = str(value if value is not None else "").strip()
+    return text or None
 
 
 def _to_float(v: Any) -> float | None:

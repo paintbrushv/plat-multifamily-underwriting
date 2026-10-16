@@ -191,6 +191,32 @@ SOURCE_RATIONALES: dict[str, str] = {
         "at their stabilized levels, expense growth), but only the sale price uses it; the hold's cash flows "
         "still end at the sale. The analyst can value the exit on the trailing year instead."
     ),
+    "house:down_unit_scope": (
+        "A down unit is off the market because something is wrong with it, and the rent roll never says how much "
+        "work it needs. If a turn were enough the operator would usually have turned it, while a full gut is the "
+        "exception (fire, flood, mold), so until someone walks the units the house assumes the middle: a heavy "
+        "repair. The entry is always flagged: classify each unit as a make-ready, heavy repair or full gut, for "
+        "all down units at once or unit by unit."
+    ),
+    "house:down_unit_cost": (
+        "There is no published survey of what it costs to bring a down unit back, so the house prices each scope "
+        "from the closest public benchmarks (turn costs for a make-ready, deep value-add interior programs for a "
+        "heavy repair, fire and water reconstruction costs for a full gut) and raises it for older buildings, "
+        "where lead paint, asbestos and old plumbing and wiring surface once the walls are open. A property "
+        "condition assessment or the analyst's own cost for a unit replaces it."
+    ),
+    "house:down_unit_schedule": (
+        "Restoring down units takes time, and the units earn nothing until they are done and leased, so the "
+        "budget is timed with a likely construction schedule: a wait before work starts (scoping and bids, plus "
+        "design and permits for a full gut), a construction period by scope, a crew that can only start so many "
+        "units a month, and a month to lease each restored unit. The rent lost while they are offline is in the "
+        "cash flow; each figure can be changed."
+    ),
+    "house:down_unit_funding": (
+        "The money to restore the down units has to be there at closing, so the house reserves it with equity "
+        "at close, the same way it funds a value-add renovation budget: it is part of the equity the price is "
+        "tested against and never comes out of operating cash flow. A lender holdback can fund it instead."
+    ),
     "house:deferred_capex": (
         "Without a property condition assessment or an analyst budget there is no evidence of what must "
         "be fixed at closing, so nothing is budgeted at close and the entry is flagged. Inspect the asset "

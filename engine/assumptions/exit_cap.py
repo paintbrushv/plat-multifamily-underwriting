@@ -95,6 +95,10 @@ def preview_noi(
 ) -> dict[str, Optional[Decimal]]:
     """``{"year_1": analysis-year-1 NOI, "projected": the second cashflow year's NOI, ...}``.
 
+    ``year_1`` adds back the market rent the down units lose in year 1
+    (``year_1_down_unit_loss``; 0 without down units): it is the NOI the exit
+    cap is anchored to.
+
     ``projected_capex_charge`` and ``projected_lender_reserve`` are that
     year's below-NOI capex charge and lender reserve (the deductions the loan
     sizing NOI basis takes, ``engine/modules/loan_sizing.py``).
@@ -117,8 +121,15 @@ def preview_noi(
     by_year = results["cashflow"]["by_year"]
     projected = by_year[1] if len(by_year) >= 2 else (by_year[0] if by_year else {})
     year_1 = ((results.get("metrics") or {}).get("noi") or {}).get("year_1_noi")
+    # Down units (ADR 0003 decision q) are offline in year 1 for a capital
+    # reason, not a market one: the going-in cap the exit is anchored to adds
+    # their lost market rent back, so a temporary hole in year-1 NOI never
+    # compresses the exit cap.
+    down = (results.get("down_unit_restoration") or {}).get("by_analysis_year") or []
+    down_loss = Decimal(str(down[0].get("down_unit_loss") or 0)) if down else Decimal("0")
     out = {
-        "year_1": Decimal(str(year_1)) if year_1 is not None else None,
+        "year_1": Decimal(str(year_1)) + down_loss if year_1 is not None else None,
+        "year_1_down_unit_loss": down_loss,
         "projected": Decimal(str(projected.get("net_operating_income", 0))),
         "projected_capex_charge": loan_sizing.below_noi_deduction(projected, loan_sizing.NCF_AFTER_CAPEX_CHARGE),
         "projected_lender_reserve": loan_sizing.below_noi_deduction(

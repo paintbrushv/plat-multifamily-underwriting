@@ -1,4 +1,4 @@
-"""Down units are a capital project with a schedule (ADR 0003 decision p, UPL-110).
+"""Down units are a capital project with a schedule (ADR 0003 decision q, UPL-110).
 
 A unit the rent roll shows as down (down, offline, uninhabitable, under
 renovation, "vacant-down") is not weak demand: it needs repair or renovation,
@@ -234,25 +234,45 @@ def _reresolved(roll_dir, *, t12_vacancy, overrides=None):
     return resolve_assumptions(deal, market=_registry(MARKET), overrides=overrides)
 
 
+def _build(deal):
+    return _entries(deal)["physical_vacancy"]["detail"]["vacancy_build"]
+
+
 def test_down_units_are_excluded_from_the_asset_vs_market_gap(roll_dir):
-    deal = _reresolved(roll_dir, t12_vacancy=0.30)
-    gap = _entries(deal)["physical_vacancy"]["detail"]["vacancy_build"]["asset_vs_market"]
-    down = gap["down_units"]
-    assert down["applied"] is True
-    assert down["units"] == 3
-    assert down["share"] == pytest.approx(0.25)
+    build = _build(_reresolved(roll_dir, t12_vacancy=0.30))
+    exclusions = build["stabilization_exclusions"]
+    # No box score: the rent roll's down units are the offline units of the vacancy build.
+    assert exclusions["offline_source"] == "rent_roll.down_units"
+    assert exclusions["offline_units"] == 3
+    assert exclusions["offline_share"] == pytest.approx(0.25)
+    assert exclusions["offline_applied"] is True
+    assert exclusions["notice_units"] == 1
+    gap = build["asset_vs_market"]
     # 30% T12 vacancy less 25% of units down = 5%, 1 point under the 6% market.
     assert gap["asset_vacancy"] == pytest.approx(0.30)
     assert gap["asset_vacancy_stabilized"] == pytest.approx(0.05)
     assert gap["gap"] == pytest.approx(-0.01)
-    assert "down" in gap["note"].lower()
+    assert "offline" in gap["note"]
+
+
+def test_a_t12_that_books_down_units_apart_is_not_reduced_twice(roll_dir):
+    deal = _ingested(roll_dir)
+    deal.pop("assumptions", None)
+    for row in deal["physical_vacancy_curve"]:
+        row["vacancy_rate"] = None
+    t12 = deal["metadata"]["ingest_gate"]["evidence"]["t12"]
+    t12["vacancy_loss"] = round(0.10 * t12["gross_potential_rent"], 2)
+    t12["non_revenue_loss"] = round(0.05 * t12["gross_potential_rent"], 2)
+    build = _build(resolve_assumptions(deal, market=_registry(MARKET)))
+    assert build["stabilization_exclusions"]["offline_applied"] is False
+    assert build["asset_vs_market"]["asset_vacancy_stabilized"] == pytest.approx(0.10)
 
 
 def test_without_modeled_down_units_the_gap_is_measured_as_before(roll_dir):
-    deal = _reresolved(roll_dir, t12_vacancy=0.30, overrides={"down_units": 0})
-    gap = _entries(deal)["physical_vacancy"]["detail"]["vacancy_build"]["asset_vs_market"]
-    assert gap["down_units"]["applied"] is False
-    assert gap["asset_vacancy_stabilized"] == pytest.approx(0.30)
+    build = _build(_reresolved(roll_dir, t12_vacancy=0.30, overrides={"down_units": 0}))
+    assert build["stabilization_exclusions"]["offline_source"] is None
+    assert build["stabilization_exclusions"]["offline_applied"] is False
+    assert build["asset_vs_market"]["asset_vacancy_stabilized"] == pytest.approx(0.30)
 
 
 def test_year_one_vacancy_starts_without_the_down_units(roll_dir):
@@ -479,7 +499,7 @@ def test_the_budget_is_funded_at_close_never_in_operating_cash_flow(minimal_deal
     assert sum(m["total_capex"] for m in results["cashflow"]["by_month"]) == 0
     shown = {m["month"]: m.get("down_unit_restoration_capex", 0) for m in results["cashflow"]["by_month"]}
     assert sum(shown.values()) == pytest.approx(BUDGET)
-    assert results["cashflow"]["by_year"][0]["down_unit_restoration_capex"] == pytest.approx(30_000.0)
+    assert results["cashflow"]["by_year"][0]["down_unit_restoration_capex"] == pytest.approx(77_500.0)  # calendar 2026
     line = results["capital_plan"]["down_unit_restoration"]
     assert line["label"] == "Down-unit restoration"
     assert (line["amount"], line["funding"], line["units"]) == (BUDGET, "equity_at_close", 3)
@@ -573,6 +593,22 @@ def test_backsolve_price_falls_and_the_equity_basis_carries_the_budget(tmp_path)
     summary = result["summary"]["capital_plan"]["down_unit_restoration"]
     assert summary["included_in_total_equity_basis"] is True
     assert "year-1" in summary["coc_note"].lower()
+
+
+def test_the_exit_cap_anchor_adds_back_the_down_units_lost_rent(tmp_path):
+    from decimal import Decimal
+
+    from engine.assumptions import exit_cap
+
+    canonical = _library_with_down_units(tmp_path, 6)
+    price = canonical["purchase_assumptions"]["purchase_price"]
+    preview = exit_cap.preview_noi(canonical, price)
+    results = run_underwriting(exit_cap.preview_case(canonical, price))
+    loss = Decimal(str(results["down_unit_restoration"]["by_analysis_year"][0]["down_unit_loss"]))
+    # A temporary, capital-driven hole in year-1 NOI must not compress the entry-anchored exit cap.
+    assert loss > 0 and preview["year_1_down_unit_loss"] == loss
+    assert preview["year_1"] == Decimal(str(results["metrics"]["noi"]["year_1_noi"])) + loss
+    assert "lost rent added back" in canonical["assumptions"]["entries"]["exit_cap_rate"]["basis"]
 
 
 def test_a_down_unit_holdback_upsizes_the_loan_instead_of_the_equity(tmp_path):

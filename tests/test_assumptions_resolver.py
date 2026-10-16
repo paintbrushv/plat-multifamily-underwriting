@@ -405,7 +405,10 @@ def test_override_validation():
         resolve_assumptions(deal, overrides={"turn_cost_per_unit": 4_000})
     with pytest.raises(ValueError, match="mode"):
         resolve_assumptions(deal, mode="stress")
-    assert set(ASSUMPTION_KEYS) == STABILIZED_KEYS | {"turn_cost_per_unit", "renovation_premium"}
+    # Keys for deals whose rent roll shows down units (ADR 0003 decision q) are registered too.
+    from engine.assumptions.down_units import KEYS as DOWN_UNIT_KEYS
+
+    assert set(ASSUMPTION_KEYS) == STABILIZED_KEYS | {"turn_cost_per_unit", "renovation_premium"} | set(DOWN_UNIT_KEYS)
 
 
 def test_input_is_not_mutated(minimal_deal_inputs):

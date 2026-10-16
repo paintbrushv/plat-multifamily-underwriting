@@ -165,7 +165,21 @@
         ]);
       })),
       h('p', { class: 'hint' }, [plan.rule || '', plan.charge_year_1_per_unit !== undefined ? ' Year-1 charge: ' +
-        core.usd(plan.charge_year_1_per_unit) + ' per unit.' : ''])
+        core.usd(plan.charge_year_1_per_unit) + ' per unit.' : '']),
+      downUnits(plan.down_unit_restoration)
+    ]);
+  }
+
+  // Down-unit restoration (ADR 0003 decision q): its own line, beside the three buckets.
+  function downUnits(d) {
+    if (!d) { return null; }
+    return h('div', { style: 'margin:8px 0 0' }, [
+      h('strong', {}, d.label || 'Down-unit restoration'), ': ',
+      h('span', { class: 'num' }, d.total_budget != null ? core.usd(d.total_budget) : '—'), ' ',
+      h('span', { class: 'small' }, (d.units || 0) + ' units, ' + (d.scope || '') + ', ' +
+        (d.cost_per_unit != null ? core.usd(d.cost_per_unit) + '/unit, ' : '') + (d.funding || '')),
+      d.review_required ? h('span', { class: 'badge flag-review' }, 'Needs review') : null,
+      h('div', { class: 'small muted' }, d.note || '')
     ]);
   }
 

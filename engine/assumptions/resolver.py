@@ -193,6 +193,9 @@ class _Spec:
     # first resolution (the capex buckets: PCA > analyst > house). The analyst
     # value is kept as a candidate. An explicit or later edit still wins.
     evidence_first: bool = False
+    # Applies only when the deal has down units (ADR 0003 decision q):
+    # rent-roll down units or a capital_plan.down_unit_restoration block.
+    down_units_only: bool = False
 
 
 # ── small helpers ────────────────────────────────────────────────────────
@@ -1292,6 +1295,8 @@ def entry_anchor(ctx: _Context, market: Optional[Mapping[str, Any]] = None) -> O
     if not price:
         return None
     noi, noi_basis = _exit_cap_module().year1_noi(ctx.canonical, price), "year-1 NOI"
+    if _down_units().modeled_units(ctx.canonical):
+        noi_basis = "year-1 NOI with the down units' lost rent added back"
     if noi is None:
         noi, noi_basis = _t12_noi(ctx), "trailing T12 NOI (the engine could not compute year-1 NOI)"
     record = _exit_cap_module().anchored_exit_cap(
@@ -1459,6 +1464,8 @@ EXIT_NOI_WINDOW_KEY = "exit_noi_window"
 CATEGORICAL_KEYS = {
     LOAN_SIZING_KEY: house.LOAN_SIZING_NOI_BASES,
     EXIT_NOI_WINDOW_KEY: house.EXIT_NOI_WINDOWS,
+    "down_unit_scope": house.DOWN_UNIT_SCOPES,
+    "down_unit_funding": house.DOWN_UNIT_FUNDING_MODES,
 }
 
 
@@ -1583,6 +1590,13 @@ def _adr_pick(spec: _Spec, candidates: list[dict[str, Any]]) -> Optional[dict[st
 # ── key registry ─────────────────────────────────────────────────────────
 
 
+def _down_units():
+    """ADR 0003 decision q: the down-unit keys live in engine/assumptions/down_units.py."""
+    from engine.assumptions import down_units
+
+    return down_units
+
+
 def _base_specs() -> tuple[_Spec, ...]:
     return (
         _Spec(
@@ -1693,6 +1707,8 @@ def _base_specs() -> tuple[_Spec, ...]:
             patch_paths=(("capital_plan", "immediate_capex"),),
             evidence_first=True,
         ),
+        # Down units: a capital project with a schedule (engine/assumptions/down_units.py).
+        *_down_units().specs(),
         _Spec(
             key="recurring_capex_per_unit",
             unit="usd_per_unit_year",
@@ -1833,9 +1849,11 @@ COHORT_OVERRIDE_KEYS = frozenset(spec.key for spec in _specs() if spec.cohort)
 CLEAR = "clear"
 
 
-def _specs_for(profile: DealProfile) -> tuple[_Spec, ...]:
+def _specs_for(profile: DealProfile, canonical: Optional[Mapping[str, Any]] = None) -> tuple[_Spec, ...]:
+    down = canonical is not None and _down_units().has_down_units(canonical)
     return tuple(
-        spec for spec in _specs() if not spec.value_add_only or profile.deal_type == "value_add"
+        spec for spec in _specs()
+        if (not spec.value_add_only or profile.deal_type == "value_add") and (not spec.down_units_only or down)
     )
 
 
@@ -1881,6 +1899,8 @@ def _normalize_override(key: str, raw: Any, *, note: str = "analyst override") -
     # a categorical key takes one of its named values.
     if key in CATEGORICAL_KEYS:
         value = _normalize_categorical(key, value)
+    elif key in _down_units().WHOLE or key == "down_unit_cost_per_unit":
+        value = _down_units().normalize_override(key, value)
     else:
         value = _curves().normalize_override_value(key, value)
     out: dict[str, Any] = {"value": value, "note": note}
@@ -1940,7 +1960,7 @@ def overrides_from_patch(
     profile = _profile_for(canonical, None)
     ctx = _context(deepcopy(dict(canonical)), profile, "underwrite", None)
     out: dict[str, dict[str, Any]] = {}
-    for spec in _specs_for(profile):
+    for spec in _specs_for(profile, ctx.canonical):
         if not any(_get_path(patch, path)[0] for path in spec.patch_paths):
             continue
         current = spec.read(ctx)
@@ -2288,7 +2308,7 @@ def resolve_assumptions(
     prior_entries = prior_section.get("entries") if isinstance(prior_section.get("entries"), Mapping) else {}
     ctx.prior_entries = prior_entries
 
-    specs = _specs_for(profile)
+    specs = _specs_for(profile, out)
     opex_slice = _opex_slice()
     inapplicable = sorted(
         key for key in set(explicit) - {spec.key for spec in specs} if not opex_slice.is_opex_key(key)
@@ -2304,6 +2324,9 @@ def resolve_assumptions(
     # insurance / R&M per-unit keys an opex base override moved); the
     # caller's own overrides win.
     explicit = {**opex_slice.prepare_opex_table(ctx, explicit), **explicit}
+    # ── ADR 0003 decision q hook: write the modeled down units (and a PCA's
+    # per-unit costs) before the vacancy keys read them ──
+    explicit = _down_units().prepare(ctx, explicit)
     entries: dict[str, Any] = {}
     for spec in specs:
         if spec.price_linked:
@@ -2330,6 +2353,8 @@ def resolve_assumptions(
     from engine.assumptions.guardrails import restore_pricing_labels
     restore_pricing_labels(entries, prior_entries)
     # ── end slice 6 hook ──
+    # ── ADR 0003 decision q hook: per-unit house values and the restoration budget ──
+    _down_units().finalize(ctx, entries)
 
     # No silent market fallback: say which provider had what, and append the
     # reason to every market-reading entry no provider supplied.

@@ -287,6 +287,9 @@ def build_deal_from_documents(
     immediate_capex: float | None = None,
     immediate_capex_funding: str | None = None,
     recurring_capex_per_unit: float | None = None,
+    # Down units (ADR 0003 decision q)
+    down_unit_inputs: Mapping[str, Any] | None = None,
+    down_unit_scopes: Mapping[str, str] | None = None,
     # Property tax (engine/property_tax.py)
     property_tax_millage: float | None = None,
     property_tax_assessment_ratio: float | None = None,
@@ -366,6 +369,16 @@ def build_deal_from_documents(
             ``engine.market_data.default_registry()``; ``None`` uses no market
             data. Missing feeder data falls through to deal evidence and house
             policy.
+        down_unit_inputs: Analyst inputs for the rent roll's down units
+            (ADR 0003 decision q): ``scope``, ``cost_per_unit``,
+            ``start_lag_months``, ``duration_months``, ``pace_units_per_month``,
+            ``months_to_lease``, ``funding`` (analyst overrides of the
+            ``down_unit_*`` keys) and ``rent_premium_monthly`` (canonical
+            field). Ignored, with the ``down_unit_inputs_ignored_no_down_units``
+            intake flag, when the rent roll has no down units.
+        down_unit_scopes: ``{unit_id: scope}`` for individual down units
+            (make_ready, heavy_repair, full_gut); the house prices and
+            schedules each by its own scope.
         property_tax_millage: Combined property-tax millage in mills per
             $1,000 of assessed value. Builds
             ``metadata.property_summary.property_tax_policy`` with source
@@ -721,6 +734,7 @@ def build_deal_from_documents(
         immediate_capex_funding=immediate_capex_funding,
         recurring_capex_per_unit=recurring_capex_per_unit,
     ))
+    overrides.update(apply_down_unit_inputs(deal, down_unit_inputs, down_unit_scopes))
     if asset_class is not None or star_tier is not None:
         profile = replace(profile, asset_class=asset_class, star_tier=star_tier)
     if market is DEFAULT_MARKET:
@@ -736,7 +750,67 @@ def build_deal_from_documents(
     return sync_ingest_gate_assumptions(deal)
 
 
-PCA_FIELDS = ("immediate_capex", "recurring_capex_per_unit", "as_of", "reference")
+PCA_FIELDS = ("immediate_capex", "recurring_capex_per_unit", "down_unit_costs", "as_of", "reference")
+
+# down_unit_inputs field -> the assumption key it overrides (ADR 0003 decision q).
+DOWN_UNIT_INPUT_KEYS = {
+    "scope": "down_unit_scope",
+    "cost_per_unit": "down_unit_cost_per_unit",
+    "start_lag_months": "down_unit_start_lag_months",
+    "duration_months": "down_unit_duration_months",
+    "pace_units_per_month": "down_unit_pace_per_month",
+    "months_to_lease": "down_unit_months_to_lease",
+    "funding": "down_unit_funding",
+}
+DOWN_UNIT_CANONICAL_FIELDS = ("rent_premium_monthly",)
+
+
+def apply_down_unit_inputs(
+    deal: dict[str, Any],
+    inputs: Mapping[str, Any] | None,
+    scopes: Mapping[str, str] | None,
+    *,
+    note_prefix: str = "ingest input",
+) -> dict[str, Any]:
+    """Put down-unit inputs on ``deal`` before resolution; return the overrides they imply.
+
+    Only a rent roll with down units takes them; otherwise they are ignored
+    and the intake flag ``down_unit_inputs_ignored_no_down_units`` says so.
+    Mutates ``deal``.
+    """
+    from engine.assumptions import down_units
+    from engine.underwriting_policy import DOWN_UNIT_SCOPES
+
+    inputs = {k: v for k, v in (inputs or {}).items() if v is not None}
+    scopes = dict(scopes or {})
+    unknown = sorted(set(inputs) - set(DOWN_UNIT_INPUT_KEYS) - set(DOWN_UNIT_CANONICAL_FIELDS))
+    if unknown:
+        raise ValueError(f"down-unit inputs have unknown fields {unknown}; known fields: "
+                         f"{sorted([*DOWN_UNIT_INPUT_KEYS, *DOWN_UNIT_CANONICAL_FIELDS])}")
+    for unit_id, scope in scopes.items():
+        if scope not in DOWN_UNIT_SCOPES:
+            raise ValueError(f"down unit {unit_id!r}: scope must be one of {DOWN_UNIT_SCOPES}")
+    if not inputs and not scopes:
+        return {}
+    block = down_units._ensure_block(deal)
+    if block is None:
+        flags = deal["metadata"].setdefault("intake_sanity_flags", [])
+        if down_units.IGNORED_FLAG not in flags:
+            flags.append(down_units.IGNORED_FLAG)
+        return {}
+    known = {str(u.get("unit_id")): u for u in block["units"]}
+    missing = sorted(set(map(str, scopes)) - set(known))
+    if missing:
+        raise ValueError(f"down-unit scopes name units the rent roll does not show down: {missing}")
+    for unit_id, scope in scopes.items():
+        known[str(unit_id)].update({"scope": scope, "scope_source": "analyst"})
+    for field in DOWN_UNIT_CANONICAL_FIELDS:
+        if field in inputs:
+            block[field] = float(inputs[field])
+    return {
+        key: {"value": inputs[field], "note": f"{note_prefix} down_unit_inputs.{field}"}
+        for field, key in DOWN_UNIT_INPUT_KEYS.items() if field in inputs
+    }
 
 
 def clean_pca(pca: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -755,6 +829,15 @@ def clean_pca(pca: Mapping[str, Any] | None) -> dict[str, Any] | None:
             if value < 0:
                 raise ValueError(f"PCA {name} must be >= 0")
             out[name] = value
+    if pca.get("down_unit_costs"):
+        costs = pca["down_unit_costs"]
+        if not isinstance(costs, Mapping):
+            raise ValueError("PCA down_unit_costs must be an object of unit id -> cost")
+        out["down_unit_costs"] = {}
+        for unit_id, cost in costs.items():
+            if float(cost) < 0:
+                raise ValueError(f"PCA down-unit cost for {unit_id!r} must be >= 0")
+            out["down_unit_costs"][str(unit_id)] = float(cost)
     for name in ("as_of", "reference"):
         if pca.get(name) not in (None, ""):
             out[name] = str(pca[name])
@@ -1055,6 +1138,12 @@ def _rent_roll_evidence(
     for key in ("layout", "pre_leased_vacant_units", "bed_bath_inference"):
         if roll.get(key):
             evidence[key] = roll[key]
+    if roll.get("down_units"):
+        # Down units (ADR 0003 decision q): a capital project with a schedule.
+        for key in ("status_counts", "down_units", "non_revenue_units", "physical_vacancy_rate_excluding_down",
+                    "total_units", "vacant_units"):
+            if roll.get(key) is not None:
+                evidence[key] = roll[key]
     market_total = Decimal("0")
     gap_total = Decimal("0")
     for cohort in unit_cohorts:

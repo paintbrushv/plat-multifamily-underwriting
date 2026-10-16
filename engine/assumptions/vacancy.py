@@ -65,7 +65,8 @@ from engine.market_data.types import Observation
 
 METHOD = "house:stabilized_vacancy_model (ADR 0003 decision o)"
 # Rent-roll statuses of units off the market: not vacancy the market would see.
-OFFLINE_STATUSES = ("Down", "Model", "Admin", "Renovation", "Offline", "Non-Revenue", "Non Revenue", "Employee")
+OFFLINE_STATUSES = ("Down", "Model", "Admin", "Renovation", "Offline", "Non-Revenue", "Non Revenue", "Employee",
+                    "Uninhabitable", "Vacant Down")
 SUPPLY_METRICS = ("supply_pipeline", "supply_pipeline_norm")
 NO_PIPELINE_NOTE = (
     "No provider supplied supply_pipeline (net deliveries over the next 24 months / inventory) for this "
@@ -408,6 +409,13 @@ def stabilization_exclusions(ctx: _Context, statement: Optional[Mapping[str, Any
     metadata = ctx.canonical.get("metadata") or {}
     box = ((metadata.get("property_summary") or {}).get("house_box_score")) or {}
     counts = box.get("status_counts") or {}
+    counts_source = "house_box_score.status_counts"
+    if not counts:
+        # UPL-110 (ADR 0003 decision q): without a box score, the rent roll's modeled
+        # down units are the offline units (a capital project, not weak demand).
+        from engine.assumptions.down_units import offline_status_counts
+
+        counts, counts_source = offline_status_counts(ctx), "rent_roll.down_units"
     statement = statement if statement is not None else asset_statement(ctx)
     gpr = statement.get("gpr")
     non_revenue = statement.get("non_revenue_loss")
@@ -429,7 +437,7 @@ def stabilization_exclusions(ctx: _Context, statement: Optional[Mapping[str, Any
         out.update({
             "offline_units": offline,
             "offline_share": _r(offline / total),
-            "offline_source": "house_box_score.status_counts",
+            "offline_source": counts_source,
             "notice_units": status_count(counts, "Notice"),
         })
         # A T12 that books down and model units on their own lines already keeps them out of vacancy.
