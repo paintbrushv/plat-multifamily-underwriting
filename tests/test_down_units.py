@@ -239,7 +239,7 @@ def _build(deal):
 
 
 def test_down_units_are_excluded_from_the_asset_vs_market_gap(roll_dir):
-    build = _build(_reresolved(roll_dir, t12_vacancy=0.30))
+    build = _build(_reresolved(roll_dir, t12_vacancy=0.40))
     exclusions = build["stabilization_exclusions"]
     # No box score: the rent roll's down units are the offline units of the vacancy build.
     assert exclusions["offline_source"] == "rent_roll.down_units"
@@ -248,10 +248,10 @@ def test_down_units_are_excluded_from_the_asset_vs_market_gap(roll_dir):
     assert exclusions["offline_applied"] is True
     assert exclusions["notice_units"] == 1
     gap = build["asset_vs_market"]
-    # 30% T12 vacancy less 25% of units down = 5%, 1 point under the 6% market.
-    assert gap["asset_vacancy"] == pytest.approx(0.30)
-    assert gap["asset_vacancy_stabilized"] == pytest.approx(0.05)
-    assert gap["gap"] == pytest.approx(-0.01)
+    # 40% T12 vacancy less 25% of units down = 15%, 9 points over the 6% market.
+    assert gap["asset_vacancy"] == pytest.approx(0.40)
+    assert gap["asset_vacancy_stabilized"] == pytest.approx(0.15)
+    assert gap["gap"] == pytest.approx(0.09)
     assert "offline" in gap["note"]
 
 
@@ -540,9 +540,9 @@ def test_never_double_counted_with_immediate_capex_or_the_renovation_budget(mini
 # ── 5. backsolve: carried at every candidate price ───────────────────────
 
 
-def _library_with_down_units(tmp_path: Path, count: int) -> dict:
-    deal = dl.load_deal("a_stabilized_1990s")
-    folder = tmp_path / "a_down"
+def _library_with_down_units(tmp_path: Path, count: int, *, slug: str = "a_stabilized_1990s") -> dict:
+    deal = dl.load_deal(slug)
+    folder = tmp_path / f"{slug}_down"
     shutil.copytree(deal["_dir"], folder)
     rows = list(csv.reader(open(folder / "rent_roll.csv", encoding="utf-8")))
     changed = 0
