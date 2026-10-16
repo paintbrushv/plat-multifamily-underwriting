@@ -559,7 +559,14 @@ times the spend with a construction schedule.
   in the monthly and annual cash flow, and funded at close (equity, or a
   lender holdback with `down_unit_funding`), so it never reduces operating
   cash flow. Down units also leave the vacancy comparison with the market
-  and the year-1 vacancy: they are offline in the schedule instead.
+  and the year-1 vacancy: they are offline in the schedule instead. They can
+  explain away trailing vacancy above the market, never push the property
+  below it (the rent roll shows which units are down today, not for how
+  long). Model and admin units are not down units: they stay as they are.
+- **From the command line.** `--down-unit-scope`, `--down-unit-cost-per-unit`,
+  `--down-unit-pace`, `--down-unit-funding` and `--down-unit-scopes
+  '{"203": "full_gut"}'` (or a JSON file); a PCA's per-unit costs go in
+  `--pca` as `down_unit_costs`.
 - **Pricing.** The restoration budget is in the equity basis at every price
   `solve_price` tries (a holdback upsizes the loan), so the solved price
   falls. A stabilized deal's year-1 cash-on-cash carries both the reserve and

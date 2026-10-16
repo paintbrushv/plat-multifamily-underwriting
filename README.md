@@ -169,7 +169,10 @@ python runs/ingest_deal.py --property-id SYN-A \
   `results.capital_plan` and the cash flow, never in operating cash flow, and
   never part of immediate capex or a renovation program. Backsolve carries it
   in the equity basis at every candidate price. The down units also leave the
-  vacancy comparison with the market and the year-1 vacancy.
+  vacancy comparison with the market (never below it: offline units only
+  explain away vacancy above the market) and the year-1 vacancy. Flags:
+  `--down-unit-scope`, `--down-unit-cost-per-unit`, `--down-unit-pace`,
+  `--down-unit-funding`, `--down-unit-scopes JSON`.
 
   Precedence is PCA > analyst > house: `--pca pca.json`
   (`{"immediate_capex", "recurring_capex_per_unit", "down_unit_costs", "as_of", "reference"}`)

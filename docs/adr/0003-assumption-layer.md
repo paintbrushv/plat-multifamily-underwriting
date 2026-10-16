@@ -965,7 +965,8 @@ A decision on vacancy (UPL-108):
        (200 bp). Stabilization effects are separated first: units offline
        (box-score Down, Model, Admin, Renovation, Offline, Non-Revenue,
        Employee) come out of the T12 vacancy unless the T12 books them on
-       their own lines, and an asset built within `HOUSE_LEASE_UP_YEARS` (2)
+       their own lines (decision q: never below the market, and a $0 line
+       books nothing apart), and an asset built within `HOUSE_LEASE_UP_YEARS` (2)
        of the analysis start was in lease-up and carries no gap. Notice and
        pre-leased units are disclosed: they describe today's roll, not the
        trailing year. Without market vacancy or T12 vacancy there is no
@@ -1085,8 +1086,26 @@ A decision on down units (UPL-110):
        the offline units of `stabilization_exclusions` (decision o;
        `offline_source: rent_roll.down_units`; `OFFLINE_STATUSES` gains
        Uninhabitable and Vacant Down): they come out of the trailing vacancy
-       before the asset-vs-market gap unless the T12 books them on a line of
-       their own. The year-1 vacancy start excludes them too (the rent
+       before the asset-vs-market gap unless the T12 books them on a
+       non-zero line of their own. Model, admin, employee and office units
+       stay out of the rent roll's offline counts: they are non-revenue by
+       the operator's choice, not a capital problem (a house box score that
+       lists them keeps its own treatment). Two corrections to decision (o)
+       apply to both the box-score and the down-unit path:
+       - **No below-market credit.** The rent roll shows which units are
+         offline today, not for how long, so the exclusion only removes
+         vacancy above the market comparator: the asset's adjusted vacancy is
+         max(trailing vacancy - offline share, min(trailing vacancy,
+         comparator)). A vacancy still above the market after the exclusion
+         keeps it in full. `asset_vs_market` discloses
+         `asset_vacancy_stabilized_uncapped` and `offline_exclusion_capped`,
+         and the note says when the cap binds.
+       - **A $0 line books nothing apart.** A T12 whose model / storage /
+         down-unit line is $0 (Yardi statements print one) has a zero
+         non-revenue rate, which no longer blocks the exclusion; a non-zero
+         line still keeps the units apart.
+
+       The year-1 vacancy start excludes the down units too (the rent
        roll's vacant units less the down ones, over the units less the down
        ones), because they are offline in the restoration schedule; counting
        them vacant as well would charge them twice.
@@ -1169,21 +1188,31 @@ A decision on down units (UPL-110):
     `down_unit_pace_per_month`, `down_unit_months_to_lease`,
     `down_unit_funding`. `describe_deal` takes `down_unit_scope`,
     `down_unit_cost_per_unit`, `down_unit_pace_per_month` and
-    `down_unit_funding` (ignored, with the intake flag
-    `down_unit_inputs_ignored_no_down_units`, when the roll has none).
+    `down_unit_funding`; `runs/ingest_deal.py` takes `--down-unit-scope`,
+    `--down-unit-cost-per-unit`, `--down-unit-pace`, `--down-unit-funding`
+    and `--down-unit-scopes` (a JSON object of unit id -> scope, inline or a
+    file), and `--pca` takes `down_unit_costs`. All are ignored, with the
+    intake flag `down_unit_inputs_ignored_no_down_units`, when the roll has
+    no down units.
 
-    No library deal and not the sample deal has down units, so their values
-    and prices are unchanged. On synthetic variants with six occupied units
-    marked Down: deal a's budget is $120,000 and its solved price falls
-    $28,024,900.49 -> $27,645,077.07 (as full guts, $270,000 and
-    $27,151,273.00); deal c's budget is $144,000, price $13,566,209.46 ->
-    $13,447,537.39. Open: those variants' T12s do not carry the down units,
-    so taking today's down share out of the trailing vacancy earns a
-    below-market credit (deal a's stabilized vacancy 5.5% -> 4.0%, raised to
-    the 5.0% vintage floor in pricing). The rent roll says which units are
-    down today, not for how long; a guard that offline units can only remove
-    vacancy above the market (never earn a credit below it) would apply to
-    the box-score path too, so it belongs with decision (o).
+    No library deal and not the sample deal has down units or applies an
+    offline exclusion, so their values and prices are unchanged. On
+    synthetic variants with six occupied units marked Down (their T12s left
+    unchanged):
+
+    | Variant | Budget | Stabilized vacancy | Solved price | Levered IRR at the ask |
+    |---|---|---|---|---|
+    | Deal a, no down units | none | 5.5% | $28,024,900.49 | 6.77% |
+    | Deal a, 6 heavy repairs | $120,000 | 5.5% | $27,521,658.21 | 6.48% |
+    | Deal a, 6 full guts | $270,000 | 5.5% | $27,029,083.41 | 6.11% |
+    | Deal c, no down units | none | 7.0% | $13,566,209.46 | 2.75% |
+    | Deal c, 6 heavy repairs | $144,000 | 6.5% (the market) | $13,447,537.39 | 2.73% |
+
+    Deal a's T12 vacancy sits at the market, so the down units explain
+    nothing away; deal c's runs above it, and the down units explain the
+    excess down to the market. Without the no-credit cap the same variants
+    priced deal a at $27,645,077.07 with a 4.0% stabilized vacancy and a
+    7.49% IRR at the ask (higher than with no down units).
 
 Three decisions on deferred maintenance and PCA evidence:
 
