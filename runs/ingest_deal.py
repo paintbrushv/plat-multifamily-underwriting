@@ -309,6 +309,29 @@ def _rent_roll_reconciliation_lines(recon: object) -> list[str]:
     return lines
 
 
+SUBMARKET_VACANCY_SOURCE = "cli:--submarket-vacancy"
+
+
+def _market_vacancy_benchmark(args: argparse.Namespace) -> dict[str, str] | None:
+    """``property_summary.market_vacancy_benchmark`` from --submarket-vacancy*, or None.
+
+    Raises ValueError for a benchmark without its as-of date, or an as-of or
+    source without the rate.
+    """
+    rate = getattr(args, "submarket_vacancy", None)
+    as_of = getattr(args, "submarket_vacancy_as_of", None)
+    source = getattr(args, "submarket_vacancy_source", None)
+    if rate is None:
+        if as_of is not None or source is not None:
+            raise ValueError("--submarket-vacancy-as-of and --submarket-vacancy-source require --submarket-vacancy")
+        return None
+    if as_of is None:
+        raise ValueError("--submarket-vacancy requires --submarket-vacancy-as-of (YYYY-MM-DD)")
+    if not 0 <= rate < 1:
+        raise ValueError("--submarket-vacancy must be a decimal between 0 and 1 (0.065 means 6.5%)")
+    return {"rate": str(rate), "as_of": as_of, "source": source or SUBMARKET_VACANCY_SOURCE}
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser for this CLI.
 
@@ -342,6 +365,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Annual rent growth rate. If omitted, a house default is used and "
                         "flagged for review (metadata.ingest_gate.assumed_defaults).")
     p.add_argument("--vacancy", type=float, default=None, help="Vacancy rate override (0-1)")
+    p.add_argument("--submarket-vacancy", type=float, default=None, metavar="RATE",
+                   help="Analyst submarket stabilized vacancy benchmark (0-1, e.g. 0.065). It is the market "
+                        "base of the stabilized vacancy build, ahead of the market-data feeders "
+                        "(metadata.property_summary.market_vacancy_benchmark). Needs "
+                        "--submarket-vacancy-as-of.")
+    p.add_argument("--submarket-vacancy-as-of", default=None, metavar="YYYY-MM-DD",
+                   help="Date of the --submarket-vacancy benchmark.")
+    p.add_argument("--submarket-vacancy-source", default=None, metavar="TEXT",
+                   help="Where the --submarket-vacancy benchmark comes from (default cli:--submarket-vacancy).")
     p.add_argument("--collection-loss", type=float, default=None,
                    help="Collection loss rate. If omitted, a house default is used (the vintage "
                         "framework floor when the year built is known) and flagged for review.")
@@ -609,6 +641,7 @@ def main() -> int:
             _profile_from_args(args)
             normalize_overrides(assumption_overrides)
             apply_capital_plan_inputs({}, **_capital_plan_kwargs(args, pca_evidence))  # validate only
+            market_vacancy_benchmark = _market_vacancy_benchmark(args)
         except (UnsupportedDealTypeError, AssumptionOverrideError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
@@ -656,6 +689,7 @@ def main() -> int:
             property_tax_source_locator=(
                 analyst_tax_policy["source_locator"] if analyst_tax_policy else MILLAGE_SOURCE_LOCATOR
             ),
+            market_vacancy_benchmark=market_vacancy_benchmark,
         )
         if partial_payload is not None:
             try:

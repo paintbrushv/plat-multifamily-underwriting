@@ -641,6 +641,22 @@ def _pca_evidence(ws: Workspace, manifest: Mapping[str, Any]) -> dict[str, Any] 
     return clean_pca(pca) if pca else None
 
 
+SUBMARKET_VACANCY_SOURCE = "describe_deal:submarket_vacancy"
+
+
+def _market_vacancy_benchmark(profile: Mapping[str, Any]) -> dict[str, str] | None:
+    """The analyst submarket vacancy benchmark from the deal profile, or None.
+
+    Ingest validates it (``rate``, ``as_of``, ``source``): a rate without its
+    date is refused there with a message the analyst can act on.
+    """
+    rate = profile.get("submarket_vacancy")
+    if rate is None:
+        return None
+    return {"rate": str(rate), "as_of": profile.get("submarket_vacancy_as_of"),
+            "source": profile.get("submarket_vacancy_source") or SUBMARKET_VACANCY_SOURCE}
+
+
 def _ingest_kwargs(ws: Workspace, manifest: Mapping[str, Any], market: Any) -> dict[str, Any]:
     from engine.ingest.broker_om_snapshot import stable_property_tax_source_locator
 
@@ -688,6 +704,7 @@ def _ingest_kwargs(ws: Workspace, manifest: Mapping[str, Any], market: Any) -> d
         "property_tax_millage": p.get("millage"),
         "property_tax_assessment_ratio": p.get("assessment_ratio"),
         "property_tax_source_locator": "describe_deal:millage",
+        "market_vacancy_benchmark": _market_vacancy_benchmark(p),
     }
     om = docs.get("om")
     if om:

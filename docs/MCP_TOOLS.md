@@ -123,6 +123,9 @@ source of this table). `start` and `end` are needed to ingest;
 | `msa` | Market | str | MSA name or five-digit CBSA code. | The market-data geography: MSA rent growth, vacancy, concessions and market cap rate feed the assumptions when no submarket data exists. |
 | `metro_slug` | Market | str | Metro key the market-data feeders use (e.g. 'synthetic_metro'). | Feeders look the metro up by this slug; without it market data may not match. |
 | `submarket` | Market | str | Submarket name. | Submarket market data outranks MSA data in the assumption precedence. |
+| `submarket_vacancy` | Market | rate | Your submarket stabilized vacancy benchmark as a decimal (0.065 = 6.5%), e.g. from a broker or market survey. | It becomes the market base of the stabilized vacancy build, ahead of the market-data feeders: the asset's T12 vacancy is compared with it, and the long-run vacancy (and so NOI and price) moves with it. Give its date in submarket_vacancy_as_of. |
+| `submarket_vacancy_as_of` | Market | date | Date of the submarket vacancy benchmark, YYYY-MM-DD. | Recorded with the benchmark so reviewers can see how current the market base is; required with submarket_vacancy. |
+| `submarket_vacancy_source` | Market | str | Where the submarket vacancy benchmark comes from. | Recorded with the benchmark for the audit trail (default describe_deal:submarket_vacancy). |
 | `start` | Analysis | month | Analysis start month, YYYY-MM (usually the month after closing). | Required to ingest: the monthly cash flow starts here. |
 | `end` | Analysis | month | Analysis end month, YYYY-MM (a five-year hold is typical). | Required to ingest: the hold period, and the default exit month. |
 | `exit_month` | Analysis | month | Sale month, YYYY-MM (default: the analysis end). | The reversion is priced on the NOI around this month. |

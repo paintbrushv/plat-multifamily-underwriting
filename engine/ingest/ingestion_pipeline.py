@@ -291,6 +291,8 @@ def build_deal_from_documents(
     property_tax_millage: float | None = None,
     property_tax_assessment_ratio: float | None = None,
     property_tax_source_locator: str = DEFAULT_PROPERTY_TAX_SOURCE_LOCATOR,
+    # Stabilized vacancy (ADR 0003 decision p): the analyst's submarket benchmark
+    market_vacancy_benchmark: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a canonical deal JSON from a rent roll, T12, and optional OM.
 
@@ -375,6 +377,11 @@ def build_deal_from_documents(
             override. Requires ``property_tax_millage``.
         property_tax_source_locator: Stable provenance of the analyst millage
             (e.g. ``cli:--millage``).
+        market_vacancy_benchmark: The analyst's submarket stabilized vacancy,
+            ``{"rate", "as_of", "source"}`` (``--submarket-vacancy``), stored
+            as ``metadata.property_summary.market_vacancy_benchmark``. It is
+            the market base of the stabilized vacancy build, ahead of the
+            market-data feeders. A malformed benchmark raises ``ValueError``.
 
     Returns:
         Canonical deal inputs dict (schema_version 0.1) with ``deal_profile``
@@ -386,6 +393,11 @@ def build_deal_from_documents(
         a BLOCKED gate fails validation, assumed defaults only warn.
     """
     check_deal_type(deal_type)
+    checked_benchmark = None
+    if market_vacancy_benchmark is not None:
+        from engine.backsolve_policy import validate_benchmark
+
+        checked_benchmark = validate_benchmark(dict(market_vacancy_benchmark))
     analyst_tax_policy = None
     if property_tax_millage is not None:
         analyst_tax_policy = analyst_property_tax_policy(
@@ -507,6 +519,7 @@ def build_deal_from_documents(
         om_extracted_anything = False
         try:
             broker_snapshot = parse_broker_snapshot_from_om(om_path)
+            _record_om_trailing_actuals(deal, broker_snapshot)
             broker_tax_candidates = broker_snapshot.get(
                 "property_tax_evidence_candidates", []
             )
@@ -607,6 +620,10 @@ def build_deal_from_documents(
 
     if analyst_tax_policy is not None:
         apply_analyst_property_tax_policy(deal, analyst_tax_policy)
+    if checked_benchmark is not None:
+        if not isinstance(deal["metadata"].get("property_summary"), dict):
+            deal["metadata"]["property_summary"] = {}
+        deal["metadata"]["property_summary"]["market_vacancy_benchmark"] = checked_benchmark
 
     # Explicit rate inputs are analyst overrides; omitted ones stay as
     # placeholders the assumption resolver fills with disclosed defaults.
@@ -909,6 +926,31 @@ def _rent_roll_gate_blockers(reconciliation: Mapping[str, Any]) -> list[dict[str
             )
         blockers.append({"code": code, "message": message})
     return blockers
+
+
+# The OM trailing-actual lines the stabilized vacancy build reads (UPL-109).
+_OM_VACANCY_FIELDS = ("gross_potential_rent", "vacancy_loss", "employee_model")
+
+
+def _record_om_trailing_actuals(deal: dict[str, Any], snapshot: Mapping[str, Any]) -> None:
+    """Record the broker OM's trailing vacancy lines and their period label as ingest evidence.
+
+    ``ingest_gate.evidence.om_trailing_actuals`` carries the OM's trailing
+    gross potential rent and vacancy loss with the parser's
+    ``trailing_actuals_basis`` (None when the OM table's trailing column was
+    read by position). The stabilized vacancy build uses them for the
+    asset-vs-market gap only when there is no ingested T12 vacancy and the
+    label says actual; a pro forma column never feeds it.
+    """
+    trailing = snapshot.get("trailing_actuals") if isinstance(snapshot, Mapping) else None
+    if not isinstance(trailing, Mapping) or trailing.get("gross_potential_rent") is None \
+            or trailing.get("vacancy_loss") is None:
+        return
+    deal["metadata"]["ingest_gate"]["evidence"]["om_trailing_actuals"] = {
+        "trailing_actuals": {k: trailing[k] for k in _OM_VACANCY_FIELDS if trailing.get(k) is not None},
+        "trailing_actuals_basis": deepcopy(snapshot.get("trailing_actuals_basis")),
+        "source": "offering_memorandum",
+    }
 
 
 def _t12_rent_evidence(

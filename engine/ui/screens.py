@@ -78,7 +78,9 @@ TOOL_SCREENS: dict[str, str] = {tool: screen.name for screen in SCREENS.values()
 FIELD_LABELS: dict[str, str] = {
     "deal_type": "Deal type", "year_built": "Year built", "asset_class": "Asset class", "star_tier": "Star tier",
     "deferred_maintenance": "Known deferred maintenance", "msa": "MSA", "metro_slug": "Metro key",
-    "submarket": "Submarket", "start": "Analysis start", "end": "Analysis end", "exit_month": "Sale month",
+    "submarket": "Submarket", "submarket_vacancy": "Submarket vacancy",
+    "submarket_vacancy_as_of": "Submarket vacancy date", "submarket_vacancy_source": "Submarket vacancy source",
+    "start": "Analysis start", "end": "Analysis end", "exit_month": "Sale month",
     "purchase_price": "Purchase price", "ltv": "Loan-to-value", "rate": "Interest rate", "amort": "Amortization (years)",
     "io_months": "Interest-only months", "term_months": "Loan term (months)",
     "loan_sizing_noi_basis": "Loan sized on", "millage": "Millage (mills)", "assessment_ratio": "Assessment ratio",
@@ -101,7 +103,8 @@ FIELD_GROUPS: tuple[dict[str, Any], ...] = (
     {"label": "Property", "fields": ["deal_type", "year_built", "asset_class", "star_tier", "deferred_maintenance"]},
     {"label": "Location", "lead": "Where market data is looked up. A fictional or unconfigured market simply falls back "
                                   "to house defaults, flagged for review.",
-     "fields": ["msa", "metro_slug", "submarket"]},
+     "fields": ["msa", "metro_slug", "submarket", "submarket_vacancy", "submarket_vacancy_as_of",
+                "submarket_vacancy_source"]},
     {"label": "Price & financing", "fields": ["purchase_price", "ltv", "rate", "amort", "io_months", "term_months",
                                               "loan_sizing_noi_basis"]},
     {"label": "Taxes", "lead": "The engine re-taxes the property at the purchase price: price x assessment ratio x "

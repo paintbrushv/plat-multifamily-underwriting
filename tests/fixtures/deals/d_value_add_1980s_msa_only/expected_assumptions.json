@@ -136,10 +136,22 @@
             "carried_share": 0.5,
             "cap": 0.02,
             "capped": false,
+            "asset_sources_considered": [
+              {
+                "kind": "ingested_t12",
+                "source": "deal:t12",
+                "where": "ingest_gate.evidence.t12",
+                "vacancy": 0.07,
+                "used": true
+              }
+            ],
             "asset_vacancy": 0.07,
             "asset_vacancy_basis": "T12 vacancy loss / gross potential rent",
             "asset_vacancy_stabilized": 0.07,
             "asset_source": "deal:t12",
+            "asset_source_kind": "ingested_t12",
+            "asset_source_where": "ingest_gate.evidence.t12",
+            "asset_confidence": "high",
             "market_comparator": 0.06,
             "comparator_basis": "the market's latest stabilized vacancy",
             "gap": 0.01,

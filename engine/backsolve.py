@@ -47,6 +47,7 @@ from engine.assumptions.guardrails import (
 from engine.assumptions.opex import SOURCE_HOUSE_OPEX_GROWTH, SOURCE_HOUSE_PROPERTY_TAX
 from engine.assumptions.registry import SOURCE_ANALYST as SOURCE_ANALYST_OVERRIDE
 from engine.assumptions.resolver import resolve_assumptions
+from engine.assumptions.vacancy import reprice_vacancy_build
 from engine.property_tax import (
     apply_property_tax_policy,
     is_property_tax_label,
@@ -656,6 +657,8 @@ def _apply_house_revenue_policy(
         # The vintage vacancy floor each segment is floored at (None: year built unknown).
         "physical_vacancy_floor": float(vacancy_floor) if vacancy_floor is not None else None,
         "physical_vacancy_floor_source": floors["physical_vacancy"].source,
+        # Value-add: the floor applies only after the renovations (None: every month).
+        "physical_vacancy_floor_applies_from": floors["physical_vacancy"].applies_from,
         "physical_vacancy_curve_applied": applied_curve,
         # The vacancy evidence (rent roll, T12, broker, benchmark) and the
         # resolver's stabilized vacancy build: shown, never a floor.
@@ -1388,6 +1391,10 @@ def _prepare_house_assumptions(
         property_summary["market"] = metadata["market"]
     if broker_snapshot:
         property_summary["broker_underwriting_snapshot"] = broker_snapshot
+    if trailing_actuals:
+        # Typed-in trailing actuals are deal evidence the stabilized vacancy build
+        # reads (UPL-109); kept on the case so a later re-resolution sees them too.
+        property_summary["trailing_actuals"] = deepcopy(trailing_actuals)
     property_summary["underwriting_strategy"] = strategy
     property_summary["primary_cash_on_cash_target_pct"] = float(target_coc)
     property_summary["agency_benchmark_treasury"] = float(benchmark_treasury)
@@ -1407,6 +1414,10 @@ def _prepare_house_assumptions(
         for key, value in metadata.items()
         if key in ALLOWED_METADATA_KEYS
     }
+    # Evidence that reaches pricing after the last resolution (typed trailing
+    # actuals, a broker snapshot's labelled actuals, an analyst benchmark) is
+    # folded into the stabilized vacancy build before the floors (UPL-109).
+    vacancy_rebuild = reprice_vacancy_build(prepared, strategy=strategy)
 
     prepared["fund_assumptions"] = _deep_merge(
         prepared.get("fund_assumptions") or {},
@@ -1510,6 +1521,8 @@ def _prepare_house_assumptions(
         "revenue_quality_bridge_required_reason": bridge_required_reason,
         "revenue_quality_bridge": revenue_quality_summary,
         "renovation_funding": renovation_funding,
+        # The stabilized vacancy rebuilt with the evidence pricing adds (None: none added).
+        "physical_vacancy_build_repriced": vacancy_rebuild,
         "coc_basis": coc_basis or DEFAULT_COC_BASIS[strategy],
         "loan_sizing_noi_basis": loan_sizing.resolve_basis(loan_sizing_noi_basis),
         **revenue_summary,

@@ -69,6 +69,8 @@ from engine.assumptions.registry import (
     requires_review,
 )
 from engine.backsolve_policy import validate_benchmark
+from engine.modules.renovations import compute_renovations
+from engine.modules.time_grid import TimeGrid
 from engine.modules.util import dec
 
 MODE_UNDERWRITE = "underwrite"
@@ -543,6 +545,60 @@ def vacancy_anchor_summary(
     }
 
 
+# ── the value-add renovation window (UPL-109) ────────────────────────────
+
+
+def vacancy_floor_window(canonical: Mapping[str, Any], *, strategy: str) -> Optional[dict[str, Any]]:
+    """When the vintage vacancy floor starts to apply on a value-add deal, or None.
+
+    A value-add deal's vacancy during its renovations is governed by the
+    renovation programs and the stabilized vacancy build (downtime, the
+    lease-up of renovated units); the vintage floor describes the stabilized
+    asset, so it applies only to the months after the last renovation, the
+    same month the value-add stabilized-year cash-on-cash basis is measured
+    after (backsolve ``last_renovation_month``). None for a stabilized
+    (cashflow) strategy, a deal with no renovation programs, or programs the
+    engine cannot schedule: the floor then applies to every month.
+    """
+    if strategy != "value_add":
+        return None
+    programs = canonical.get("renovation_programs") or []
+    unit_renovations = canonical.get("unit_renovations") or []
+    grid = canonical.get("time_grid") or {}
+    if not (programs or unit_renovations) or not grid.get("analysis_start_date") or not grid.get("analysis_end_date"):
+        return None
+    # The schedule does not depend on the dollars: a premium or cost the
+    # resolver has yet to fill (a placeholder) must not move the window.
+    scheduled = [
+        {**program, **{field: program.get(field) or 0 for field in ("rent_premium_monthly", "renovation_cost_per_unit")}}
+        if isinstance(program, Mapping) else program
+        for program in programs
+    ]
+    try:
+        result = compute_renovations(
+            time_grid=TimeGrid.build(str(grid["analysis_start_date"]), str(grid["analysis_end_date"])),
+            unit_cohorts=list(canonical.get("unit_cohorts") or []),
+            renovation_programs=scheduled,
+            unit_renovations=list(unit_renovations),
+        )
+    except Exception:  # noqa: BLE001 - an unschedulable program leaves the floor on every month
+        return None
+    renovated = [str(row["month"])[:7] for row in result["by_month"] if row["units_renovated"]]
+    if not renovated:
+        return None
+    first, last = renovated[0], renovated[-1]
+    return {
+        "first_renovation_month": first,
+        "last_renovation_month": last,
+        "floor_applies_from": _shift_month(last, 1),
+        "basis": (
+            f"Value-add renovations run {first} to {last}: during the renovation window the programs and the "
+            "stabilized vacancy build govern vacancy, so the vintage floor applies only from "
+            f"{_shift_month(last, 1)} (the stabilized period)."
+        ),
+    }
+
+
 # ── floors ───────────────────────────────────────────────────────────────
 
 
@@ -554,6 +610,10 @@ class Floor:
     value: Optional[Decimal]
     source: Optional[str]
     basis: str
+    # The first month the floor applies (YYYY-MM); None: every month. Set for
+    # the value-add vacancy floor, which applies only after the renovations.
+    applies_from: Optional[str] = None
+    window: Optional[dict[str, Any]] = None
 
 
 def _max_floor(
@@ -608,6 +668,8 @@ def house_floors(
         "vintage band." if gp.deferred_flagged else ""
     )
     above = vacancy_summary["evidence_above_floor"]
+    window = vacancy_floor_window(canonical, strategy=gp.strategy) if vacancy_floor is not None else None
+    vacancy_summary["floor_window"] = deepcopy(window)
     floors = {
         "physical_vacancy": Floor(
             "physical_vacancy",
@@ -619,7 +681,10 @@ def house_floors(
                    else "")
                 + " Rent roll, T12, broker and benchmark vacancies are evidence for the stabilized vacancy, not "
                 "floors" + (f" ({', '.join(above)} above the floor)." if above else ".")
+                + (f" {window['basis']}" if window else "")
             ) if vacancy_floor is not None else "No vintage vacancy floor (year built unknown).",
+            applies_from=window["floor_applies_from"] if window else None,
+            window=window,
         ),
         "loss_to_lease": _max_floor(
             "loss_to_lease", gp.loss_to_lease(), gp.vintage_source,
@@ -684,19 +749,42 @@ def _grid(canonical: Mapping[str, Any]) -> Optional[tuple[str, str]]:
 
 
 def _guard_vacancy(canonical: dict[str, Any], floor: Floor, mode: str) -> list[dict[str, Any]]:
+    """Each vacancy segment against the floor, from ``floor.applies_from`` on.
+
+    A value-add floor applies only after the renovations (``applies_from``):
+    a segment that ends before it is kept, and a segment across it is split
+    at the last renovation month so only its later months are floored.
+    """
     findings = []
+    start = floor.applies_from
+    window = {"floor_applies_from": start, "renovation_window": deepcopy(floor.window)} if start else {}
+    curve: list[dict[str, Any]] = []
     for row in canonical.get("physical_vacancy_curve") or []:
         rate = row.get("vacancy_rate", 0)
-        if rate is None or Decimal(str(rate)) >= floor.value:
+        begin, end = str(row.get("start_period", ""))[:7], str(row.get("end_period", ""))[:7]
+        if rate is None or Decimal(str(rate)) >= floor.value or (start and end < start):
+            curve.append(row)
             continue
-        findings.append(_finding(
+        kept = None
+        if start and begin < start:
+            # The renovation months keep the build's rate; only the stabilized months are floored.
+            kept = dict(row, end_period=_shift_month(start, -1))
+            row = dict(row, start_period=start)
+        finding = _finding(
             "physical_vacancy", floor, row.get("vacancy_rate"), mode,
             cohort_id=row.get("cohort_id"),
             start_period=row.get("start_period"),
             end_period=row.get("end_period"),
-        ))
+            **window,
+        )
+        if kept is not None:
+            finding["split_at"] = kept["end_period"]
+        findings.append(finding)
         if mode == MODE_PRICING:
             row["vacancy_rate"] = float(floor.value)
+            curve.extend([kept, row] if kept is not None else [row])
+    if mode == MODE_PRICING and findings:
+        canonical["physical_vacancy_curve"] = curve
     return findings
 
 
@@ -1573,6 +1661,12 @@ def _entry_record(key: str, items: list[Mapping[str, Any]]) -> dict[str, Any]:
             else "Underwrite mode keeps the value; pricing mode would enforce the floor."
         )
     )
+    if first.get("floor_applies_from"):
+        # The value-add vacancy floor: the renovation window is the build's (UPL-109).
+        record["floor_applies_from"] = first["floor_applies_from"]
+        record["renovation_window"] = deepcopy(first.get("renovation_window"))
+        record["basis"] += " " + str((first.get("renovation_window") or {}).get("basis") or (
+            f"The floor applies from {first['floor_applies_from']}, after the renovations."))
     if first.get("floor_basis"):
         # What the floor is compared with (the R&M floor: R&M plus turnover, never payroll).
         record["basis"] += f" Floor basis: {first['floor_basis']}."

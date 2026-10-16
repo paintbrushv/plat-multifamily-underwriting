@@ -96,6 +96,16 @@ FIELDS: tuple[Field, ...] = (
           "Feeders look the metro up by this slug; without it market data may not match."),
     Field("submarket", "str", "Market", "Submarket name.",
           "Submarket market data outranks MSA data in the assumption precedence."),
+    Field("submarket_vacancy", "rate", "Market", "Your submarket stabilized vacancy benchmark as a decimal "
+          "(0.065 = 6.5%), e.g. from a broker or market survey.",
+          "It becomes the market base of the stabilized vacancy build, ahead of the market-data feeders: the "
+          "asset's T12 vacancy is compared with it, and the long-run vacancy (and so NOI and price) moves with it. "
+          "Give its date in submarket_vacancy_as_of.", minimum=0, maximum=0.5),
+    Field("submarket_vacancy_as_of", "date", "Market", "Date of the submarket vacancy benchmark, YYYY-MM-DD.",
+          "Recorded with the benchmark so reviewers can see how current the market base is; required with "
+          "submarket_vacancy."),
+    Field("submarket_vacancy_source", "str", "Market", "Where the submarket vacancy benchmark comes from.",
+          "Recorded with the benchmark for the audit trail (default describe_deal:submarket_vacancy)."),
     # ── analysis period ──────────────────────────────────────────────────
     Field("start", "month", "Analysis", "Analysis start month, YYYY-MM (usually the month after closing).",
           "Required to ingest: the monthly cash flow starts here."),
