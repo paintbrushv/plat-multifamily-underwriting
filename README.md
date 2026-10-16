@@ -178,14 +178,18 @@ python runs/ingest_deal.py --property-id SYN-A \
 - Physical vacancy starts at the rent roll's current vacancy in year 1 and
   glides to a stabilized vacancy built from evidence (ADR 0003 decision (o),
   `house:stabilized_vacancy_model`, always flagged for review): the
-  submarket's stabilized vacancy for the star tier (else the metro aggregate,
-  else the house vintage default), plus half of the asset's T12 vacancy gap to
+  analyst's `--submarket-vacancy` benchmark, else the submarket's stabilized
+  vacancy for the star tier (else the metro aggregate, else the house vintage
+  default), plus half of the asset's T12 vacancy gap to
   that market (offline units and lease-up separated first, capped at 200 bp
   either way), plus 25 bp per point of inventory that delivers over the next
   24 months above the submarket's normal pace, for years 1-3 (capped at
   150 bp). The register's physical vacancy row shows each step. The rent roll,
   T12, broker and benchmark vacancies are evidence: the only vacancy floor,
-  in underwriting and pricing, is the house vintage floor.
+  in underwriting and pricing, is the house vintage floor, which on a
+  value-add deal applies only after the renovations (decision (p)). Without a
+  T12 vacancy line the gap reads typed trailing actuals, then OM actuals
+  labelled as actuals, at lower confidence.
 - `--deferred-maintenance` also raises the house minimums for physical
   vacancy, collection loss, year-1 concessions and R&M to the upper part of
   their vintage bands (for a 1980s stabilized deal: 7.0%, 2.25%, 1.5% and

@@ -133,7 +133,17 @@ roll's vacant share (house box score, else the ingested roll), T12 vacancy /
 GPR, broker vacancy and a supplied `market_vacancy_benchmark` are evidence, not
 floors (ADR 0003 decision o): `physical_vacancy_anchor_summary` lists them
 (`evidence_candidates`, `evidence_above_floor`) beside the floor and the
-resolver's stabilized vacancy build (`vacancy_build`). The
+resolver's stabilized vacancy build (`vacancy_build`). On a value-add strategy
+with renovation programs the floor applies only after the last renovation
+(ADR 0003 decision p): `physical_vacancy_floor_applies_from` is that month,
+earlier segments are kept, a segment across it is split, and each finding
+carries `floor_applies_from` and the `renovation_window`. Trailing actuals
+(`trailing_actuals`) are kept on the case as
+`metadata.property_summary.trailing_actuals` and, with a broker snapshot's
+labelled actuals or an analyst benchmark, rebuild the stabilized vacancy
+before the floors when the canonical's curve is the recorded build
+(`physical_vacancy_build_repriced` says what changed, or why nothing was
+rebuilt). The
 resulting curve is reported as `physical_vacancy_curve_applied`, and
 `physical_vacancy_rate_applied` is that priced curve's unit- and month-weighted
 rate over the hold. Summary fields named `*_applied` (and
@@ -343,7 +353,9 @@ non-finite values, invalid dates, invalid iteration limits, and
 sub-cent price bounds refuse before underwriting. An exit cap must come from the policy or canonical inputs.
 Optional market-vacancy evidence must be supplied in
 `metadata.property_summary.market_vacancy_benchmark` with `rate`, `as_of`, and
-`source`; it is disclosed as vacancy evidence, not a floor. The solver does not
+`source`; it is the market base of the stabilized vacancy build (ahead of the
+market-data feeders, ADR 0003 decision p) and is listed as vacancy evidence,
+never a floor. The solver does not
 load an optional local market-data package.
 
 ## Results and boundaries

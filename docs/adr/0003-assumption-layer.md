@@ -181,7 +181,7 @@ How each key combines sources:
 | Key | Resolution |
 |---|---|
 | `rent_growth` | Years with forecast coverage from the submarket forecast, else the MSA forecast (8-quarter ensemble, annualized to analysis years). After the horizon, a linear glide over 2 years to the long-run rate (MSA long-run, else house long-run constant). Deal evidence is not used for growth. |
-| `physical_vacancy` | Curve from current physical vacancy (rent roll, year 1 only) to stabilized vacancy over the profile's stabilization window. Stabilized vacancy is built from evidence (decision o, `house:stabilized_vacancy_model`, review_required): market base (submarket stabilized vacancy for the star tier, else metro, else house vintage default) + a capped share of the asset's T12 gap to the market; a capped supply adjustment is added for the lease-up years when deliveries run above the normal pace. |
+| `physical_vacancy` | Curve from current physical vacancy (rent roll, year 1 only) to stabilized vacancy over the profile's stabilization window. Stabilized vacancy is built from evidence (decision o, `house:stabilized_vacancy_model`, review_required): market base (the analyst's `market_vacancy_benchmark`, else submarket stabilized vacancy for the star tier, else metro, else house vintage default; decision p) + a capped share of the asset's trailing-vacancy gap to the market (ingested T12, else typed trailing actuals, else OM actuals labelled actual, at falling confidence; decision p); a capped supply adjustment is added for the lease-up years when deliveries run above the normal pace. |
 | `loss_to_lease` | Current LTL from the rent roll (market vs in-place) burns off over the lease term (12 months) to the house vintage LTL floor. |
 | `concessions` | Year-1 rate from deal evidence (T12 concessions / GPR, or rent-roll specials), else submarket concession spread (asking − effective) / asking, else house vintage floor. Burns off to the submarket or house stabilized level. |
 | `collection_loss` | T12 bad debt / GPR, else the house default (vintage `bad_debt_typical_low`). The vintage collection-loss floor is a guardrail (§5), not the default. |
@@ -257,7 +257,7 @@ reuses the `underwriting_policy` vintage functions:
 
 | Key | Floor | Checked against |
 |---|---|---|
-| `physical_vacancy` | The vintage floor alone (raised with deferred maintenance). The rent-roll vacant share (box score, else the ingested roll), T12 vacancy / GPR, broker vacancy and a supplied `market_vacancy_benchmark` are evidence for the stabilized build, listed in the vacancy evidence summary, never floors (decision o) | each `physical_vacancy_curve` segment |
+| `physical_vacancy` | The vintage floor alone (raised with deferred maintenance). The rent-roll vacant share (box score, else the ingested roll), T12 vacancy / GPR, broker vacancy and a supplied `market_vacancy_benchmark` are evidence for the stabilized build, listed in the vacancy evidence summary, never floors (decision o). On a value-add strategy with renovation programs it applies only from the month after the last renovation (decision p) | each `physical_vacancy_curve` segment (value-add: those after the renovations; a segment across the end is split) |
 | `loss_to_lease` | max(vintage LTL floor, broker LTL) | each `loss_to_lease` segment of a cohort whose market rent exceeds its in-place rent; such a cohort with no row counts as 0%. A cohort with no gap (market at or below in-place, including a rent the house box-score rebase capped) is exempt in both modes: no warning, no raise, its rows kept, and the exemption disclosed (`exempt_no_gap`) |
 | `collection_loss` | max(vintage floor, broker bad debt) | each `collection_loss_curve` segment (no curve counts as 0) |
 | `concessions` | max(vintage year-1 floor, broker concessions) | each `concession_schedule` row that applies in analysis year 1 (`free_months` read as months / 12); no year-1 row counts as 0% |
@@ -993,6 +993,67 @@ A decision on vacancy (UPL-108):
     6.0% -> 6.5% (half of the T12's 1-point gap to the MSA), deal c's rises
     6.5% -> 7.0% (the 8% vintage floor still binds in pricing); deals a and
     b and the sample deal keep their values.
+
+A decision on vacancy follow-ups (UPL-109):
+
+16. **(p) Vacancy follow-ups: actual T12s, the analyst benchmark and the
+    renovation window (UPL-109).** Three refinements of decision (o); its
+    constants are unchanged.
+    1. **Actual trailing statements feed the asset-vs-market gap.** The
+       asset's trailing vacancy (vacancy loss / GPR) is read, in order, from
+       the ingested T12 (`deal:t12`, confidence high); trailing actuals typed
+       into backsolve (`trailing_actuals`, `--trailing-actuals-json`, kept on
+       the priced case as `property_summary.trailing_actuals`; `deal:t12`,
+       medium); and broker-OM trailing actuals (`deal:om`, low) from the
+       ingested OM (`ingest_gate.evidence.om_trailing_actuals`) or the broker
+       snapshot backsolve records. An OM column is used only when its
+       `trailing_actuals_basis` says `kind: "actual"` with a period that is
+       not a pro forma, projection, forecast or budget. The OM layout parser
+       labels only the layout whose header confirms the actual column
+       (`Income T3 Income / T12 Expense Proforma`: T3 income / T12
+       expenses); the other layouts read their trailing column by position,
+       so they carry no label and are never used. `asset_vs_market` discloses
+       `asset_source`, `asset_source_kind`, `asset_confidence`, the OM label
+       and every statement considered with why it was not used; the entry's
+       confidence is the weaker of the market base's and the statement's.
+       Because backsolve prices the curve the last resolution wrote, it
+       rebuilds the build in place (`physical_vacancy_build_repriced`) when it
+       adds such evidence: the recorded market base and supply are kept, the
+       gap and an analyst base are re-read, and the curve and entry are
+       rewritten. An analyst vacancy, a rebased or edited curve, or a
+       canonical without a recorded build is never rebuilt, and the record
+       says why.
+    2. **The analyst's submarket benchmark is the market base** (analyst >
+       market). `property_summary.market_vacancy_benchmark` (`rate`, `as_of`,
+       `source`; `--submarket-vacancy`, `--submarket-vacancy-as-of`,
+       `--submarket-vacancy-source`, or the `describe_deal` fields
+       `submarket_vacancy*`) becomes the base with level `analyst`, source
+       `analyst`, its as-of and source note, and the feeder value it outranks
+       disclosed (`outranked`). The T12 gap is measured against it. It lives
+       in the canonical, so every re-resolution (and backsolve's) reads it
+       again: the base does not drift. A malformed benchmark is ignored and
+       noted by the resolver, refused by ingest and pricing. It is still
+       listed as vacancy evidence, never a floor.
+    3. **The value-add vintage floor applies after the renovations.** On a
+       value-add strategy with renovation programs the floor applies only
+       from the month after the last renovation (`last_renovation_month`,
+       the month the stabilized-year cash-on-cash basis is measured after):
+       during the renovation window the programs and the build govern. Floors
+       stay per segment: a segment that ends in the window is kept, one across
+       its end is split at the last renovation month (`split_at`). The
+       guardrail findings and record carry `floor_applies_from` and the
+       `renovation_window`; the floor (`Floor.applies_from`), the build's
+       `floor` record, the vacancy evidence summary (`floor_window`) and
+       backsolve's `physical_vacancy_floor_applies_from` disclose it.
+       Stabilized deals and value-add deals without programs are unchanged.
+       In the library deal c's renovations run 2027-01 to 2028-09: its
+       renovation months keep the build's 8.0% -> 7.0% glide and the 8% floor
+       binds from 2028-10, so the priced hold-average vacancy falls 8.00% ->
+       7.82%; its price is unchanged at $13,566,209.46 because it is priced
+       on the first stabilized year, which is after the renovations. Its
+       levered IRR at that price moves 9.77% -> 9.75%: the higher year-1 NOI
+       raises the entry-anchored exit cap (decision e). Deals a and d and the
+       sample deal keep their prices.
 
 Three decisions on deferred maintenance and PCA evidence:
 
