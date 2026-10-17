@@ -341,7 +341,10 @@ supply_demand_root = "/path/to/plat-supply-demand"
 ```
 
 Relative paths resolve against the file's folder. Environment variables win
-over the file. Reading it needs Python 3.11+ (or the `tomli` package).
+over the file. On Windows the file lives under `%USERPROFILE%\.config\plat-underwriting\`;
+write paths in single quotes (`'C:\feeds\ms'`) or with forward slashes
+(`"C:/feeds/ms"`), because a backslash inside double quotes is an escape in
+TOML. On Python 3.10 the `tomli` package (installed as a dependency) reads it.
 
 **Check the setup for a geography** before an ingest:
 
