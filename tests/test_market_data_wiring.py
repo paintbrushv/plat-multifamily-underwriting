@@ -62,12 +62,27 @@ def test_user_config_path_honors_override_xdg_and_home(tmp_path):
     assert user_config_path({}) is None
 
 
+def test_user_config_path_falls_back_to_userprofile_on_windows(tmp_path):
+    # Windows sets USERPROFILE, usually not HOME; the config must still be found.
+    assert user_config_path({"USERPROFILE": str(tmp_path)}) == tmp_path / ".config" / "plat-underwriting" / "config.toml"
+    assert user_config_path({"HOME": str(tmp_path / "h"), "USERPROFILE": str(tmp_path)}) == (
+        tmp_path / "h" / ".config" / "plat-underwriting" / "config.toml")
+
+
+def test_windows_backslash_path_in_double_quotes_reports_a_fix(tmp_path):
+    # "C:\Users\..." in a TOML basic string is an invalid escape; say how to write it.
+    path = _config(tmp_path, '[market_data]\nmarket_study_root = "C:\\Users\\analyst\\feeds"\n')
+    cfg = load_user_config({"PLAT_UNDERWRITING_CONFIG": str(path)})
+    assert cfg.exists and cfg.market_data == {}
+    assert cfg.error and "single quotes" in cfg.error and "forward slashes" in cfg.error
+
+
 def test_user_config_supplies_feeder_roots_below_the_environment(tmp_path):
     ms, sd = tmp_path / "feeds" / "ms", tmp_path / "feeds" / "sd"
     ms.mkdir(parents=True)
     sd.mkdir(parents=True)
     path = _config(tmp_path, '[market_data]\nmarket_study_root = "../feeds/ms"\n'
-                             f'supply_demand_root = "{sd}"\n')
+                             f'supply_demand_root = "{sd.as_posix()}"\n')
     env = {"PLAT_UNDERWRITING_CONFIG": str(path)}
     found = feeder_root("market_study", env, siblings=tmp_path / "nowhere")
     assert found.path == ms.resolve()  # relative to the config file's folder
@@ -91,7 +106,7 @@ def test_unreadable_user_config_is_reported_not_raised(tmp_path):
 def test_default_registry_reads_provider_order_and_roots_from_the_user_config(tmp_path):
     ms = tmp_path / "ms"
     write_costar_submarket(ms, f"{METRO}_north", _rows(f"{METRO}_north"))
-    path = _config(tmp_path, f'[market_data]\nproviders = ["plat_market_study_agent"]\nmarket_study_root = "{ms}"\n')
+    path = _config(tmp_path, f'[market_data]\nproviders = ["plat_market_study_agent"]\nmarket_study_root = "{ms.as_posix()}"\n')
     registry = default_registry(env={"PLAT_UNDERWRITING_CONFIG": str(path)})
     assert registry.names == ["plat_market_study_agent"]
     assert registry.providers[0].root == ms.resolve()
