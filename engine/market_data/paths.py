@@ -73,14 +73,18 @@ class UserConfig:
 
 
 def user_config_path(env: Mapping[str, str] | None = None) -> Path | None:
-    """The config file path for ``env`` (None when neither HOME nor an override is set)."""
+    """The config file path for ``env`` (None when no HOME, USERPROFILE or override is set).
+
+    Windows usually sets USERPROFILE rather than HOME, so it is the fallback.
+    """
     env = os.environ if env is None else env
     if env.get(CONFIG_ENV):
         return Path(env[CONFIG_ENV]).expanduser()
     if env.get("XDG_CONFIG_HOME"):
         return Path(env["XDG_CONFIG_HOME"]).expanduser() / "plat-underwriting" / "config.toml"
-    if env.get("HOME"):
-        return Path(env["HOME"]) / ".config" / "plat-underwriting" / "config.toml"
+    home = env.get("HOME") or env.get("USERPROFILE")
+    if home:
+        return Path(home) / ".config" / "plat-underwriting" / "config.toml"
     return None
 
 
@@ -102,7 +106,12 @@ def load_user_config(env: Mapping[str, str] | None = None) -> UserConfig:
     except ModuleNotFoundError:  # pragma: no cover - Python 3.10 without tomli
         return UserConfig(path, True, {}, "reading the config needs Python 3.11+ or the tomli package")
     except Exception as exc:  # noqa: BLE001 - a bad config is reported, not raised
-        return UserConfig(path, True, {}, f"unreadable config: {type(exc).__name__}: {exc}")
+        error = f"unreadable config: {type(exc).__name__}: {exc}"
+        if "\\" in path.read_text(encoding="utf-8", errors="replace"):
+            error += (". A backslash inside double quotes starts an escape in TOML: write Windows "
+                      "paths in single quotes ('C:\\feeds\\ms') or with forward slashes ("
+                      "\"C:/feeds/ms\")")
+        return UserConfig(path, True, {}, error)
     section = data.get(CONFIG_SECTION)
     if section is None:
         return UserConfig(path, True, {})
